@@ -1,0 +1,94 @@
+# Byte-compiled / optimized / DLL files
+**__pycache__**/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# Data files (large)
+*.h5ad
+*.pkl
+*.tar.gz
+data/
+
+# Keep gene set files needed for enrichment tests
+!go_bp_genesets_*.rds
+
+# Large outputs from workflow tests
+WORKFLOW_*_TEST/
+*.log
+*.err
+
+# Large generated files (keep small ones)
+elbow_plot.png
+gene_associations.csv
+
+# Notebooks (except tutorials)
+notebooks/
+!docs/tutorials/*.ipynb
+
+# Sphinx build output
+docs/_build/
+
+# Private datasets
+src/peach/datasets/
+
+# FRGeom-related (private experimental)
+frgeom_*/
+helsinki_frgeom_*/
+FRGeom_*.py
+test_FRGeom_*.py
+validate_frgeom_*.py
+
+# Development test files
+test_end_to_end_*.py
+test_hsc_*.py
+test_workflow_*.py
+analysis_hsc_*.py
+
+# Results and logs directories
+logs/
+results/
+
+# Archived files
+archived_dev_scripts/
+archived_docs/
+
+# Coverage reports
+.coverage
+htmlcov/
+coverage.xml
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# ruff
+.ruff_cache/

@@ -1,0 +1,24 @@
+/* Custom CSS for PEACH documentation */
+
+/* Improve code block readability */
+.highlight {
+    border-radius: 4px;
+}
+
+/* API reference styling */
+.sig-name {
+    font-weight: 600;
+}
+
+/* Hide notebook text outputs (tensor prints, verbose logs, etc.) but keep images/plots */
+.nboutput .output_area .output_text,
+.nboutput .output_area .output_stream,
+.nboutput .output_area pre {
+    display: none;
+}
+
+/* Hide stderr and Plotly "cannot be displayed" warnings */
+.output_area .stderr,
+.output_area .admonition.warning {
+    display: none;
+}

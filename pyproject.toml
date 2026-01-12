@@ -1,0 +1,197 @@
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[project]
+name = "peach"
+version = "0.3.0"
+description = "Archetypal analysis for single-cell genomics"
+readme = "README.md"
+license = {file = "LICENSE"}
+maintainers = [
+    {name = "Alexander Honkala", email = "xhonkala@gmail.com"},
+]
+authors = [
+    {name = "Alexander Honkala", email = "xhonkala@gmail.com"},
+]
+requires-python = ">=3.10"
+keywords = [
+    "single-cell",
+    "bioinformatics",
+    "archetypal-analysis",
+    "deep-learning",
+    "scverse",
+    "scanpy",
+    "anndata",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    # Core scVerse ecosystem
+    "anndata>=0.8.0",
+    "scanpy>=1.9.0",
+    "cellrank>=2.0.0",  # Trajectory analysis
+
+    # Machine learning
+    "torch>=2.0.0",
+    "scikit-learn>=1.0.0",
+
+    # Data manipulation
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "pydantic>=2.0.0",  # Type validation
+
+    # Visualization
+    "plotly>=5.0.0",
+
+    # Statistical analysis
+    "scipy>=1.10.0",
+    "statsmodels>=0.14.0",
+
+    # Pathway analysis
+    "requests>=2.25.0",  # For MSigDB downloads
+
+    # Utilities
+    "tqdm>=4.60.0",  # Progress bars
+    "session-info2",
+]
+
+optional-dependencies.dev = [
+    "pre-commit>=3.0.0",
+    "twine>=4.0.2",
+]
+
+optional-dependencies.test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "coverage>=7.0.0",
+]
+
+optional-dependencies.doc = [
+    "sphinx>=7.0.0",
+    "sphinx-book-theme>=1.0.0",
+    "sphinx-autodoc-typehints>=1.20.0",
+    "sphinx-copybutton",
+    "sphinx-design",
+    "sphinxext-opengraph",
+    "sphinxcontrib-bibtex>=2.5.0",
+    "nbsphinx>=0.9.0",
+    "myst-parser>=2.0.0",
+    "docutils>=0.8,!=0.18.*,!=0.19.*",
+    "ipykernel",
+    "ipython",
+    "pandoc",
+]
+
+urls.Documentation = "https://scpeach.readthedocs.io/"
+urls.Homepage = "https://github.com/xhonkala/PEACH"
+urls.Repository = "https://github.com/xhonkala/PEACH"
+urls."Bug Tracker" = "https://github.com/xhonkala/PEACH/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/peach"]
+
+[tool.hatch.envs.default]
+installer = "uv"
+features = ["dev"]
+
+[tool.hatch.envs.docs]
+features = ["doc"]
+scripts.build = "sphinx-build -M html docs docs/_build -W {args}"
+scripts.open = "python -m webbrowser -t docs/_build/html/index.html"
+scripts.clean = "git clean -fdX -- {args:docs}"
+
+# Test the lowest and highest supported Python versions with normal deps
+[[tool.hatch.envs.hatch-test.matrix]]
+deps = ["stable"]
+python = ["3.10", "3.13"]
+
+# Test the newest supported Python version also with pre-release deps
+[[tool.hatch.envs.hatch-test.matrix]]
+deps = ["pre"]
+python = ["3.13"]
+
+[tool.hatch.envs.hatch-test]
+features = ["test"]
+
+[tool.hatch.envs.hatch-test.overrides]
+# If the matrix variable `deps` is set to "pre",
+# set the environment variable `UV_PRERELEASE` to "allow".
+matrix.deps.env-vars = [
+    {key = "UV_PRERELEASE", value = "allow", if = ["pre"]},
+]
+
+[tool.ruff]
+line-length = 120
+src = ["src"]
+extend-include = ["*.ipynb"]
+
+format.docstring-code-format = true
+
+lint.select = [
+    "B",      # flake8-bugbear
+    "BLE",    # flake8-blind-except
+    "C4",     # flake8-comprehensions
+    "D",      # pydocstyle
+    "E",      # Error detected by Pycodestyle
+    "F",      # Errors detected by Pyflakes
+    "I",      # isort
+    "RUF100", # Report unused noqa directives
+    "TID",    # flake8-tidy-imports
+    "UP",     # pyupgrade
+    "W",      # Warning detected by Pycodestyle
+]
+lint.ignore = [
+    "B008", # Errors from function calls in argument defaults. These are fine when the result is immutable.
+    "D100", # Missing docstring in public module
+    "D104", # Missing docstring in public package
+    "D105", # __magic__ methods are often self-explanatory, allow missing docstrings
+    "D107", # Missing docstring in __init__
+    # Disable one in each pair of mutually incompatible rules
+    "D203", # We don't want a blank line before a class docstring
+    "D213", # <> We want docstrings to start immediately after the opening triple quote
+    "D400", # first line should end with a period [Bug: doesn't work with single-line docstrings]
+    "D401", # First line should be in imperative mood; try rephrasing
+    "E501", # line too long -> we accept long comment lines; formatter gets rid of long code lines
+    "E731", # Do not assign a lambda expression, use a def -> lambda expression assignments are convenient
+    "E741", # allow I, O, l as variable names -> I is the identity matrix
+]
+lint.per-file-ignores."*/__init__.py" = ["F401"]
+lint.per-file-ignores."docs/*" = ["I"]
+lint.per-file-ignores."tests/*" = ["D"]
+lint.pydocstyle.convention = "numpy"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+addopts = [
+    "--import-mode=importlib", # allow using test files with same name
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+filterwarnings = [
+    "ignore::RuntimeWarning:numpy",
+    "ignore::PendingDeprecationWarning:numpy",
+    "ignore::DeprecationWarning:anndata",
+    "ignore::FutureWarning:anndata",
+]
+
+[tool.coverage.run]
+source = ["peach"]
+omit = [
+    "**/test_*.py",
+]

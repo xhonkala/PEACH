@@ -1,0 +1,43 @@
+name: peach
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  # Python
+  - python>=3.10,<3.14
+
+  # Core scientific stack
+  - numpy>=1.24
+  - scipy>=1.10
+  - pandas>=2.0
+  - scikit-learn>=1.0
+
+  # scverse ecosystem
+  - anndata>=0.8
+  - scanpy>=1.9
+
+  # Deep learning
+  - pytorch>=2.0
+
+  # Visualization
+  - matplotlib>=3.5
+  - plotly>=5.0
+
+  # Statistics
+  - statsmodels>=0.14
+
+  # Jupyter (optional, for tutorials)
+  - jupyter
+  - ipykernel
+
+  # Development
+  - pip
+
+  # Install peach and remaining deps via pip
+  - pip:
+      - pydantic>=2.0
+      - cellrank>=2.0
+      - tqdm>=4.60
+      - requests>=2.25
+      - session-info2
