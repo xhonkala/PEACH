@@ -38,8 +38,8 @@ classifiers = [
 ]
 dependencies = [
     # Core scVerse ecosystem
-    "anndata>=0.8.0",
-    "scanpy>=1.9.0",
+    "anndata>=0.10.0",
+    "scanpy>=1.10.0",  # 1.10+ has Python 3.11+ compatible deps
     "cellrank>=2.0.0",  # Trajectory analysis
 
     # Machine learning
