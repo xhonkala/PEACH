@@ -83,7 +83,8 @@ def test_pathway_analysis_workflow(small_adata):
             pathway_results = pc.tl.pathway_associations(
                 small_adata,
                 pathway_obsm_key='pathway_scores',
-                fdr_scope='global'
+                fdr_scope='global',
+                min_cells=3  # Lower threshold for small test fixture
             )
             
             assert len(pathway_results) > 0
