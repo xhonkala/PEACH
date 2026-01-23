@@ -241,9 +241,7 @@ def train_vae(
     data_loader: torch.utils.data.DataLoader,
     optimizer: torch.optim.Optimizer,
     n_epochs: int,
-    device: str = "cuda"
-    if torch.cuda.is_available()
-    else ("mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu"),
+    device: str = "cpu",
     save_path: str = None,
     archetypal_weight: float = None,  # Use model's configured weight if None
     kld_weight: float = None,  # Use model's configured weight if None
@@ -334,26 +332,30 @@ def train_vae(
         optimizer, mode="min", factor=lr_factor, patience=lr_patience
     )
 
-    # DEFENSIVE: Handle MPS (Apple Silicon GPU) with fallback to CPU
-    # MPS support in PyTorch can be unstable, especially with certain operations
-    if device == "auto" or device == "mps":
+    # DEFENSIVE: Validate device availability
+    if device == "mps":
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             try:
                 # Test MPS with dummy operation
                 test_tensor = torch.zeros(1).to("mps")
                 del test_tensor  # Clean up
-                device = "mps"
                 print("[INFO] Using MPS (Apple Silicon GPU)")
             except RuntimeError as e:
-                print(f"[WARNING] MPS initialization failed: {e}")
-                print("[INFO] Falling back to CPU for reliability")
-                print("[TIP] You can explicitly set device='cpu' to avoid this warning")
-                device = "cpu"
+                raise RuntimeError(
+                    f"MPS device requested but initialization failed: {e}. "
+                    "Use device='cpu' instead."
+                )
         else:
-            device = "cpu"
-    elif device == "cuda" and not torch.cuda.is_available():
-        print("[WARNING] CUDA not available, falling back to CPU")
-        device = "cpu"
+            raise RuntimeError(
+                "MPS device requested but not available. "
+                "Use device='cpu' instead."
+            )
+    elif device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA device requested but not available. "
+                "Use device='cpu' or device='mps' instead."
+            )
 
     model = model.to(device)
     tracker = MetricsTracker()

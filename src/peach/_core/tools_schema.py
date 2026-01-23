@@ -201,7 +201,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter("early_stopping_patience", ParamType.INTEGER, "Patience for early stopping", default=10),
             Parameter("seed", ParamType.INTEGER, "Random seed", default=42),
             Parameter(
-                "device", ParamType.STRING, "Computing device", default="auto", enum=["cpu", "cuda", "mps", "auto"]
+                "device", ParamType.STRING, "Computing device", default="cpu", enum=["cpu", "cuda", "mps"]
             ),
             # --- DATA SELECTION ---
             Parameter("layer", ParamType.STRING, "Expression layer to use", required=False, default=None),

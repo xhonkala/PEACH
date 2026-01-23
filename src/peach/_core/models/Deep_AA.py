@@ -345,6 +345,23 @@ class Deep_AA(VAE_Base):
 
         return reconstruction
 
+    def get_effective_archetypes(self) -> torch.Tensor:
+        """Return the archetypes as used for reconstruction.
+
+        If use_hidden_transform is True, returns the transformed archetypes.
+        Otherwise returns the raw learnable archetypes.
+
+        This ensures Y in the output matches what's used for A @ Y = arch_recons.
+
+        Returns
+        -------
+        torch.Tensor
+            Effective archetype positions [n_archetypes, input_dim].
+        """
+        if self.use_hidden_transform:
+            return self.archetype_transform(self.archetypes)
+        return self.archetypes
+
     def forward(self, input: torch.Tensor) -> dict[str, torch.Tensor]:
         """Complete archetypal forward pass.
 
@@ -367,7 +384,7 @@ class Deep_AA(VAE_Base):
             - ``mu`` : Coordinate mean [batch_size, n_archetypes]
             - ``log_var`` : Coordinate log variance [batch_size, n_archetypes]
             - ``z`` : Archetypal coordinates (= A matrix) [batch_size, n_archetypes]
-            - ``archetypes`` : Archetype positions (= Y matrix) [n_archetypes, input_dim]
+            - ``archetypes`` : Effective archetype positions (= Y matrix) [n_archetypes, input_dim]
             - ``input`` : Original input [batch_size, input_dim]
 
             **Aliases (for compatibility):**
@@ -375,7 +392,8 @@ class Deep_AA(VAE_Base):
             - ``recons`` : Same as arch_recons
             - ``archetypal_coordinates`` : Same as z
             - ``A`` : Same as z
-            - ``Y`` : Same as archetypes
+            - ``Y`` : Same as archetypes (effective, after transform if applicable)
+            - ``raw_archetypes`` : Learnable parameter (before transform)
 
         Examples
         --------
@@ -397,6 +415,10 @@ class Deep_AA(VAE_Base):
         # SINGLE PATH: Archetypal reconstruction only
         arch_recons = self.decode(z)
 
+        # Get effective archetypes (transformed if use_hidden_transform=True)
+        # This ensures A @ Y == arch_recons
+        effective_archetypes = self.get_effective_archetypes()
+
         # Return format compatible with existing pipeline
         return {
             # Primary outputs
@@ -404,13 +426,15 @@ class Deep_AA(VAE_Base):
             "mu": mu,
             "log_var": log_var,
             "z": z,  # Archetypal coordinates = A matrix
-            "archetypes": self.archetypes,
+            "archetypes": effective_archetypes,  # Y as used for reconstruction
             "input": input,
             # For legacy compatibility
             "recons": arch_recons,
             "archetypal_coordinates": z,
             "A": z,  # z IS the A matrix
-            "Y": self.archetypes,
+            "Y": effective_archetypes,  # Y as used for reconstruction
+            # Raw archetypes (learnable parameters) for inspection
+            "raw_archetypes": self.archetypes,
         }
 
     # ============================================================================
@@ -418,16 +442,28 @@ class Deep_AA(VAE_Base):
     # ============================================================================
 
     def archetypal_diversity_loss(self) -> torch.Tensor:
-        """Encourage diversity among archetypes (from Deep_2)."""
-        n_archetypes = self.archetypes.shape[0]
-        diversity_loss = 0.0
+        """Encourage diversity among archetypes.
 
-        for i in range(n_archetypes):
-            for j in range(i + 1, n_archetypes):
-                dist = torch.norm(self.archetypes[i] - self.archetypes[j])
-                diversity_loss += torch.exp(-dist)
+        Vectorized implementation using broadcasting for GPU efficiency.
+        Penalizes archetypes that are too close together.
+        """
+        archetypes = self.archetypes
+        n_archetypes = archetypes.shape[0]
 
-        return diversity_loss / (n_archetypes * (n_archetypes - 1) / 2)
+        # Vectorized pairwise distances using broadcasting
+        # archetypes: (k, d) -> (k, 1, d) - (1, k, d) = (k, k, d)
+        diff = archetypes.unsqueeze(0) - archetypes.unsqueeze(1)
+        pairwise_dists = torch.norm(diff, dim=2)  # (k, k)
+
+        # Extract upper triangle (unique pairs, excluding diagonal)
+        upper_tri_mask = torch.triu(torch.ones_like(pairwise_dists, dtype=torch.bool), diagonal=1)
+        unique_dists = pairwise_dists[upper_tri_mask]
+
+        # Compute loss: sum of exp(-dist) for all pairs
+        diversity_loss = torch.exp(-unique_dists).sum()
+        n_pairs = n_archetypes * (n_archetypes - 1) / 2
+
+        return diversity_loss / n_pairs
 
     def archetypal_regularity_loss(self, z: torch.Tensor) -> torch.Tensor:
         """Encourage usage of all archetypes (from Deep_2)."""
@@ -437,40 +473,54 @@ class Deep_AA(VAE_Base):
         return regularity_loss
 
     def manifold_regularization_loss(self, input: torch.Tensor) -> torch.Tensor:
-        """Keep archetypes on data manifold (from Deep_2)."""
+        """Keep archetypes on data manifold.
+
+        Vectorized implementation for GPU efficiency.
+        """
+        archetypes = self.archetypes
         data_sample = input[: min(200, input.shape[0])]
         batch_size = data_sample.shape[0]
 
-        # Strategy 1: Nearest neighbor penalty
-        manifold_loss = 0.0
-        for i, archetype in enumerate(self.archetypes):
-            distances = torch.norm(data_sample - archetype.unsqueeze(0), dim=1)
-            min_distance = torch.min(distances)
-            manifold_loss += min_distance**2
+        # Strategy 1: Nearest neighbor penalty (VECTORIZED)
+        # data_sample: (n, d), archetypes: (k, d)
+        # Compute all pairwise distances: (n, d) - (k, d) via broadcasting
+        # data_sample.unsqueeze(1): (n, 1, d)
+        # archetypes.unsqueeze(0): (1, k, d)
+        # diff: (n, k, d) -> distances: (n, k)
+        diff = data_sample.unsqueeze(1) - archetypes.unsqueeze(0)
+        all_distances = torch.norm(diff, dim=2)  # (n, k)
 
-        # Strategy 2: Bounding box constraint
+        # Min distance from each archetype to any data point
+        min_distances = all_distances.min(dim=0)[0]  # (k,)
+        manifold_loss = (min_distances ** 2).sum()
+
+        # Strategy 2: Bounding box constraint (VECTORIZED)
         data_min = input.min(dim=0)[0]
         data_max = input.max(dim=0)[0]
         margin = 0.1 * (data_max - data_min)
         effective_min = data_min - margin
         effective_max = data_max + margin
 
-        bounding_loss = 0.0
-        for archetype in self.archetypes:
-            below_min = F.relu(effective_min - archetype)
-            above_max = F.relu(archetype - effective_max)
-            bounding_loss += below_min.sum() + above_max.sum()
+        # All archetypes at once: (k, d)
+        below_min = F.relu(effective_min.unsqueeze(0) - archetypes)  # (k, d)
+        above_max = F.relu(archetypes - effective_max.unsqueeze(0))  # (k, d)
+        bounding_loss = below_min.sum() + above_max.sum()
 
-        # Strategy 3: Data density proximity
-        density_loss = 0.0
+        # Strategy 3: Data density proximity (VECTORIZED)
+        density_loss = torch.tensor(0.0, device=archetypes.device)
         if batch_size > 50:
-            for archetype in self.archetypes:
-                distances = torch.norm(data_sample - archetype.unsqueeze(0), dim=1)
-                threshold = torch.median(distances) * 1.5
-                nearby_count = (distances < threshold).float().sum()
-                min_neighbors = max(1, batch_size * 0.05)
-                if nearby_count < min_neighbors:
-                    density_loss += (min_neighbors - nearby_count) ** 2
+            # Reuse all_distances from Strategy 1: (n, k)
+            # Compute median distance for each archetype
+            medians = all_distances.median(dim=0)[0]  # (k,)
+            thresholds = medians * 1.5  # (k,)
+
+            # Count nearby points for each archetype
+            nearby_counts = (all_distances < thresholds.unsqueeze(0)).float().sum(dim=0)  # (k,)
+            min_neighbors = max(1, batch_size * 0.05)
+
+            # Penalize archetypes with too few neighbors
+            shortfall = F.relu(min_neighbors - nearby_counts)
+            density_loss = (shortfall ** 2).sum()
 
         # Combine all strategies
         total_manifold_loss = manifold_loss + 0.5 * bounding_loss + 0.1 * density_loss
@@ -618,16 +668,15 @@ class Deep_AA(VAE_Base):
             # Coordinate sparsity
             active_archetypes_per_sample = (z > 0.01).sum(dim=1).float().mean()
 
-            # Manifold quality metrics
+            # Manifold quality metrics (VECTORIZED - no numpy, stays on GPU)
             data_sample = input[: min(100, input.shape[0])]
-            archetype_data_distances = []
-            for archetype in self.archetypes:
-                distances = torch.norm(data_sample - archetype.unsqueeze(0), dim=1)
-                min_dist = torch.min(distances).item()
-                archetype_data_distances.append(min_dist)
-
-            mean_archetype_data_distance = np.mean(archetype_data_distances)
-            max_archetype_data_distance = np.max(archetype_data_distances)
+            # Compute all pairwise distances: (n, k)
+            diff = data_sample.unsqueeze(1) - self.archetypes.unsqueeze(0)
+            all_distances = torch.norm(diff, dim=2)
+            # Min distance from each archetype to data
+            min_dists_per_archetype = all_distances.min(dim=0)[0]  # (k,)
+            mean_archetype_data_distance = min_dists_per_archetype.mean().item()
+            max_archetype_data_distance = min_dists_per_archetype.max().item()
 
         # Track loss for convergence
         if self.previous_loss is None:

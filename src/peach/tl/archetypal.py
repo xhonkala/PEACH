@@ -42,7 +42,7 @@ def train_archetypal(
     model_config: dict[str, Any] | None = None,
     optimizer_config: dict[str, Any] | None = None,
     # Parameters from _core.train_vae
-    device: str = "auto",
+    device: str = "cpu",
     save_path: str = None,
     archetypal_weight: float = None,
     kld_weight: float = None,
@@ -119,8 +119,8 @@ def train_archetypal(
         - ``weight_decay`` : float - L2 regularization, default 0.0
         - ``betas`` : tuple[float, float] - Adam momentum parameters
 
-    device : str, default: "auto"
-        Compute device for training. One of "auto", "cpu", "cuda", "mps".
+    device : str, default: "cpu"
+        Compute device for training. One of "cpu", "cuda", "mps".
     save_path : str | None, default: None
         Path to save model checkpoints during training.
     archetypal_weight : float | None, default: None
@@ -339,15 +339,6 @@ def train_archetypal(
             f"n_archetypes ({n_archetypes}) cannot exceed PCA dimensions ({pca_shape[1]}). "
             f"Reduce n_archetypes or increase PCA components."
         )
-
-    # Parameter preprocessing
-    if device == "auto":
-        if torch.cuda.is_available():
-            device = "cuda"
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
 
     # Default configurations - use proven working setup
     # Use all available PCA components (or user-specified input_dim)
@@ -607,7 +598,7 @@ def extract_archetype_weights(
     pca_key: str = "X_pca",
     weights_key: str = "cell_archetype_weights",
     batch_size: int = 256,
-    device: str = "auto",
+    device: str = "cpu",
     verbose: bool = True,
 ) -> np.ndarray:
     """
@@ -628,8 +619,8 @@ def extract_archetype_weights(
         Key to store weights in adata.obsm
     batch_size : int, default: 256
         Batch size for processing
-    device : str, default: "auto"
-        Device for computation ('auto', 'cpu', or 'cuda')
+    device : str, default: "cpu"
+        Device for computation ('cpu', 'cuda', or 'mps')
     verbose : bool, default: True
         Whether to print progress
 
@@ -650,9 +641,7 @@ def extract_archetype_weights(
     >>> # Weights are now in adata.obsm['cell_archetype_weights']
     >>> print(adata.obsm["cell_archetype_weights"].shape)
     """
-    # Handle device
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Convert device string to torch.device
     device = torch.device(device)
 
     # Get model

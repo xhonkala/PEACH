@@ -399,7 +399,7 @@ FUNCTION_PARAMS = {
         "inflation_factor": ("float", 1.5),  # PCHA inflation, 1.2-2.0 recommended
         "model_config": ("dict|None", None),  # Advanced: {archetypal_weight, kld_weight, ...}
         "optimizer_config": ("dict|None", None),  # {lr, weight_decay}
-        "device": ("str", "auto"),  # "cpu", "cuda", "mps", "auto"
+        "device": ("str", "cpu"),  # "cpu", "cuda", "mps"
         "save_path": ("str|None", None),
         "archetypal_weight": ("float|None", None),  # Default 1.0
         "kld_weight": ("float|None", None),  # Default 0.0 (non-zero hurts R²)
@@ -462,7 +462,7 @@ FUNCTION_PARAMS = {
         "pca_key": ("str", "X_pca"),
         "weights_key": ("str", "cell_archetype_weights"),
         "batch_size": ("int", 256),
-        "device": ("str", "auto"),
+        "device": ("str", "cpu"),  # "cpu", "cuda", "mps"
         "verbose": ("bool", True),
     },
     "tl.gene_associations": {
