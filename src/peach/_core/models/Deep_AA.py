@@ -54,6 +54,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .VAE_Base import VAE_Base
+from ..utils.metrics import calculate_archetype_r2
 
 
 class Deep_AA(VAE_Base):
@@ -655,9 +656,7 @@ class Deep_AA(VAE_Base):
             rmse = torch.sqrt(F.mse_loss(arch_recons, input))
 
             # Archetype R²
-            ss_res = torch.sum((input - arch_recons) ** 2)
-            ss_tot = torch.sum((input - input.mean()) ** 2)
-            archetype_r2 = 1 - (ss_res / ss_tot.clamp(min=1e-8))
+            archetype_r2 = calculate_archetype_r2(arch_recons, input)
 
             # Archetype usage statistics
             archetype_usage = z.mean(dim=0)
@@ -1016,9 +1015,7 @@ class Deep_AA(VAE_Base):
                 with torch.no_grad():
                     outputs = self(X_sample)
                     arch_loss = torch.norm(outputs["arch_recons"] - X_sample, p="fro") ** 2 / X_sample.numel()
-                    archetype_r2 = 1 - torch.sum((X_sample - outputs["arch_recons"]) ** 2) / torch.sum(
-                        (X_sample - X_sample.mean()) ** 2
-                    )
+                    archetype_r2 = calculate_archetype_r2(outputs["arch_recons"], X_sample)
 
                 # Check positioning
                 data_center = X_sample.mean(dim=0)

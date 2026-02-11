@@ -472,8 +472,8 @@ def calculate_archetype_r2(reconstructions: torch.Tensor, original: torch.Tensor
     # Calculate sum of squared residuals (Frobenius norm squared)
     ss_res = torch.sum((original - reconstructions) ** 2)
 
-    # Calculate total sum of squares (variance around mean)
-    ss_tot = torch.sum((original - original.mean()) ** 2)
+    # Calculate total sum of squares (variance around per-feature mean)
+    ss_tot = torch.sum((original - original.mean(dim=0)) ** 2)
 
     # Calculate R² with numerical stability
     archetype_r2 = 1 - (ss_res / ss_tot.clamp(min=1e-8))
