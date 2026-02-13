@@ -224,11 +224,13 @@ def calculate_epoch_metrics(loss_dict: dict[str, torch.Tensor]) -> dict[str, flo
     scalar_metrics = [
         "loss",
         "archetypal_loss",
+        "kld_loss",
+        "reconstruction_loss",
         "KLD",
         "archetype_r2",
         "rmse",
         "loss_delta",
-        # NEW STABILITY METRICS (replace old ones)
+        # STABILITY METRICS
         "archetype_drift_mean",
         "archetype_drift_max",
         "archetype_drift_std",
@@ -242,6 +244,12 @@ def calculate_epoch_metrics(loss_dict: dict[str, torch.Tensor]) -> dict[str, flo
         "A_negative_fraction",
         "B_sum_error",
         "B_negative_fraction",
+        # ARCHETYPE TRANSFORM METRICS
+        "archetype_transform_grad_norm",
+        "archetype_transform_grad_mean",
+        "archetype_transform_mean",
+        "archetype_transform_std",
+        "archetype_transform_norm",
     ]
 
     for key in scalar_metrics:

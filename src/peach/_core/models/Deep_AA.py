@@ -76,11 +76,11 @@ class Deep_AA(VAE_Base):
     hidden_dims : list[int] | None, default: None
         Hidden layer sizes. Default: [128, 64, 32].
 
-    archetypal_weight : float, default: 1.0
+    archetypal_weight : float, default: 0.9
         Weight for archetypal reconstruction loss.
-        **Recommended: Keep at 1.0** (proven optimal).
-    kld_weight : float, default: 0.0
-        Weight for KL divergence. **Warning: Hurts performance**.
+    kld_weight : float, default: 0.1
+        Weight for KL divergence. Regularizes encoder variance to
+        prevent posterior drift during extended training.
     diversity_weight : float, default: 0.0
         Weight for archetype diversity. **Warning: Hurts performance**.
     regularity_weight : float, default: 0.0
@@ -147,8 +147,8 @@ class Deep_AA(VAE_Base):
         n_archetypes: int,
         latent_dim: int = None,
         hidden_dims: list[int] = None,
-        archetypal_weight: float = 1.0,
-        kld_weight: float = 0.0,
+        archetypal_weight: float = 0.9,
+        kld_weight: float = 0.1,
         diversity_weight: float = 0.0,
         regularity_weight: float = 0.0,
         sparsity_weight: float = 0.0,

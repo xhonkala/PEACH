@@ -53,7 +53,7 @@ class TrainingHistory(BaseModel):
     - Stability metrics: require track_stability=True
     - Constraint metrics: require validate_constraints=True
     - Validation metrics: require early_stopping=True
-    - fc_Y metrics: Deep_AA model-specific
+    - archetype_transform metrics: Deep_AA model-specific
 
     Core Metrics (almost always present):
         loss, archetypal_loss, archetype_r2, rmse
@@ -94,12 +94,12 @@ class TrainingHistory(BaseModel):
     B_sum_error: list[float] | None = None
     B_negative_fraction: list[float] | None = None
 
-    # fc_Y gradient tracking (Deep_AA specific)
-    fc_Y_grad_norm: list[float] | None = None
-    fc_Y_grad_mean: list[float] | None = None
-    fc_Y_mean: list[float] | None = None
-    fc_Y_std: list[float] | None = None
-    fc_Y_norm: list[float] | None = None
+    # Archetype transform tracking (Deep_AA specific)
+    archetype_transform_grad_norm: list[float] | None = None
+    archetype_transform_grad_mean: list[float] | None = None
+    archetype_transform_mean: list[float] | None = None
+    archetype_transform_std: list[float] | None = None
+    archetype_transform_norm: list[float] | None = None
 
     # Validation metrics (early_stopping=True)
     val_loss: list[float] | None = None
@@ -1809,9 +1809,9 @@ class DeepAAConfig(BaseModel):
     latent_dim: int | None = Field(default=None, description="Latent dim (defaults to n_archetypes)")
     hidden_dims: list[int] | None = Field(default=None, description="Hidden layer sizes")
 
-    # Loss weights (minimalist defaults proven optimal)
-    archetypal_weight: float = Field(default=1.0, ge=0)
-    kld_weight: float = Field(default=0.0, ge=0)
+    # Loss weights
+    archetypal_weight: float = Field(default=0.9, ge=0)
+    kld_weight: float = Field(default=0.1, ge=0)
     diversity_weight: float = Field(default=0.0, ge=0)
     regularity_weight: float = Field(default=0.0, ge=0)
     sparsity_weight: float = Field(default=0.0, ge=0)

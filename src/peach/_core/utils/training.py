@@ -73,7 +73,7 @@ METRICS AND MONITORING:
  Stability Metrics: Archetype drift (mean/max/std), stability scores, position variance
  Constraint Metrics: Violation rates, sum errors, constraint satisfaction status
  Convergence Metrics: Loss delta, convergence rates, learning progress
- Model-Specific: fc_Y evolution tracking, gradient monitoring, parameter analysis
+ Model-Specific: archetype_transform evolution tracking, gradient monitoring, parameter analysis
 
 EXTERNAL DEPENDENCIES:
  From .metrics: MetricsTracker, calculate_epoch_metrics - Performance tracking and aggregation
@@ -478,16 +478,23 @@ def train_vae(
                 else:
                     print("[ERROR] Archetype gradients are None!")
 
-            # Check fc_Y gradients AFTER backward pass
-            if hasattr(model, "fc_Y") and model.fc_Y.grad is not None:
-                fc_Y_grad_norm = torch.norm(model.fc_Y.grad).item()
-                fc_Y_grad_mean = torch.mean(torch.abs(model.fc_Y.grad)).item()
-                # Add gradient metrics to loss_dict
-                loss_dict["fc_Y_grad_norm"] = fc_Y_grad_norm
-                loss_dict["fc_Y_grad_mean"] = fc_Y_grad_mean
+            # Check archetype_transform gradients AFTER backward pass
+            if hasattr(model, "archetype_transform"):
+                transform_grads = [p.grad for p in model.archetype_transform.parameters() if p.grad is not None]
+                if transform_grads:
+                    loss_dict["archetype_transform_grad_norm"] = sum(torch.norm(g).item() for g in transform_grads)
+                    loss_dict["archetype_transform_grad_mean"] = sum(torch.mean(torch.abs(g)).item() for g in transform_grads) / len(transform_grads)
+                else:
+                    loss_dict["archetype_transform_grad_norm"] = 0.0
+                    loss_dict["archetype_transform_grad_mean"] = 0.0
+                # Track transform parameter stats
+                transform_params = torch.cat([p.detach().flatten() for p in model.archetype_transform.parameters()])
+                loss_dict["archetype_transform_mean"] = transform_params.mean().item()
+                loss_dict["archetype_transform_std"] = transform_params.std().item()
+                loss_dict["archetype_transform_norm"] = torch.norm(transform_params).item()
             else:
-                loss_dict["fc_Y_grad_norm"] = 0.0
-                loss_dict["fc_Y_grad_mean"] = 0.0
+                loss_dict["archetype_transform_grad_norm"] = 0.0
+                loss_dict["archetype_transform_grad_mean"] = 0.0
 
             optimizer.step()
 
@@ -505,7 +512,7 @@ def train_vae(
                 k for k in epoch_loss_dicts[0].keys() if isinstance(epoch_loss_dicts[0][k], (int, float, torch.Tensor))
             ]
 
-            # Also include boolean metrics (like fc_Y_requires_grad) without averaging
+            # Also include boolean metrics without averaging
             boolean_keys = [k for k in epoch_loss_dicts[0].keys() if isinstance(epoch_loss_dicts[0][k], bool)]
 
             # Process numeric keys (average across batches)
@@ -706,15 +713,11 @@ def train_vae(
             if "archetype_r2" in epoch_aggregated_loss:
                 print(f"Archetype R²: {epoch_aggregated_loss['archetype_r2']:.4f}")
 
-            # Print fc_Y monitoring metrics
-            if "fc_Y_mean" in epoch_aggregated_loss:
-                print(f"fc_Y mean: {epoch_aggregated_loss['fc_Y_mean']:.4f}")
-            if "fc_Y_std" in epoch_aggregated_loss:
-                print(f"fc_Y std: {epoch_aggregated_loss['fc_Y_std']:.4f}")
-            if "fc_Y_norm" in epoch_aggregated_loss:
-                print(f"fc_Y norm: {epoch_aggregated_loss['fc_Y_norm']:.4f}")
-            if "fc_Y_grad_norm" in epoch_aggregated_loss:
-                print(f"fc_Y grad norm: {epoch_aggregated_loss['fc_Y_grad_norm']:.6f}")
+            # Print archetype transform monitoring metrics
+            if "archetype_transform_grad_norm" in epoch_aggregated_loss:
+                print(f"Archetype transform grad norm: {epoch_aggregated_loss['archetype_transform_grad_norm']:.6f}")
+            if "archetype_transform_norm" in epoch_aggregated_loss:
+                print(f"Archetype transform param norm: {epoch_aggregated_loss['archetype_transform_norm']:.4f}")
 
             # Print constraint validation
             if validate_constraints and "constraints_satisfied" in epoch_aggregated_loss:
@@ -782,25 +785,25 @@ def train_vae(
             values = valid_history[metric_name]
             print(f"  {metric_name}: {values[-1]:.4f} (range: {min(values):.4f} - {max(values):.4f})")
 
-    # Print fc_Y evolution summary
-    print("\nfc_Y Learning Summary:")
-    fc_Y_metrics = ["fc_Y_mean", "fc_Y_std", "fc_Y_norm", "fc_Y_grad_norm"]
-    for metric_name in fc_Y_metrics:
+    # Print archetype transform evolution summary
+    print("\nArchetype Transform Summary:")
+    transform_metrics = ["archetype_transform_mean", "archetype_transform_std", "archetype_transform_norm", "archetype_transform_grad_norm"]
+    for metric_name in transform_metrics:
         if metric_name in valid_history and len(valid_history[metric_name]) > 0:
             values = valid_history[metric_name]
             print(f"  {metric_name}: {values[-1]:.6f} (range: {min(values):.6f} - {max(values):.6f})")
 
-    # Calculate fc_Y total change if we have enough data
-    if "fc_Y_mean" in valid_history and len(valid_history["fc_Y_mean"]) > 1:
-        initial_mean = valid_history["fc_Y_mean"][0]
-        final_mean = valid_history["fc_Y_mean"][-1]
+    # Check if archetype transform is learning
+    if "archetype_transform_mean" in valid_history and len(valid_history["archetype_transform_mean"]) > 1:
+        initial_mean = valid_history["archetype_transform_mean"][0]
+        final_mean = valid_history["archetype_transform_mean"][-1]
         mean_change = abs(final_mean - initial_mean)
-        print(f"  fc_Y mean change: {mean_change:.6f}")
+        print(f"  Transform mean change: {mean_change:.6f}")
 
         if mean_change > 0.01:
-            print("  [OK] fc_Y is definitely learning!")
+            print("  [OK] Archetype transform is learning!")
         else:
-            print("  [WARNING] fc_Y might not be learning enough")
+            print("  [WARNING] Archetype transform might not be learning enough")
 
     # Print final stability summary
     if track_stability:

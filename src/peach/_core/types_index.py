@@ -401,8 +401,8 @@ FUNCTION_PARAMS = {
         "optimizer_config": ("dict|None", None),  # {lr, weight_decay}
         "device": ("str", "cpu"),  # "cpu", "cuda", "mps"
         "save_path": ("str|None", None),
-        "archetypal_weight": ("float|None", None),  # Default 1.0
-        "kld_weight": ("float|None", None),  # Default 0.0 (non-zero hurts R²)
+        "archetypal_weight": ("float|None", None),  # Default 0.9
+        "kld_weight": ("float|None", None),  # Default 0.1 (regularizes encoder variance)
         "reconstruction_weight": ("float", 0.0),
         "vae_recon_weight": ("float", 0.0),
         "diversity_weight": ("float", 0.0),
@@ -817,7 +817,7 @@ USE_GET_FOR: set[str] = {
     "archetype_drift_mean",
     "archetype_drift_max",
     "constraint_violation_rate",
-    "fc_Y_grad_norm",
+    "archetype_transform_grad_norm",
     # DataFrame columns (may be absent depending on FDR settings)
     "fdr_pvalue",
     "significant",

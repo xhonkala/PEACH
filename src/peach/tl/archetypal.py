@@ -107,8 +107,8 @@ def train_archetypal(
     model_config : dict | None, default: None
         Additional model configuration parameters (for advanced users):
 
-        - ``archetypal_weight`` : float - Archetypal loss weight, default 1.0
-        - ``kld_weight`` : float - KL divergence weight, default 0.0
+        - ``archetypal_weight`` : float - Archetypal loss weight, default 0.9
+        - ``kld_weight`` : float - KL divergence weight, default 0.1
         - ``diversity_weight`` : float - Archetype diversity weight, default 0.05
         - ``use_barycentric`` : bool - Use softmax constraints, default True
 
@@ -349,8 +349,8 @@ def train_archetypal(
         "n_archetypes": n_archetypes,
         "latent_dim": n_archetypes,
         "hidden_dims": hidden_dims if hidden_dims is not None else [256, 128, 64],
-        "archetypal_weight": 1.0,
-        "kld_weight": 0.0,
+        "archetypal_weight": 0.9,
+        "kld_weight": 0.1,
         "diversity_weight": 0.05,
         "manifold_weight": 0.0,
         "regularity_weight": 0.0,
