@@ -23,6 +23,8 @@ following scverse conventions.
    tutorials/05_gene_enrichment
    tutorials/06_cellrank_integration
    tutorials/08_visualization
+   tutorials/09_scatac_analysis
+   tutorials/10_spatial_analysis
 
 .. toctree::
    :maxdepth: 2
