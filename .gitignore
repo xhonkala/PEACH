@@ -44,6 +44,9 @@ WORKFLOW_*_TEST/
 *.log
 *.err
 
+# Temporary analysis directories
+temp_*/
+
 # Large generated files (keep small ones)
 elbow_plot.png
 gene_associations.csv

@@ -14,6 +14,8 @@ Learn how to use PEACH for archetypal analysis of single-cell data through compr
 05_gene_enrichment
 06_cellrank_integration
 08_visualization
+09_scatac_analysis
+10_spatial_analysis
 ```
 
 ## Tutorial Overview
@@ -38,6 +40,12 @@ Integrate with CellRank for lineage tracing and trajectory analysis.
 
 ### 08 - Visualization
 Create publication-ready 3D archetypal space plots and statistical visualizations.
+
+### 09 - scATAC-seq Analysis
+TF-IDF + LSI preprocessing for chromatin accessibility data, then full archetypal analysis pipeline with `pca_key='X_lsi'`.
+
+### 10 - Spatial Analysis
+Archetypal analysis on spatial transcriptomics data (Slide-seq, MERFISH, Visium) with neighborhood enrichment and distance-dependent co-occurrence testing via squidpy.
 
 ## Getting Started
 

@@ -8,6 +8,7 @@ Main Functions:
 - load_data(): Load AnnData from file with proper format validation
 - generate_synthetic(): Create realistic synthetic datasets for testing
 - prepare_training(): Convert AnnData to PyTorch DataLoader
+- prepare_atacseq(): TF-IDF + LSI preprocessing for scATAC-seq data
 - load_pathway_networks(): Access MSigDB pathway collections
 - compute_pathway_scores(): Calculate pathway activity scores
 
@@ -17,6 +18,8 @@ All functions follow scVerse conventions with AnnData-centric workflows.
 from anndata import AnnData
 from torch.utils.data import DataLoader
 
+from .._core.utils.atacseq import compute_lsi as _compute_lsi
+from .._core.utils.atacseq import tfidf_normalize as _tfidf_normalize
 from .._core.utils.convex_synth_data import generate_convex_data as _generate_convex_data
 from .._core.utils.gene_analysis import compute_pathway_scores as _compute_pathway_scores
 from .._core.utils.gene_analysis import load_pathway_networks as _load_pathway_networks
@@ -235,3 +238,93 @@ def compute_pathway_scores(
 
     # Compute scores and store in AnnData
     _compute_pathway_scores(adata=adata, net=net, use_layer=use_layer, obsm_key=obsm_key, verbose=verbose)
+
+
+def prepare_atacseq(
+    adata: AnnData,
+    *,
+    n_components: int = 50,
+    drop_first: bool = True,
+    log_tf: bool = True,
+    store_key: str = "X_lsi",
+    random_state: int = 42,
+) -> None:
+    """TF-IDF + LSI preprocessing for scATAC-seq peak count data.
+
+    Computes TF-IDF normalization followed by Latent Semantic Indexing
+    (truncated SVD), the standard dimensionality reduction for chromatin
+    accessibility data. The resulting embeddings can be used directly with
+    ``pc.tl.train_archetypal(adata, pca_key='X_lsi')``.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data object with peak count matrix in ``adata.X``.
+        Typically a sparse [n_cells, n_peaks] matrix from scATAC-seq.
+    n_components : int, default: 50
+        Number of LSI components to compute. 30-50 is standard for scATAC-seq.
+    drop_first : bool, default: True
+        Drop first SVD component. The first component in scATAC-seq LSI
+        typically captures sequencing depth rather than biological signal.
+    log_tf : bool, default: True
+        Use log(1 + TF) variant of term frequency. Standard in scATAC-seq
+        preprocessing to reduce influence of high-count peaks.
+    store_key : str, default: "X_lsi"
+        Key in ``adata.obsm`` to store the LSI embeddings.
+    random_state : int, default: 42
+        Random seed for reproducibility of truncated SVD.
+
+    Returns
+    -------
+    None
+        Modifies ``adata`` in place:
+
+        - ``adata.obsm[store_key]``: LSI embeddings [n_cells, n_components]
+        - ``adata.uns['lsi']``: dict with 'variance_ratio' and 'components'
+
+    Examples
+    --------
+    >>> import peach as pc
+    >>> import scanpy as sc
+    >>> adata = sc.read_h5ad("scatac_peaks.h5ad")
+    >>> pc.pp.prepare_atacseq(adata, n_components=30)
+    >>> results = pc.tl.train_archetypal(adata, n_archetypes=5, pca_key="X_lsi")
+    """
+    import scipy.sparse as sp
+
+    X = adata.X
+    if not sp.issparse(X):
+        X = sp.csr_matrix(X)
+
+    n_cells, n_peaks = X.shape
+    density = X.nnz / (n_cells * n_peaks)
+    print(f"  scATAC-seq preprocessing: {n_cells} cells x {n_peaks} peaks ({density:.1%} dense)")
+
+    # Step 1: TF-IDF normalization
+    print("  Computing TF-IDF normalization...")
+    X_tfidf = _tfidf_normalize(X, log_tf=log_tf)
+
+    # Step 2: LSI via truncated SVD
+    n_actual = min(n_components, min(n_cells, n_peaks) - 2)
+    if n_actual < n_components:
+        print(f"  Adjusted n_components from {n_components} to {n_actual} (matrix rank limit)")
+        n_components = n_actual
+
+    print(f"  Computing LSI with {n_components} components (drop_first={drop_first})...")
+    embeddings, variance_ratio, components = _compute_lsi(
+        X_tfidf,
+        n_components=n_components,
+        drop_first=drop_first,
+        random_state=random_state,
+    )
+
+    # Store results in AnnData
+    adata.obsm[store_key] = embeddings
+    adata.uns["lsi"] = {
+        "variance_ratio": variance_ratio,
+        "components": components,
+    }
+
+    total_var = variance_ratio.sum() * 100
+    print(f"  LSI complete: {embeddings.shape[1]} components, {total_var:.1f}% variance explained")
+    print(f"  Stored in adata.obsm['{store_key}']")

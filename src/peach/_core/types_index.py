@@ -16,7 +16,7 @@ This file provides:
 For full Pydantic type definitions: grep "class TypeName" types.py
 For full docstrings: read the specific module function
 
-Version: 0.3.0
+Version: 0.4.0
 """
 
 
@@ -45,8 +45,15 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
     ),
     "pp.load_pathway_networks": ("Dict[str, Set[str]]", ["pathway_name → gene_set"]),
     "pp.compute_pathway_scores": ("AnnData", ["adata.obsm['pathway_scores'] added"]),
+    "pp.prepare_atacseq": (
+        "None",
+        [
+            "adata.obsm['X_lsi']: LSI embeddings [n_cells, n_components]",
+            "adata.uns['lsi']: Dict with 'variance_ratio' and 'components'",
+        ],
+    ),
     # =========================================================================
-    # tl (TOOLS) - 16 functions
+    # tl (TOOLS) - 19 functions
     # =========================================================================
     # --- Training ---
     "tl.train_archetypal": (
@@ -247,8 +254,50 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             # RETURNS: adata_traj subset ready for cr.pl.gene_trends()
         ],
     ),
+    # --- Spatial Analysis ---
+    "tl.spatial_neighbors": (
+        "None",
+        [
+            "adata.obsp['spatial_connectivities']: sparse connectivity matrix",
+            "adata.obsp['spatial_distances']: sparse distance matrix",
+        ],
+    ),
+    "tl.archetype_nhood_enrichment": (
+        "Dict",
+        [
+            "'zscore': ndarray [n_archetypes, n_archetypes] enrichment z-scores",
+            "'count': ndarray [n_archetypes, n_archetypes] neighbor counts",
+            "ALSO: adata.uns['archetype_nhood_enrichment']",
+        ],
+    ),
+    "tl.archetype_co_occurrence": (
+        "Dict",
+        [
+            "'occ': ndarray [n_archetypes, n_archetypes, n_steps] co-occurrence ratios",
+            "'interval': ndarray distance bin edges",
+            "ALSO: adata.uns['archetype_co_occurrence']",
+        ],
+    ),
+    "tl.archetype_spatial_autocorr": (
+        "DataFrame",
+        [
+            "Index: archetype_0, archetype_1, ...",
+            "Columns: I (or C), pval_norm, var_norm, pval_z_sim (if n_perms > 0)",
+            "ALSO: adata.uns['archetype_spatial_autocorr']",
+        ],
+    ),
+    "tl.archetype_interaction_boundaries": (
+        "Dict",
+        [
+            "'boundary_scores': ndarray [n_cells] JSD between mean weight vectors of cell type neighbors",
+            "'mean_weights_a': ndarray [n_cells, n_arch] mean archetype weight of type-A neighbors",
+            "'mean_weights_b': ndarray [n_cells, n_arch] mean archetype weight of type-B neighbors",
+            "'cross_correlations': DataFrame with per-archetype Spearman r between cell types",
+            "ALSO: adata.obs['boundary_score'], adata.uns['archetype_interaction_boundaries']",
+        ],
+    ),
     # =========================================================================
-    # pl (PLOTTING) - 14 functions
+    # pl (PLOTTING) - 17 functions
     # =========================================================================
     # All return matplotlib Figure or Axes (unless show=True returns None)
     "pl.archetypal_space": ("Figure|Axes", ["2D simplex projection with cells colored"]),
@@ -265,6 +314,13 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
     "pl.fate_probabilities": ("Figure", ["CellRank fate probability UMAP"]),
     # Note: gene_trends removed - use cellrank.pl.gene_trends() directly
     "pl.lineage_drivers": ("Figure", ["Top driver genes per lineage"]),
+    # --- Spatial Plots ---
+    "pl.nhood_enrichment": ("Figure", ["Heatmap of archetype neighborhood enrichment z-scores"]),
+    "pl.co_occurrence": ("Figure", ["Line plot of distance-dependent archetype co-occurrence"]),
+    "pl.spatial_archetypes": ("Figure", ["Scatter of cells on spatial coords colored by archetype"]),
+    "pl.interaction_boundaries": ("Figure", ["Spatial map of boundary scores between cell types"]),
+    "pl.spatial_autocorr": ("Figure", ["Lollipop chart of Moran's I / Geary's C per archetype"]),
+    "pl.cross_correlations": ("Figure", ["Diverging dot plot of per-archetype Spearman r between cell types"]),
     # =========================================================================
     # _core (INTERNAL) - Key functions
     # =========================================================================
@@ -339,13 +395,13 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
 # =============================================================================
 # Format: "module.function": {"param": (type_hint, default)}
 # REQUIRED = no default (must be provided)
-# Generated from inspect.signature() on all 37 public functions
+# Generated from inspect.signature() on all 44 public functions
 
 REQUIRED = "REQUIRED"  # Sentinel for required parameters
 
 FUNCTION_PARAMS = {
     # =========================================================================
-    # PP MODULE (5 functions)
+    # PP MODULE (6 functions)
     # =========================================================================
     "pp.compute_pathway_scores": {
         "adata": ("AnnData", REQUIRED),
@@ -386,8 +442,16 @@ FUNCTION_PARAMS = {
         "persistent_workers": ("bool|str", "auto"),
         "prefetch_factor": ("int", 2),
     },
+    "pp.prepare_atacseq": {
+        "adata": ("AnnData", REQUIRED),  # Peak count matrix in .X (sparse)
+        "n_components": ("int", 50),  # 30-50 standard for scATAC-seq
+        "drop_first": ("bool", True),  # First LSI component ≈ sequencing depth
+        "log_tf": ("bool", True),  # log(1 + TF) variant
+        "store_key": ("str", "X_lsi"),
+        "random_state": ("int", 42),
+    },
     # =========================================================================
-    # TL MODULE (19 functions)
+    # TL MODULE (22 functions)
     # =========================================================================
     "tl.train_archetypal": {
         "adata": ("AnnData", REQUIRED),
@@ -603,8 +667,41 @@ FUNCTION_PARAMS = {
         "target_fate_threshold": ("float", 0.4),
         "verbose": ("bool", True),
     },
+    # --- Spatial Analysis (requires squidpy) ---
+    "tl.spatial_neighbors": {
+        "adata": ("AnnData", REQUIRED),
+        "spatial_key": ("str", "spatial"),  # Key in obsm for 2D coords
+        "n_neighs": ("int", 30),
+        "coord_type": ("str", "generic"),  # "generic" for Slide-seq/MERFISH, "grid" for Visium
+    },
+    "tl.archetype_nhood_enrichment": {
+        "adata": ("AnnData", REQUIRED),
+        "cluster_key": ("str", "archetypes"),
+        "n_perms": ("int", 1000),
+        "seed": ("int", 42),
+    },
+    "tl.archetype_co_occurrence": {
+        "adata": ("AnnData", REQUIRED),
+        "cluster_key": ("str", "archetypes"),
+        "spatial_key": ("str", "spatial"),
+        "interval": ("int", 50),  # Number of distance intervals
+    },
+    "tl.archetype_spatial_autocorr": {
+        "adata": ("AnnData", REQUIRED),
+        "weights_key": ("str", "cell_archetype_weights"),  # Key in obsm with weight matrix
+        "mode": ("str", "moran"),  # "moran" or "geary"
+        "n_perms": ("int", 100),
+        "n_jobs": ("int", 1),  # Default 1 for macOS
+    },
+    "tl.archetype_interaction_boundaries": {
+        "adata": ("AnnData", REQUIRED),
+        "cell_type_col": ("str", "Cell_Type"),
+        "weights_key": ("str", "cell_archetype_weights"),  # Continuous weights in obsm
+        "cell_type_a": ("str|None", None),  # Auto-picks top 2 if None
+        "cell_type_b": ("str|None", None),
+    },
     # =========================================================================
-    # PL MODULE (13 functions)
+    # PL MODULE (16 functions)
     # =========================================================================
     "pl.archetypal_space": {
         "adata": ("AnnData", REQUIRED),
@@ -743,6 +840,54 @@ FUNCTION_PARAMS = {
         "driver_key": ("str|None", None),
         "figsize": ("tuple", (10, 8)),
     },
+    # --- Spatial Plots (plotly-based) ---
+    "pl.nhood_enrichment": {
+        "adata": ("AnnData", REQUIRED),
+        "uns_key": ("str", "archetype_nhood_enrichment"),
+        "cluster_key": ("str", "archetypes"),
+        "title": ("str", "Archetype Neighborhood Enrichment"),
+        "colorscale": ("str", "RdBu_r"),
+        "save_path": ("str|None", None),
+    },
+    "pl.co_occurrence": {
+        "adata": ("AnnData", REQUIRED),
+        "uns_key": ("str", "archetype_co_occurrence"),
+        "cluster_key": ("str", "archetypes"),
+        "title": ("str", "Archetype Spatial Co-occurrence"),
+        "save_path": ("str|None", None),
+    },
+    "pl.spatial_archetypes": {
+        "adata": ("AnnData", REQUIRED),
+        "spatial_key": ("str", "spatial"),
+        "color_key": ("str", "archetypes"),
+        "point_size": ("float", 2.0),
+        "opacity": ("float", 0.7),
+        "title": ("str", "Spatial Archetype Map"),
+        "save_path": ("str|None", None),
+        "colors": ("list[str]|None", None),  # Custom color palette
+        "legend_marker_size": ("float", 12.0),
+    },
+    "pl.interaction_boundaries": {
+        "adata": ("AnnData", REQUIRED),
+        "spatial_key": ("str", "spatial"),
+        "score_key": ("str", "boundary_score"),
+        "point_size": ("float", 2.0),
+        "colorscale": ("str", "Inferno"),
+        "title": ("str|None", None),  # Auto-generated if None
+        "save_path": ("str|None", None),
+    },
+    "pl.spatial_autocorr": {
+        "adata": ("AnnData", REQUIRED),
+        "uns_key": ("str", "archetype_spatial_autocorr"),
+        "title": ("str|None", None),
+        "save_path": ("str|None", None),
+    },
+    "pl.cross_correlations": {
+        "adata": ("AnnData", REQUIRED),
+        "uns_key": ("str", "archetype_interaction_boundaries"),
+        "title": ("str|None", None),
+        "save_path": ("str|None", None),
+    },
 }
 
 
@@ -775,6 +920,7 @@ ADATA_KEYS = {
         "cell_archetype_weights_mu": "[n_cells, n_archetypes] encoder means",
         "cell_archetype_weights_log_var": "[n_cells, n_archetypes] encoder log vars",
         "pathway_scores": "[n_cells, n_pathways] pathway activity scores",
+        "X_lsi": "[n_cells, n_components] LSI embeddings from scATAC-seq (pc.pp.prepare_atacseq)",
     },
     "uns": {
         "archetype_coordinates": "[n_archetypes, n_pcs] archetype positions in PCA space",
@@ -784,6 +930,11 @@ ADATA_KEYS = {
         "conditional_centroids": "Dict[condition_column, ConditionalCentroidResult] centroid positions",
         "trajectory_{src}_to_{tgt}": "Dict with trajectory analysis results (source, target, driver_genes, etc.)",
         "pathway_scores_names": "List[str] pathway names for columns in obsm['pathway_scores']",
+        "lsi": "Dict with 'variance_ratio' and 'components' from TruncatedSVD (pc.pp.prepare_atacseq)",
+        "archetype_nhood_enrichment": "Dict with 'zscore' and 'count' arrays (pc.tl.archetype_nhood_enrichment)",
+        "archetype_co_occurrence": "Dict with 'occ' and 'interval' arrays (pc.tl.archetype_co_occurrence)",
+        "archetype_spatial_autocorr": "DataFrame with Moran's I / Geary's C per archetype weight",
+        "archetype_interaction_boundaries": "Dict with boundary_scores, mean_weights_a/b, cross-correlations",
     },
     "obs": {
         "archetypes": "Categorical: 'archetype_0', 'archetype_1', ..., 'no_archetype'",
@@ -791,9 +942,12 @@ ADATA_KEYS = {
         "{lineage}_pseudotime": "Per-lineage pseudotime (CellRank)",
         "trajectory_{src}_to_{tgt}_cells": "Boolean mask for cells in trajectory",
         "pseudotime_{src}_to_{tgt}": "Float trajectory-specific pseudotime",
+        "boundary_score": "Float per-cell boundary score (pc.tl.archetype_interaction_boundaries)",
     },
     "obsp": {
         "T_forward": "Transition probability matrix (CellRank)",
+        "spatial_connectivities": "Spatial neighbor graph (pc.tl.spatial_neighbors via squidpy)",
+        "spatial_distances": "Spatial distance matrix (pc.tl.spatial_neighbors via squidpy)",
     },
 }
 

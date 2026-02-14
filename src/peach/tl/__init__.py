@@ -20,6 +20,15 @@ from .cellrank_integration import (
     single_trajectory_analysis,
 )
 from .hyperparameters import hyperparameter_search
+
+# Spatial analysis (requires squidpy)
+from .spatial import (
+    archetype_co_occurrence,
+    archetype_interaction_boundaries,
+    archetype_nhood_enrichment,
+    archetype_spatial_autocorr,
+    spatial_neighbors,
+)
 from .statistical import (
     archetype_exclusive_patterns,
     conditional_associations,
@@ -51,4 +60,10 @@ __all__ = [
     "compute_lineage_drivers",
     "compute_transition_frequencies",
     "single_trajectory_analysis",
+    # Spatial
+    "spatial_neighbors",
+    "archetype_nhood_enrichment",
+    "archetype_co_occurrence",
+    "archetype_spatial_autocorr",
+    "archetype_interaction_boundaries",
 ]

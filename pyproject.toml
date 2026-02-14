@@ -4,7 +4,7 @@ requires = ["hatchling"]
 
 [project]
 name = "peach"
-version = "0.3.0"
+version = "0.4.0"
 description = "Archetypal analysis for single-cell genomics"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -64,6 +64,10 @@ dependencies = [
     # Utilities
     "tqdm>=4.60.0",  # Progress bars
     "session-info2",
+]
+
+optional-dependencies.spatial = [
+    "squidpy>=1.3.0",
 ]
 
 optional-dependencies.dev = [

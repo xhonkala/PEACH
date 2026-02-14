@@ -16,6 +16,16 @@ from .cellrank_viz import fate_probabilities, lineage_drivers
 from .pattern_visualization import pattern_dotplot, pattern_heatmap, pattern_summary_barplot
 from .results import dotplot
 
+# Spatial visualization (requires squidpy for analysis, plotly for plots)
+from .spatial import (
+    co_occurrence,
+    cross_correlations,
+    interaction_boundaries,
+    nhood_enrichment,
+    spatial_archetypes,
+    spatial_autocorr,
+)
+
 __all__ = [
     "archetypal_space",
     "archetypal_space_multi",
@@ -30,4 +40,11 @@ __all__ = [
     "pattern_heatmap",
     "fate_probabilities",
     "lineage_drivers",
+    # Spatial
+    "nhood_enrichment",
+    "co_occurrence",
+    "spatial_archetypes",
+    "interaction_boundaries",
+    "spatial_autocorr",
+    "cross_correlations",
 ]

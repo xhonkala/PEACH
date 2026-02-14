@@ -129,7 +129,7 @@ def create_dataloader_from_anndata(
     """
     # AUTO-DETECT PCA COORDINATES
     # Check common PCA key variations in priority order
-    pca_candidates = ["X_pca", "X_PCA", "PCA", "x_pca"]
+    pca_candidates = ["X_pca", "X_PCA", "PCA", "x_pca", "X_lsi"]
 
     if pca_key is not None:
         # User specified exact key
@@ -158,7 +158,7 @@ def create_dataloader_from_anndata(
                 f"No PCA coordinates found in adata.obsm. "
                 f"Expected one of: {pca_candidates}. "
                 f"Available keys: {available_keys}. "
-                f"Run PCA first: sc.pp.pca(adata) or specify pca_key parameter."
+                f"Run PCA first: sc.pp.pca(adata), or for scATAC-seq: pc.pp.prepare_atacseq(adata), or specify pca_key parameter."
             )
 
     # Convert PCA coordinates to tensor

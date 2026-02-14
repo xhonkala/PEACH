@@ -19,7 +19,7 @@ Key Concepts:
     - Session state maintains loaded datasets in ADATA_REGISTRY
     - Results are stored back in the AnnData object (adata.obs, adata.obsm, adata.uns)
 
-Version: 0.3.0
+Version: 0.4.0
 """
 
 from dataclasses import dataclass, field
@@ -173,6 +173,28 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         requires=["adata loaded"],
         modifies_adata=["obsm['X_pca'] if not present"],
     ),
+    "pp.prepare_atacseq": ToolSchema(
+        name="pp.prepare_atacseq",
+        description="TF-IDF + LSI preprocessing for scATAC-seq peak count data. "
+        "Produces embeddings usable with pc.tl.train_archetypal(adata, pca_key='X_lsi').",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with peak count matrix in .X"),
+            Parameter("n_components", ParamType.INTEGER, "Number of LSI components to compute (30-50 standard)", default=50),
+            Parameter(
+                "drop_first",
+                ParamType.BOOLEAN,
+                "Drop first SVD component (captures sequencing depth, not biology)",
+                default=True,
+            ),
+            Parameter("log_tf", ParamType.BOOLEAN, "Use log(1 + TF) variant of term frequency", default=True),
+            Parameter("store_key", ParamType.STRING, "Key in adata.obsm to store LSI embeddings", default="X_lsi"),
+            Parameter("random_state", ParamType.INTEGER, "Random seed for truncated SVD", default=42),
+        ],
+        returns="None",
+        returns_description="Modifies adata in place: obsm[store_key] = LSI embeddings, uns['lsi'] = variance info",
+        requires=["sparse peak count matrix in adata.X"],
+        modifies_adata=["obsm['X_lsi']", "uns['lsi']"],
+    ),
     # =========================================================================
     # tl (TOOLS) - Training
     # =========================================================================
@@ -227,7 +249,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter(
                 "kld_weight",
                 ParamType.FLOAT,
-                "KL divergence weight (0.0 optimal, non-zero hurts R²)",
+                "KL divergence weight (0.1 default, regularizes encoder variance)",
                 required=False,
                 default=None,
             ),
@@ -571,6 +593,63 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         "'exclusivity' (if include_exclusivity_analysis AND include_pattern_tests)",
         requires=["archetypes in adata.obs"],
         modifies_adata=[],
+    ),
+    # =========================================================================
+    # tl (TOOLS) - Spatial Analysis (requires squidpy)
+    # =========================================================================
+    "tl.spatial_neighbors": ToolSchema(
+        name="tl.spatial_neighbors",
+        description="Build spatial neighbor graph from tissue coordinates. "
+        "Wrapper around squidpy.gr.spatial_neighbors() with PEACH-appropriate defaults.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial coordinates"),
+            Parameter("spatial_key", ParamType.STRING, "Key in adata.obsm for 2D spatial coordinates", default="spatial"),
+            Parameter("n_neighs", ParamType.INTEGER, "Number of nearest neighbors", default=10),
+            Parameter(
+                "coord_type",
+                ParamType.STRING,
+                "Coordinate type: 'generic' for Slide-seq/MERFISH, 'grid' for Visium",
+                default="generic",
+                enum=["generic", "grid"],
+            ),
+        ],
+        returns="None",
+        returns_description="Modifies adata in place: obsp['spatial_connectivities'] and obsp['spatial_distances']",
+        requires=["spatial coordinates in adata.obsm['spatial']", "pip install peach[spatial]"],
+        modifies_adata=["obsp['spatial_connectivities']", "obsp['spatial_distances']"],
+    ),
+    "tl.archetype_nhood_enrichment": ToolSchema(
+        name="tl.archetype_nhood_enrichment",
+        description="Test spatial neighborhood enrichment between archetype groups via permutation test. "
+        "For each archetype pair, tests whether cells co-localize more/less than expected by chance.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial graph"),
+            Parameter("cluster_key", ParamType.STRING, "Column in adata.obs with archetype labels", default="archetypes"),
+            Parameter("n_perms", ParamType.INTEGER, "Number of permutations for significance testing", default=1000),
+            Parameter("seed", ParamType.INTEGER, "Random seed for permutation reproducibility", default=42),
+        ],
+        returns="Dict",
+        returns_description="Dict with 'zscore' and 'count' arrays [n_archetypes x n_archetypes]. "
+        "Positive z-score = enriched (co-localized), negative = depleted (separated). "
+        "Also stored in adata.uns['archetype_nhood_enrichment'].",
+        requires=["spatial_connectivities in adata.obsp (from spatial_neighbors)", "archetypes in adata.obs"],
+        modifies_adata=["uns['archetype_nhood_enrichment']"],
+    ),
+    "tl.archetype_co_occurrence": ToolSchema(
+        name="tl.archetype_co_occurrence",
+        description="Compute distance-dependent co-occurrence of archetype groups. "
+        "Measures how co-occurrence ratio varies with spatial distance.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial coordinates"),
+            Parameter("cluster_key", ParamType.STRING, "Column in adata.obs with archetype labels", default="archetypes"),
+            Parameter("spatial_key", ParamType.STRING, "Key in adata.obsm with spatial coordinates", default="spatial"),
+            Parameter("interval", ParamType.INTEGER, "Number of distance intervals to evaluate", default=50),
+        ],
+        returns="Dict",
+        returns_description="Dict with 'occ' (ratios [n_arch, n_arch, n_intervals]) and 'interval' (distance bins). "
+        "Also stored in adata.uns['archetype_co_occurrence'].",
+        requires=["spatial coordinates in adata.obsm", "archetypes in adata.obs", "pip install peach[spatial]"],
+        modifies_adata=["uns['archetype_co_occurrence']"],
     ),
     # =========================================================================
     # tl (TOOLS) - CellRank Integration
@@ -992,6 +1071,63 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         modifies_adata=[],
     ),
     # Note: gene_trends removed - use cellrank.pl.gene_trends() directly
+    # =========================================================================
+    # pl (PLOTTING) - Spatial (requires squidpy for analysis, plotly for plots)
+    # =========================================================================
+    "pl.nhood_enrichment": ToolSchema(
+        name="pl.nhood_enrichment",
+        description="Plotly heatmap of archetype neighborhood enrichment z-scores. "
+        "Red = co-localized, blue = spatially separated.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with enrichment results"),
+            Parameter(
+                "uns_key", ParamType.STRING, "Key in adata.uns for enrichment results", default="archetype_nhood_enrichment"
+            ),
+            Parameter("cluster_key", ParamType.STRING, "Column in adata.obs for axis labels", default="archetypes"),
+            Parameter("title", ParamType.STRING, "Plot title", default="Archetype Neighborhood Enrichment"),
+            Parameter("colorscale", ParamType.STRING, "Plotly colorscale", default="RdBu_r"),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+        ],
+        returns="Figure",
+        returns_description="Plotly Figure with z-score heatmap (symmetric around 0)",
+        requires=["archetype_nhood_enrichment in adata.uns (from tl.archetype_nhood_enrichment)"],
+        modifies_adata=[],
+    ),
+    "pl.co_occurrence": ToolSchema(
+        name="pl.co_occurrence",
+        description="Plotly line plot of distance-dependent archetype co-occurrence ratios. "
+        "Values > 1 = co-occurrence above chance, < 1 = avoidance.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with co-occurrence results"),
+            Parameter(
+                "uns_key", ParamType.STRING, "Key in adata.uns for co-occurrence results", default="archetype_co_occurrence"
+            ),
+            Parameter("cluster_key", ParamType.STRING, "Column in adata.obs for legend labels", default="archetypes"),
+            Parameter("title", ParamType.STRING, "Plot title", default="Archetype Spatial Co-occurrence"),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+        ],
+        returns="Figure",
+        returns_description="Plotly Figure with co-occurrence ratio vs distance lines per archetype pair",
+        requires=["archetype_co_occurrence in adata.uns (from tl.archetype_co_occurrence)"],
+        modifies_adata=[],
+    ),
+    "pl.spatial_archetypes": ToolSchema(
+        name="pl.spatial_archetypes",
+        description="ScatterGL plot of cells on spatial coordinates colored by archetype assignment.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial coords"),
+            Parameter("spatial_key", ParamType.STRING, "Key in adata.obsm with 2D spatial coordinates", default="spatial"),
+            Parameter("color_key", ParamType.STRING, "Column in adata.obs to color by", default="archetypes"),
+            Parameter("point_size", ParamType.FLOAT, "Size of scatter points", default=2.0),
+            Parameter("opacity", ParamType.FLOAT, "Point opacity", default=0.7),
+            Parameter("title", ParamType.STRING, "Plot title", default="Spatial Archetype Map"),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+        ],
+        returns="Figure",
+        returns_description="Plotly Figure with cells plotted at spatial positions, colored by archetype",
+        requires=["spatial coordinates in adata.obsm", "color_key in adata.obs"],
+        modifies_adata=[],
+    ),
     "pl.lineage_drivers": ToolSchema(
         name="pl.lineage_drivers",
         description="Plot top driver genes for each lineage.",
