@@ -15,3 +15,4 @@
    debug_dotplot
    pattern_visualization
    results
+   spatial

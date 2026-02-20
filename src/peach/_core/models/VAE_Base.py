@@ -154,7 +154,7 @@ class VAE_Base(nn.Module):
 
         self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1])
 
-        hidden_dims.reverse()  # mirror hinge
+        hidden_dims = hidden_dims[::-1]  # mirror hinge
 
         for i in range(len(hidden_dims) - 1):
             modules.append(

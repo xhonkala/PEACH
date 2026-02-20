@@ -13,4 +13,5 @@
    archetypal
    cellrank_integration
    hyperparameters
+   spatial
    statistical

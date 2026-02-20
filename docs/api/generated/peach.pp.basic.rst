@@ -1,4 +1,4 @@
-peach.pp.basic
+﻿peach.pp.basic
 ==============
 
 .. automodule:: peach.pp.basic
@@ -12,5 +12,6 @@ peach.pp.basic
       generate_synthetic
       load_data
       load_pathway_networks
+      prepare_atacseq
       prepare_training
    
