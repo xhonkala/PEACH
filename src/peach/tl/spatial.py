@@ -582,3 +582,121 @@ def archetype_interaction_boundaries(
     adata.uns["archetype_interaction_boundaries"] = result
 
     return result
+
+
+def archetype_pair_enrichment(
+    adata: AnnData,
+    *,
+    archetype_pairs: list | str | None = None,
+    weight_threshold: float = 0.3,
+    n_permutations: int = 1000,
+    spatial_key: str = "spatial",
+    **kwargs: Any,
+) -> dict:
+    """Test spatial co-localization of archetype weight pairs.
+
+    For each pair of archetypes, identifies cells with weight > threshold
+    for each archetype and tests whether they are spatially proximal
+    using a permutation test.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have spatial coordinates, archetype weights, and spatial neighbors.
+    archetype_pairs : list of (i,j) tuples, 'all', or None
+        Which pairs to test. 'all' or None = all K*(K-1)/2 pairs.
+    weight_threshold : float
+        Minimum weight to consider a cell "participating" in an archetype.
+    n_permutations : int
+        Number of permutations for the test.
+    spatial_key : str
+        Key in adata.obsm for spatial coordinates.
+
+    Returns
+    -------
+    dict
+        Per-pair results: {(i,j): {'enrichment_score': float, 'p_value': float,
+        'n_cells_i': int, 'n_cells_j': int}}
+        Also stored in adata.uns['peach_pair_enrichment'].
+    """
+    from itertools import combinations
+
+    from peach._core.utils.feature_utils import get_archetype_weights, store_result
+
+    _validate_spatial_data(adata, spatial_key=spatial_key)
+
+    weights = get_archetype_weights(adata)
+    K = weights.shape[1]
+
+    # Determine pairs
+    if archetype_pairs is None or archetype_pairs == "all":
+        archetype_pairs = list(combinations(range(K), 2))
+
+    # Check for spatial connectivity
+    if "spatial_connectivities" not in adata.obsp:
+        raise ValueError(
+            "Spatial connectivity graph not found. "
+            "Run pc.tl.spatial_neighbors() first."
+        )
+
+    conn = adata.obsp["spatial_connectivities"]
+
+    results = {}
+    rng = np.random.default_rng(42)
+
+    for i, j in archetype_pairs:
+        # Cells participating in each archetype
+        cells_i = weights[:, i] >= weight_threshold
+        cells_j = weights[:, j] >= weight_threshold
+        n_cells_i = int(np.sum(cells_i))
+        n_cells_j = int(np.sum(cells_j))
+
+        if n_cells_i == 0 or n_cells_j == 0:
+            results[(i, j)] = {
+                "enrichment_score": 0.0,
+                "p_value": 1.0,
+                "n_cells_i": n_cells_i,
+                "n_cells_j": n_cells_j,
+            }
+            continue
+
+        # Observed: count edges between cells_i and cells_j
+        observed_edges = _count_cross_edges(conn, cells_i, cells_j)
+
+        # Permutation null: shuffle cell labels
+        null_edges = np.zeros(n_permutations)
+        for p in range(n_permutations):
+            perm = rng.permutation(len(weights))
+            perm_i = cells_i[perm]
+            perm_j = cells_j[perm]
+            null_edges[p] = _count_cross_edges(conn, perm_i, perm_j)
+
+        # Enrichment score: (observed - mean_null) / std_null
+        null_mean = null_edges.mean()
+        null_std = null_edges.std()
+        if null_std > 0:
+            enrichment = (observed_edges - null_mean) / null_std
+        else:
+            enrichment = 0.0
+
+        # P-value (one-sided: enrichment)
+        p_value = (np.sum(null_edges >= observed_edges) + 1) / (n_permutations + 1)
+
+        results[(i, j)] = {
+            "enrichment_score": float(enrichment),
+            "p_value": float(p_value),
+            "n_cells_i": n_cells_i,
+            "n_cells_j": n_cells_j,
+        }
+
+    # Store serializable version (convert tuple keys to strings)
+    serializable = {f"({i},{j})": v for (i, j), v in results.items()}
+    store_result(adata, "pair_enrichment", serializable)
+
+    return results
+
+
+def _count_cross_edges(conn, mask_a, mask_b):
+    """Count edges in connectivity matrix between two cell masks."""
+    sub = conn[mask_a][:, mask_b]
+    return sub.sum()

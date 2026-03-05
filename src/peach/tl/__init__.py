@@ -26,6 +26,7 @@ from .spatial import (
     archetype_co_occurrence,
     archetype_interaction_boundaries,
     archetype_nhood_enrichment,
+    archetype_pair_enrichment,
     archetype_spatial_autocorr,
     spatial_neighbors,
 )
@@ -37,6 +38,29 @@ from .statistical import (
     pattern_analysis,
     specialization_patterns,
     tradeoff_patterns,
+)
+
+# v0.5.0: Simplex regression + driver regression
+from .feature_regression import (
+    archetype_driver_regression,
+    feature_simplex_regression,
+    gene_simplex_regression,
+    pathway_simplex_regression,
+)
+
+# v0.5.0: Pattern classification + archetype summary
+from .feature_patterns import archetype_summary, classify_feature_patterns
+
+# v0.5.0: Simplex density decomposition
+from .feature_decomposition import feature_simplex_decomposition
+
+# v0.5.0: Flow matching
+from .flow import (
+    flow_within,
+    flow_between,
+    flow_gene_alignment,
+    flow_jacobian,
+    flow_significance,
 )
 
 __all__ = [
@@ -66,4 +90,21 @@ __all__ = [
     "archetype_co_occurrence",
     "archetype_spatial_autocorr",
     "archetype_interaction_boundaries",
+    "archetype_pair_enrichment",
+    # v0.5.0: Regression
+    "archetype_driver_regression",
+    "feature_simplex_regression",
+    "gene_simplex_regression",
+    "pathway_simplex_regression",
+    # v0.5.0: Pattern classification + archetype summary
+    "classify_feature_patterns",
+    "archetype_summary",
+    # v0.5.0: Simplex density decomposition
+    "feature_simplex_decomposition",
+    # v0.5.0: Flow matching
+    "flow_within",
+    "flow_between",
+    "flow_gene_alignment",
+    "flow_jacobian",
+    "flow_significance",
 ]
