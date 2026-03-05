@@ -16,7 +16,7 @@ This file provides:
 For full Pydantic type definitions: grep "class TypeName" types.py
 For full docstrings: read the specific module function
 
-Version: 0.4.0
+Version: 0.5.0
 """
 
 
@@ -321,6 +321,119 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
     "pl.interaction_boundaries": ("Figure", ["Spatial map of boundary scores between cell types"]),
     "pl.spatial_autocorr": ("Figure", ["Lollipop chart of Moran's I / Geary's C per archetype"]),
     "pl.cross_correlations": ("Figure", ["Diverging dot plot of per-archetype Spearman r between cell types"]),
+    # =========================================================================
+    # v0.5.0: Continuous characterization (tl)
+    # =========================================================================
+    "tl.feature_simplex_regression": (
+        "SimplexRegressionResult",
+        [
+            "vertex_coefficients [n_features, K]",
+            "r_squared_degree1 [n_features]",
+            "f_pvalue, f_pvalue_fdr [n_features]",
+            "vertex_pvalues, vertex_se [n_features, K]",
+            "interaction_coefficients [n_features, K-choose-2] (optional)",
+            "interaction_pvalues (optional)",
+            "vertex_ci_lower, vertex_ci_upper (optional)",
+        ],
+    ),
+    "tl.gene_simplex_regression": ("SimplexRegressionResult", ["Convenience for adata.X"]),
+    "tl.pathway_simplex_regression": ("SimplexRegressionResult", ["Convenience for pathway_scores"]),
+    "tl.classify_feature_patterns": (
+        "PatternClassificationResult",
+        [
+            "classifications [n_features]",
+            "pattern_counts {pattern: count}",
+        ],
+    ),
+    "tl.archetype_driver_regression": (
+        "DriverRegressionResult",
+        [
+            "main_coefficients_ilr [K-1, n_features]",
+            "main_coefficients [K, n_features]",
+            "main_pvalues [K-1, n_features]",
+            "r_squared [K-1]",
+        ],
+    ),
+    "tl.feature_simplex_decomposition": (
+        "GMMResult",
+        [
+            "n_components_optimal",
+            "n_components_stable",
+            "component_assignments [n_cells]",
+            "component_simplex_means [n_stable, K]",
+            "component_stability_scores [n_stable]",
+            "bic_values [n_tested]",
+        ],
+    ),
+    "tl.archetype_summary": (
+        "dict | list[dict]",
+        [
+            "archetype_idx, top_enriched, top_depleted",
+            "interactions, pattern_counts",
+            "driver_genesets (optional)",
+            "gmm_components (optional)",
+        ],
+    ),
+    "tl.flow_within": (
+        "FlowWithinResult",
+        [
+            "transported [n_source, dim]",
+            "losses [n_epochs]",
+            "mmd_before, mmd_after",
+            "source_mask, target_mask",
+        ],
+    ),
+    "tl.flow_between": (
+        "FlowBetweenResult",
+        [
+            "flows {(src, tgt): FlowWithinResult}",
+            "condition_labels, condition_key",
+        ],
+    ),
+    "tl.flow_gene_alignment": (
+        "GeneAlignmentResult",
+        [
+            "alignment_scores [n_genes]",
+            "top_aligned, top_opposed [n_top]",
+        ],
+    ),
+    "tl.flow_jacobian": (
+        "FlowJacobianResult",
+        [
+            "jacobian_det [n_points]",
+            "feature_expansion [n_genes]",
+            "mean_jacobian [dim, dim]",
+        ],
+    ),
+    "tl.flow_significance": ("dict", ["p_value, observed_stat, null_distribution"]),
+    "tl.archetype_pair_enrichment": (
+        "dict",
+        [
+            "{(i,j): {enrichment_score, p_value, n_cells_i, n_cells_j}}",
+        ],
+    ),
+    # =========================================================================
+    # v0.5.0: Continuous characterization (pl)
+    # =========================================================================
+    "pl.ternary_facet": ("go.Figure", ["Ternary scatter for 3 archetypes"]),
+    "pl.ternary_facet_grid": ("list[go.Figure]", ["Multiple ternary facets"]),
+    "pl.coefficient_heatmap": ("go.Figure", ["Features x archetypes heatmap"]),
+    "pl.interaction_heatmap": ("go.Figure", ["Features x archetype-pairs heatmap"]),
+    "pl.r2_barplot": ("go.Figure", ["Ranked features by R^2"]),
+    "pl.vertex_radar": ("go.Figure", ["Spider plot for one feature"]),
+    "pl.regression_volcano": ("go.Figure", ["R^2 vs vertex contrast"]),
+    "pl.pattern_summary": ("go.Figure", ["Pattern type counts"]),
+    "pl.component_scatter": ("go.Figure", ["PCA scatter by GMM component"]),
+    "pl.gmm_bic_curve": ("go.Figure", ["BIC vs n_components"]),
+    "pl.component_heatmap": ("go.Figure", ["Features x components"]),
+    "pl.component_stability": ("go.Figure", ["Stability scores bar"]),
+    "pl.velocity_quiver": ("go.Figure", ["2D quiver plot"]),
+    "pl.gene_alignment_barplot": ("go.Figure", ["Top aligned/opposed genes"]),
+    "pl.jacobian_heatmap": ("go.Figure", ["Mean Jacobian matrix"]),
+    "pl.trajectory_ribbon": ("go.Figure", ["Trajectory colored by time"]),
+    "pl.flow_magnitude": ("go.Figure", ["Transport magnitude scatter"]),
+    "pl.density_comparison": ("go.Figure", ["Source vs target KDE"]),
+    "pl.archetype_correspondence": ("go.Figure", ["K x K correspondence"]),
     # =========================================================================
     # _core (INTERNAL) - Key functions
     # =========================================================================
@@ -667,6 +780,132 @@ FUNCTION_PARAMS = {
         "target_fate_threshold": ("float", 0.4),
         "verbose": ("bool", True),
     },
+    # --- v0.5.0: Continuous characterization ---
+    "tl.feature_simplex_regression": {
+        "adata": ("AnnData", REQUIRED),
+        "feature_matrix": ("None|str|array", None),
+        "feature_names": ("list[str]|None", None),
+        "max_degree": ("int", 2),
+        "permutation_test": ("bool", False),
+        "n_permutations": ("int", 1000),
+        "n_bootstrap": ("int", 1000),
+        "robust_se": ("bool", True),
+        "store_residuals": ("bool", True),
+        "copy": ("bool", False),
+    },
+    "tl.gene_simplex_regression": {
+        "adata": ("AnnData", REQUIRED),
+        "**kwargs": ("dict", None),  # Passed to feature_simplex_regression
+    },
+    "tl.pathway_simplex_regression": {
+        "adata": ("AnnData", REQUIRED),
+        "**kwargs": ("dict", None),  # Passed to feature_simplex_regression
+    },
+    "tl.classify_feature_patterns": {
+        "adata": ("AnnData", REQUIRED),
+        "regression_result": ("SimplexRegressionResult|None", None),
+        "r2_threshold": ("float", 0.05),
+        "significance_threshold": ("float", 0.05),
+        "effect_size_threshold": ("float|None", None),
+    },
+    "tl.archetype_driver_regression": {
+        "adata": ("AnnData", REQUIRED),
+        "feature_matrix": ("None|str|array", None),
+        "feature_names": ("list[str]|None", None),
+        "max_degree": ("int", 2),
+        "n_bootstrap": ("int", 1000),
+        "robust_se": ("bool", True),
+        "max_interaction_features": ("int", 50),
+        "copy": ("bool", False),
+    },
+    "tl.feature_simplex_decomposition": {
+        "adata": ("AnnData", REQUIRED),
+        "feature_matrix": ("None|str|array", None),
+        "feature_names": ("list[str]|None", None),
+        "n_components_range": ("tuple[int,int]|None", None),
+        "model_selection": ("str", "bic"),
+        "covariance_type": ("str", "full"),
+        "n_initializations": ("int", 20),
+        "stability_threshold": ("float", 0.7),
+        "characterize_features": ("bool", True),
+        "random_state": ("int", 42),
+        "copy": ("bool", False),
+    },
+    "tl.archetype_summary": {
+        "adata": ("AnnData", REQUIRED),
+        "archetype_idx": ("int|None", None),
+        "top_n": ("int", 20),
+        "include_drivers": ("bool", True),
+        "include_gmm": ("bool", True),
+    },
+    "tl.flow_within": {
+        "adata": ("AnnData", REQUIRED),
+        "source": ("dict", REQUIRED),
+        "target": ("dict", REQUIRED),
+        "pca_key": ("str", "X_pca"),
+        "hidden_dims": ("tuple", (128, 128, 128)),
+        "lr": ("float", 1e-3),
+        "n_epochs": ("int", 1000),
+        "batch_size": ("int", 256),
+        "n_steps": ("int", 50),
+        "device": ("str", "cpu"),
+        "name": ("str|None", None),
+        "random_state": ("int", 42),
+        "copy": ("bool", False),
+    },
+    "tl.flow_between": {
+        "adatas": ("list[AnnData]", REQUIRED),
+        "condition_key": ("str", "condition"),
+        "condition_labels": ("list[str]|None", None),
+        "pairs": ("list[tuple]|None", None),
+        "pca_key": ("str", "X_pca"),
+        "hidden_dims": ("tuple", (128, 128, 128)),
+        "lr": ("float", 1e-3),
+        "n_epochs": ("int", 1000),
+        "batch_size": ("int", 256),
+        "n_steps": ("int", 50),
+        "device": ("str", "cpu"),
+        "random_state": ("int", 42),
+    },
+    "tl.flow_gene_alignment": {
+        "adata": ("AnnData", REQUIRED),
+        "flow_result": ("FlowWithinResult", REQUIRED),
+        "t": ("float", 0.5),
+        "n_top": ("int", 50),
+        "pca_loadings_key": ("str|None", None),
+    },
+    "tl.flow_jacobian": {
+        "adata": ("AnnData", REQUIRED),
+        "flow_result": ("FlowWithinResult", REQUIRED),
+        "flow_model": ("FlowModel", REQUIRED),
+        "t": ("float", 0.5),
+        "evaluation_points": ("ndarray|None", None),
+        "pca_loadings_key": ("str|None", None),
+        "aggregate": ("str", "mean"),
+    },
+    "tl.flow_significance": {
+        "adata": ("AnnData", REQUIRED),
+        "flow_result": ("FlowWithinResult|None", None),
+        "source": ("dict|None", None),
+        "target": ("dict|None", None),
+        "pca_key": ("str", "X_pca"),
+        "n_permutations": ("int", 100),
+        "n_epochs_per_perm": ("int", 200),
+        "statistic": ("str", "mmd"),
+        "hidden_dims": ("tuple", (128, 128, 128)),
+        "lr": ("float", 1e-3),
+        "batch_size": ("int", 256),
+        "n_steps": ("int", 50),
+        "device": ("str", "cpu"),
+        "random_state": ("int", 42),
+    },
+    "tl.archetype_pair_enrichment": {
+        "adata": ("AnnData", REQUIRED),
+        "archetype_pairs": ("list|str|None", None),
+        "weight_threshold": ("float", 0.3),
+        "n_permutations": ("int", 1000),
+        "spatial_key": ("str", "spatial"),
+    },
     # --- Spatial Analysis (requires squidpy) ---
     "tl.spatial_neighbors": {
         "adata": ("AnnData", REQUIRED),
@@ -921,6 +1160,8 @@ ADATA_KEYS = {
         "cell_archetype_weights_log_var": "[n_cells, n_archetypes] encoder log vars",
         "pathway_scores": "[n_cells, n_pathways] pathway activity scores",
         "X_lsi": "[n_cells, n_components] LSI embeddings from scATAC-seq (pc.pp.prepare_atacseq)",
+        "peach_residuals": "[n_cells, n_features] regression residual matrix (pc.tl.feature_simplex_regression)",
+        "peach_gmm_labels": "[n_cells] GMM component assignments (pc.tl.feature_simplex_decomposition)",
     },
     "uns": {
         "archetype_coordinates": "[n_archetypes, n_pcs] archetype positions in PCA space",
@@ -935,6 +1176,12 @@ ADATA_KEYS = {
         "archetype_co_occurrence": "Dict with 'occ' and 'interval' arrays (pc.tl.archetype_co_occurrence)",
         "archetype_spatial_autocorr": "DataFrame with Moran's I / Geary's C per archetype weight",
         "archetype_interaction_boundaries": "Dict with boundary_scores, mean_weights_a/b, cross-correlations",
+        "peach_simplex_regression": "Simplex regression coefficients and statistics",
+        "peach_driver_regression": "Driver regression coefficients (ILR space + simplex)",
+        "peach_feature_patterns": "Pattern classification results",
+        "peach_gmm": "GMM decomposition results",
+        "peach_flow_*": "Flow matching summary statistics",
+        "peach_pair_enrichment": "Spatial pair enrichment results",
     },
     "obs": {
         "archetypes": "Categorical: 'archetype_0', 'archetype_1', ..., 'no_archetype'",
@@ -975,6 +1222,19 @@ USE_GET_FOR: set[str] = {
     # DataFrame columns (may be absent depending on FDR settings)
     "fdr_pvalue",
     "significant",
+    # v0.5.0: SimplexRegressionResult optional fields
+    "interaction_coefficients",
+    "interaction_pvalues",
+    "interaction_se",
+    "r_squared_degree2",
+    "vertex_ci_lower",
+    "vertex_ci_upper",
+    "interaction_ci_lower",
+    "interaction_ci_upper",
+    # v0.5.0: GMMResult optional fields
+    "component_feature_profiles",
+    # v0.5.0: FlowBetweenResult optional fields
+    "archetype_correspondence",
 }
 
 

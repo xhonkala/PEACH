@@ -3371,3 +3371,221 @@ def get_required_columns(result_type: str) -> set[str]:
     return {name for name, field_info in model.model_fields.items() if field_info.is_required()}
 
 
+class SimplexRegressionResult(BaseModel):
+    """Result of simplex regression (Scheffe polynomial) on archetype weights."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    feature_names: list[str]
+    archetype_names: list[str]
+    n_cells: int
+    n_features: int
+    n_archetypes: int
+
+    # Degree 1 (linear)
+    vertex_coefficients: np.ndarray  # [n_features, K]
+    r_squared_degree1: np.ndarray  # [n_features]
+    f_pvalue: np.ndarray  # [n_features] raw
+    f_pvalue_fdr: np.ndarray  # [n_features] BH-corrected
+    vertex_pvalues: np.ndarray  # [n_features, K]
+    vertex_se: np.ndarray  # [n_features, K]
+
+    # Degree 2 (interactions) — None if max_degree=1
+    interaction_coefficients: np.ndarray | None = None  # [n_features, K-choose-2]
+    interaction_pairs: list[tuple] | None = None
+    interaction_pvalues: np.ndarray | None = None
+    interaction_se: np.ndarray | None = None
+    r_squared_degree2: np.ndarray | None = None
+
+    # Bootstrap CIs — None if n_bootstrap=0
+    vertex_ci_lower: np.ndarray | None = None  # [n_features, K]
+    vertex_ci_upper: np.ndarray | None = None
+    interaction_ci_lower: np.ndarray | None = None
+    interaction_ci_upper: np.ndarray | None = None
+
+    def to_serializable(self) -> dict:
+        """Convert to h5ad-safe dict for adata.uns storage."""
+        d = {}
+        for field_name, value in self:
+            if value is None:
+                continue
+            if isinstance(value, np.ndarray):
+                d[field_name] = value
+            elif isinstance(value, list):
+                d[field_name] = value
+            else:
+                d[field_name] = value
+        return d
+
+
+class DriverRegressionResult(BaseModel):
+    """Result of archetype driver regression (features predict weights).
+
+    The 'flipped' regression: instead of weights predicting features,
+    features predict ILR-transformed weights. Identifies which features
+    (genesets, pathways) drive archetypal specialization.
+
+    K-1 regressions are fit in ILR space to avoid redundancy from the
+    sum-to-1 constraint. Coefficients are back-transformed to per-archetype
+    simplex space for interpretation.
+    """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    feature_names: list[str]
+    n_cells: int
+    n_features: int
+    n_archetypes: int
+
+    # ILR-space coefficients (K-1 regressions)
+    main_coefficients_ilr: np.ndarray  # [K-1, n_features]
+    interaction_coefficients_ilr: np.ndarray | None = None  # [K-1, n_features-choose-2]
+
+    # Back-transformed to per-archetype
+    main_coefficients: np.ndarray  # [K, n_features]
+    interaction_coefficients: np.ndarray | None = None  # [K, n_features-choose-2]
+
+    # Significance (in ILR space)
+    main_pvalues: np.ndarray  # [K-1, n_features]
+    interaction_pvalues: np.ndarray | None = None
+
+    # Bootstrap CIs (back-transformed)
+    main_ci_lower: np.ndarray | None = None
+    main_ci_upper: np.ndarray | None = None
+
+    # Model fit
+    r_squared: np.ndarray  # [K-1] per ILR component
+    intercepts: np.ndarray  # [K-1]
+
+    def to_serializable(self) -> dict:
+        """Convert to h5ad-safe dict for adata.uns storage."""
+        d = {}
+        for field_name, value in self:
+            if value is None:
+                continue
+            if isinstance(value, np.ndarray):
+                d[field_name] = value
+            elif isinstance(value, list):
+                d[field_name] = value
+            else:
+                d[field_name] = value
+        return d
+
+
+class PatternClassificationResult(BaseModel):
+    """Result of feature pattern classification from regression coefficients."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    feature_names: list[str]
+    n_features: int
+    classifications: list[dict]  # one per feature: {pattern, confidence, details}
+    pattern_counts: dict[str, int]  # pattern_name -> count
+
+    def to_serializable(self) -> dict:
+        """Convert to h5ad-safe dict for adata.uns storage."""
+        return {
+            "feature_names": self.feature_names,
+            "n_features": self.n_features,
+            "classifications": self.classifications,
+            "pattern_counts": self.pattern_counts,
+        }
+
+
+class FlowWithinResult(BaseModel):
+    """Result of flow matching within a single AnnData."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    source_mask: np.ndarray  # [n_cells] boolean
+    target_mask: np.ndarray  # [n_cells] boolean
+    transported: np.ndarray  # [n_source, dim]
+    losses: list[float]
+    mmd_before: float
+    mmd_after: float
+    pca_key: str
+    name: str | None = None
+
+    # model is NOT stored in adata — kept separate
+    # Users access it via the returned result object
+
+
+class FlowBetweenResult(BaseModel):
+    """Result of flow matching between separate AnnDatas."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    condition_key: str
+    condition_labels: list[str]
+    flows: dict  # {(src_label, tgt_label): FlowWithinResult}
+    archetype_correspondence: dict | None = None  # {(src, tgt): np.ndarray[K_src x K_tgt]}
+
+
+class GeneAlignmentResult(BaseModel):
+    """Result of gene alignment with flow velocity."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    alignment_scores: np.ndarray  # [n_genes]
+    gene_names: list[str]
+    top_aligned: list[str]
+    top_opposed: list[str]
+    t: float
+
+
+class FlowJacobianResult(BaseModel):
+    """Result of flow Jacobian analysis."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    jacobian_det: np.ndarray  # [n_points] local volume change
+    feature_expansion: np.ndarray  # [n_genes] per-gene expansion score
+    mean_jacobian: np.ndarray  # [dim, dim]
+    t: float
+
+
+class GMMResult(BaseModel):
+    """Result of GMM decomposition in ILR-transformed weight space.
+
+    Decomposes the cell population into sub-populations that occupy distinct
+    regions of the archetype weight simplex. Components are selected by BIC
+    and filtered by multi-initialization stability analysis.
+
+    Attributes
+    ----------
+    n_components_optimal : int
+        BIC-selected number of components.
+    n_components_stable : int
+        Number of components after stability filtering.
+    component_assignments : np.ndarray [n_cells]
+        Cluster labels for stable components. Cells assigned to unstable
+        components get label -1.
+    component_simplex_means : np.ndarray [n_stable, K]
+        Centroids mapped back to the weight simplex (rows sum to 1).
+    component_archetype_map : np.ndarray [n_stable]
+        Index of the nearest archetype for each component centroid.
+    component_stability_scores : np.ndarray [n_stable]
+        Stability score for each retained component (in [0, 1]).
+    component_feature_profiles : np.ndarray or None [n_stable, n_features]
+        Mean feature values per component. None if characterize_features=False.
+    bic_values : np.ndarray [n_tested]
+        BIC values for each n_components tested.
+    n_components_tested : np.ndarray [n_tested]
+        Array of n_components values tested.
+    """
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    n_components_optimal: int
+    n_components_stable: int
+    component_assignments: np.ndarray  # [n_cells]
+    component_simplex_means: np.ndarray  # [n_stable, K]
+    component_archetype_map: np.ndarray  # [n_stable]
+    component_stability_scores: np.ndarray  # [n_stable]
+    component_feature_profiles: np.ndarray | None = None  # [n_stable, n_features]
+    bic_values: np.ndarray  # [n_tested]
+    n_components_tested: np.ndarray  # [n_tested]
+
+    def to_serializable(self) -> dict:
+        """Convert to h5ad-safe dict for adata.uns storage."""
+        d = {}
+        for field_name, value in self:
+            if value is None:
+                continue
+            if isinstance(value, np.ndarray):
+                d[field_name] = value
+            else:
+                d[field_name] = value
+        return d

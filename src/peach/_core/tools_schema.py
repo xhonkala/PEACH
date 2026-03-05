@@ -19,7 +19,7 @@ Key Concepts:
     - Session state maintains loaded datasets in ADATA_REGISTRY
     - Results are stored back in the AnnData object (adata.obs, adata.obsm, adata.uns)
 
-Version: 0.4.0
+Version: 0.5.0
 """
 
 from dataclasses import dataclass, field
@@ -1140,6 +1140,269 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         returns="Figure",
         returns_description="Horizontal bar chart of driver genes",
         requires=["lineage_drivers DataFrame"],
+        modifies_adata=[],
+    ),
+    # =========================================================================
+    # v0.5.0: Continuous Characterization (tl)
+    # =========================================================================
+    "tl.feature_simplex_regression": ToolSchema(
+        name="tl.feature_simplex_regression",
+        description="Simplex regression of features on archetype weights using Scheffe polynomials. "
+        "Fits linear (degree 1) and optionally interaction (degree 2) models. "
+        "Stores results in adata.uns['peach_simplex_regression'].",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
+            Parameter(
+                "feature_matrix",
+                ParamType.STRING,
+                "Feature matrix to regress. None = adata.X, str = obsm key, array = direct",
+                required=False,
+                default=None,
+            ),
+            Parameter("feature_names", ParamType.ARRAY, "Feature names. Inferred if None", required=False, default=None),
+            Parameter("max_degree", ParamType.INTEGER, "1 = linear only, 2 = with pairwise interactions", default=2),
+            Parameter("n_bootstrap", ParamType.INTEGER, "Bootstrap samples for CIs (0 to disable)", default=1000),
+            Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 heteroscedasticity-consistent SEs", default=True),
+            Parameter("store_residuals", ParamType.BOOLEAN, "Store residuals in adata.obsm", default=True),
+            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
+        ],
+        returns="SimplexRegressionResult",
+        returns_description="vertex_coefficients [n_features, K], r_squared_degree1, f_pvalue, vertex_pvalues, "
+        "interaction_coefficients (optional), CIs (optional)",
+        requires=["cell_archetype_weights in adata.obsm"],
+        modifies_adata=[
+            "uns['peach_simplex_regression']",
+            "obsm['peach_residuals'] (if store_residuals=True)",
+        ],
+    ),
+    "tl.classify_feature_patterns": ToolSchema(
+        name="tl.classify_feature_patterns",
+        description="Classify features into biological pattern types (exclusive, gradient, flat, etc.) "
+        "based on simplex regression coefficients.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
+            Parameter(
+                "regression_result",
+                ParamType.OBJECT,
+                "SimplexRegressionResult. If None, reads from adata.uns",
+                required=False,
+                default=None,
+            ),
+            Parameter("r2_threshold", ParamType.FLOAT, "Minimum R^2 for non-flat classification", default=0.05),
+            Parameter("significance_threshold", ParamType.FLOAT, "P-value threshold", default=0.05),
+            Parameter(
+                "effect_size_threshold",
+                ParamType.FLOAT,
+                "Auto-calibrated from data if None",
+                required=False,
+                default=None,
+            ),
+        ],
+        returns="PatternClassificationResult",
+        returns_description="classifications [n_features] with pattern type and details, pattern_counts dict",
+        requires=["peach_simplex_regression in adata.uns (or regression_result)"],
+        modifies_adata=["uns['peach_feature_patterns']"],
+    ),
+    "tl.archetype_driver_regression": ToolSchema(
+        name="tl.archetype_driver_regression",
+        description="Flipped regression: features predict archetype weights (ILR space). "
+        "Identifies which features drive archetypal specialization.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
+            Parameter(
+                "feature_matrix",
+                ParamType.STRING,
+                "Feature matrix (predictors). Default: pathway_scores if available, else adata.X",
+                required=False,
+                default=None,
+            ),
+            Parameter("feature_names", ParamType.ARRAY, "Feature names", required=False, default=None),
+            Parameter("max_degree", ParamType.INTEGER, "1 = main effects only, 2 = with interactions", default=2),
+            Parameter("n_bootstrap", ParamType.INTEGER, "Bootstrap samples for CIs (0 to disable)", default=1000),
+            Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 SEs", default=True),
+            Parameter(
+                "max_interaction_features",
+                ParamType.INTEGER,
+                "Max features allowed for degree=2",
+                default=50,
+            ),
+            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
+        ],
+        returns="DriverRegressionResult",
+        returns_description="main_coefficients_ilr [K-1, n_features], main_coefficients [K, n_features], "
+        "main_pvalues, r_squared [K-1]",
+        requires=["cell_archetype_weights in adata.obsm"],
+        modifies_adata=["uns['peach_driver_regression']"],
+    ),
+    "tl.feature_simplex_decomposition": ToolSchema(
+        name="tl.feature_simplex_decomposition",
+        description="Decompose cell populations by GMM in ILR-transformed archetype weight space. "
+        "Selects component count by BIC and filters by multi-initialization stability.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
+            Parameter(
+                "feature_matrix",
+                ParamType.STRING,
+                "Feature matrix for component characterization",
+                required=False,
+                default=None,
+            ),
+            Parameter("feature_names", ParamType.ARRAY, "Feature names", required=False, default=None),
+            Parameter(
+                "n_components_range",
+                ParamType.ARRAY,
+                "(min, max) components to test. Default: (K, 3*K)",
+                required=False,
+                default=None,
+            ),
+            Parameter("covariance_type", ParamType.STRING, "GMM covariance type", default="full"),
+            Parameter("n_initializations", ParamType.INTEGER, "Random inits for stability", default=20),
+            Parameter("stability_threshold", ParamType.FLOAT, "Min stability score to retain", default=0.7),
+            Parameter("characterize_features", ParamType.BOOLEAN, "Compute per-component feature profiles", default=True),
+            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
+            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
+        ],
+        returns="GMMResult",
+        returns_description="n_components_optimal, n_components_stable, component_assignments, "
+        "component_simplex_means, bic_values",
+        requires=["cell_archetype_weights in adata.obsm"],
+        modifies_adata=["uns['peach_gmm']", "obsm['peach_gmm_labels']"],
+    ),
+    "tl.flow_within": ToolSchema(
+        name="tl.flow_within",
+        description="Train a neural ODE flow model to transport source cells to target cells "
+        "within a single AnnData. Measures transport quality via MMD.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
+            Parameter("source", ParamType.OBJECT, "Obs column filter dict, e.g. {'treatment': 'Base'}"),
+            Parameter("target", ParamType.OBJECT, "Obs column filter dict, e.g. {'treatment': 'PD1'}"),
+            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
+            Parameter("hidden_dims", ParamType.ARRAY, "MLP hidden dimensions", default=[128, 128, 128]),
+            Parameter("lr", ParamType.FLOAT, "Learning rate", default=1e-3),
+            Parameter("n_epochs", ParamType.INTEGER, "Training epochs", default=1000),
+            Parameter("batch_size", ParamType.INTEGER, "Batch size", default=256),
+            Parameter("n_steps", ParamType.INTEGER, "Euler integration steps", default=50),
+            Parameter("device", ParamType.STRING, "Computing device", default="cpu"),
+            Parameter("name", ParamType.STRING, "Name for storage key", required=False, default=None),
+            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
+            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
+        ],
+        returns="FlowWithinResult",
+        returns_description="transported [n_source, dim], losses, mmd_before, mmd_after, source/target masks",
+        requires=["X_pca in adata.obsm", "source/target columns in adata.obs"],
+        modifies_adata=["uns['peach_flow_*']"],
+    ),
+    "tl.archetype_summary": ToolSchema(
+        name="tl.archetype_summary",
+        description="Generate structured summary for one or all archetypes. "
+        "Aggregates results from regression, patterns, drivers, and GMM.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
+            Parameter(
+                "archetype_idx",
+                ParamType.INTEGER,
+                "Specific archetype index, or None for all",
+                required=False,
+                default=None,
+            ),
+            Parameter("top_n", ParamType.INTEGER, "Top enriched/depleted features to report", default=20),
+            Parameter("include_drivers", ParamType.BOOLEAN, "Include driver regression results", default=True),
+            Parameter("include_gmm", ParamType.BOOLEAN, "Include GMM components", default=True),
+        ],
+        returns="dict | list[dict]",
+        returns_description="Per-archetype summary with top_enriched, top_depleted, interactions, pattern_counts, "
+        "driver_genesets (optional), gmm_components (optional)",
+        requires=["peach_simplex_regression in adata.uns"],
+        modifies_adata=[],
+    ),
+    # =========================================================================
+    # v0.5.0: Continuous Characterization (pl)
+    # =========================================================================
+    "pl.ternary_facet": ToolSchema(
+        name="pl.ternary_facet",
+        description="Ternary plot for 3 selected archetypes on triangular axes.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
+            Parameter("archetypes", ParamType.ARRAY, "Tuple of 3 archetype indices", default=[0, 1, 2]),
+            Parameter("color_by", ParamType.STRING, "Color by gene, obs column, or obsm column", required=False, default=None),
+            Parameter("style", ParamType.STRING, "Plot style: 'scatter' or 'density'", default="scatter"),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="Ternary scatter or density plot for 3 archetypes",
+        requires=["cell_archetype_weights in adata.obsm"],
+        modifies_adata=[],
+    ),
+    "pl.coefficient_heatmap": ToolSchema(
+        name="pl.coefficient_heatmap",
+        description="Heatmap of vertex coefficients for top features by R^2.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
+            Parameter("top_n", ParamType.INTEGER, "Number of top features to display", default=50),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="Plotly heatmap of features x archetypes",
+        requires=["peach_simplex_regression in adata.uns"],
+        modifies_adata=[],
+    ),
+    "pl.r2_barplot": ToolSchema(
+        name="pl.r2_barplot",
+        description="Bar plot of features ranked by R^2 from simplex regression.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
+            Parameter("top_n", ParamType.INTEGER, "Number of top features to display", default=50),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="Ranked bar plot of R^2 values",
+        requires=["peach_simplex_regression in adata.uns"],
+        modifies_adata=[],
+    ),
+    "pl.pattern_summary": ToolSchema(
+        name="pl.pattern_summary",
+        description="Bar plot summarizing pattern type counts from feature classification.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with pattern results"),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="Bar chart of pattern type counts",
+        requires=["peach_feature_patterns in adata.uns"],
+        modifies_adata=[],
+    ),
+    "pl.component_scatter": ToolSchema(
+        name="pl.component_scatter",
+        description="2D PCA scatter colored by GMM component assignment.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with GMM results"),
+            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="PCA scatter with cells colored by GMM component",
+        requires=["peach_gmm in adata.uns", "peach_gmm_labels in adata.obsm"],
+        modifies_adata=[],
+    ),
+    "pl.velocity_quiver": ToolSchema(
+        name="pl.velocity_quiver",
+        description="2D quiver plot of flow transport directions in PCA space.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
+            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
+            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
+            Parameter("n_arrows", ParamType.INTEGER, "Number of arrows to draw", default=200),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="2D quiver plot with arrows from source to transported positions",
+        requires=["X_pca in adata.obsm", "FlowWithinResult"],
         modifies_adata=[],
     ),
     # =========================================================================
