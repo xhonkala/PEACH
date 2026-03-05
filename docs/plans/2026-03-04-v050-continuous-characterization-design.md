@@ -552,17 +552,46 @@ pc.tl.flow_gene_alignment(
 pc.tl.flow_jacobian(
     adata,
     flow_result,
-    t=0.5,
+    t=0.5,                      # scalar or list of floats for temporal profiling
     evaluation_points=None,     # default: source cell positions
+    n_subsample=1000,           # subsample evaluation points (None = all). Recommended for
+                                # temporal profiling to manage compute cost.
     pca_loadings_key=None,
     aggregate='mean',           # 'mean', 'median', or None (per-cell)
+    n_bootstrap=0,              # bootstrap iterations on subsampled cells for CI estimation.
+                                # Only meaningful when n_subsample is set. Default 0 (off).
+    ci_level=0.95,
+    random_state=42,
 )
-# Returns: FlowJacobianResult
+# Returns: FlowJacobianResult (or list of FlowJacobianResult if t is a list)
 # - jacobian_det: [n_points] — local volume change (>1 = expanding, <1 = contracting)
 # - feature_expansion: [n_genes] — per-gene expansion/contraction score
 #   (projection of Jacobian onto each PCA loading direction)
 # - mean_jacobian: [dim x dim] — averaged Jacobian matrix
+# - t_value: float — which time point this result corresponds to
+# - bootstrap_ci_lower, bootstrap_ci_upper: [n_genes] — CIs on feature_expansion (if n_bootstrap > 0)
 ```
+
+**Temporal Jacobian profiling (paper-driven extension)**:
+
+When `t` is a list (e.g., `[0.1, 0.2, ..., 0.9]`), evaluate the Jacobian at each time point
+and return a list of `FlowJacobianResult` objects. This enables:
+
+- **Flow shepherd/wolf classification per gene per time point**: shepherd (high alignment +
+  low jacobian_det + negative feature_expansion) vs wolf (high alignment + high jacobian_det +
+  positive feature_expansion).
+- **Tipping point detection**: genes that transition from shepherd → wolf across flow time have
+  a tipping time t* where the classification flips. This corresponds to a bifurcation — entropy
+  reduction followed by entropy expansion — interpretable as a cell committing to a new state basin.
+- **Subsampling + bootstrap**: use `n_subsample=1000` with `n_bootstrap=200` to generate CIs on
+  the gene-level scores. This validates that Jacobian-derived classifications are robust to cell
+  sampling and not artifacts of specific cell neighborhoods.
+
+Downstream analysis (not a new PEACH module, but documented as a workflow):
+- For identified shepherd→wolf genes, use `pc.tl.compute_lineage_pseudotimes()` (CellRank) to
+  fit GAMs of gene expression along pseudotime. GAM peak location should correlate with t*.
+  Two independent methods (flow Jacobian tipping + CellRank GAM peak) pointing at the same
+  temporal structure provides robustness.
 
 ### Flow Permutation Test
 
@@ -678,6 +707,42 @@ pc.tl.archetype_pair_enrichment(
 ```
 
 Uses squidpy infrastructure under the hood. Extends the existing `_ensure_categorical()` pattern to handle weight-derived pair labels.
+
+### Cross-Cell-Type Archetype Co-Localization (Paper-Driven Extension)
+
+Identify heterologous cell types that exhibit spatially co-localized archetype gradients — i.e.,
+a cell type that is consistently found near cells of a different type that have high spread
+between specific archetypes.
+
+**Biological motivation**: A TIE2+ macrophage consistently neighboring cancer cells with high
+archetype 1–2 spread suggests the macrophage is regulating the cancer cell state transition.
+Combined with flow matching between archetypes 1 and 2, this identifies candidate ligand-receptor
+pairs (e.g., CD73) driving the interaction.
+
+```python
+pc.tl.archetype_gradient_colocalization(
+    adata,
+    cell_type_key='cell_type',       # obs column for cell type labels
+    archetype_pairs=None,            # list of (i,j) or 'all'; which archetype gradients to test
+    neighbor_cell_types=None,        # which cell types to test as neighbors; default: all
+    weight_spread_metric='range',    # 'range' (w_i - w_j) or 'entropy' across pair weights
+    spatial_key='spatial',
+    n_permutations=1000,
+    min_cells=20,                    # minimum cells per type per neighborhood to test
+)
+# Returns: ColocalizationResult
+# Per (cell_type, neighbor_type, archetype_pair):
+# - enrichment_score: how much more the neighbor type appears near high-spread cells vs expected
+# - p_value: permutation-based
+# - mean_neighbor_distance: average spatial distance
+# - candidate_interactions: if ligand-receptor DB available, rank by spatial proximity + expression
+```
+
+**Workflow**: After identifying co-localized pairs, run `flow_within()` on the cancer cells
+between the two archetypes, then cross-reference flow shepherd/wolf genes with known ligand-receptor
+databases (CellPhoneDB, NicheNet) to nominate interaction candidates. Genes that are flow shepherds
+in cancer cells AND whose cognate ligands are expressed in the co-localized cell type are high-priority
+candidates for functional validation.
 
 ---
 
