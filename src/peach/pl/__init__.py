@@ -26,6 +26,38 @@ from .spatial import (
     spatial_autocorr,
 )
 
+# Regression visualization
+from .regression import (
+    coefficient_heatmap,
+    interaction_heatmap,
+    r2_barplot,
+    vertex_radar,
+    regression_volcano,
+    pattern_summary,
+)
+
+# Ternary simplex visualization
+from .ternary import ternary_facet, ternary_facet_grid
+
+# GMM decomposition visualization
+from .decomposition import (
+    component_scatter,
+    gmm_bic_curve,
+    component_heatmap,
+    component_stability,
+)
+
+# Flow matching visualization
+from .flow import (
+    velocity_quiver,
+    gene_alignment_barplot,
+    jacobian_heatmap,
+    trajectory_ribbon,
+    flow_magnitude,
+    density_comparison,
+    archetype_correspondence,
+)
+
 __all__ = [
     "archetypal_space",
     "archetypal_space_multi",
@@ -47,4 +79,27 @@ __all__ = [
     "interaction_boundaries",
     "spatial_autocorr",
     "cross_correlations",
+    # Regression
+    "coefficient_heatmap",
+    "interaction_heatmap",
+    "r2_barplot",
+    "vertex_radar",
+    "regression_volcano",
+    "pattern_summary",
+    # Ternary
+    "ternary_facet",
+    "ternary_facet_grid",
+    # GMM Decomposition
+    "component_scatter",
+    "gmm_bic_curve",
+    "component_heatmap",
+    "component_stability",
+    # Flow Matching
+    "velocity_quiver",
+    "gene_alignment_barplot",
+    "jacobian_heatmap",
+    "trajectory_ribbon",
+    "flow_magnitude",
+    "density_comparison",
+    "archetype_correspondence",
 ]

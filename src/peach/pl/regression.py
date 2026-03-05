@@ -1,0 +1,337 @@
+"""Regression visualization: coefficient heatmaps, R^2 plots, pattern summaries."""
+
+import numpy as np
+import plotly.graph_objects as go
+from anndata import AnnData
+
+
+def _get_regression_data(adata):
+    """Helper to extract regression results from adata.uns."""
+    if "peach_simplex_regression" not in adata.uns:
+        raise ValueError(
+            "No regression results found. Run pc.tl.feature_simplex_regression() first."
+        )
+    return adata.uns["peach_simplex_regression"]
+
+
+def coefficient_heatmap(
+    adata: AnnData,
+    *,
+    top_n: int = 50,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """Heatmap of vertex coefficients (beta_k) for top features by R^2.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have regression results in ``uns['peach_simplex_regression']``.
+    top_n : int
+        Number of top features to display, ranked by R^2.
+    save_path : str or None
+        If provided, save figure as HTML to this path.
+    show : bool
+        Whether to call ``fig.show()``.
+
+    Returns
+    -------
+    go.Figure
+    """
+    reg = _get_regression_data(adata)
+    coefs = np.asarray(reg["vertex_coefficients"])  # [n_features, K]
+    names = list(reg["feature_names"])
+    r2 = np.asarray(reg["r_squared_degree1"])
+
+    # Top features by R^2
+    top_idx = np.argsort(r2)[-top_n:][::-1]
+    top_coefs = coefs[top_idx]
+    top_names = [names[i] for i in top_idx]
+
+    K = coefs.shape[1]
+    arch_names = [f"Archetype {k}" for k in range(K)]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=top_coefs,
+        x=arch_names,
+        y=top_names,
+        colorscale="RdBu_r",
+        zmid=0,
+        colorbar={"title": "Coefficient"},
+    ))
+    fig.update_layout(
+        title=f"Vertex Coefficients (top {min(top_n, len(top_names))} by R\u00b2)",
+        xaxis_title="Archetype",
+        yaxis_title="Feature",
+        height=max(400, len(top_names) * 20),
+    )
+
+    if save_path:
+        fig.write_html(save_path)
+    if show:
+        fig.show()
+    return fig
+
+
+def interaction_heatmap(
+    adata: AnnData,
+    *,
+    top_n: int = 50,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """Heatmap of interaction coefficients (beta_{jk}) for top features.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have degree-2 regression results in ``uns['peach_simplex_regression']``.
+    top_n : int
+        Number of top features to display, ranked by R^2.
+    save_path : str or None
+        If provided, save figure as HTML to this path.
+    show : bool
+        Whether to call ``fig.show()``.
+
+    Returns
+    -------
+    go.Figure
+    """
+    reg = _get_regression_data(adata)
+
+    if reg.get("interaction_coefficients") is None:
+        raise ValueError("No interaction coefficients found. Run with max_degree=2.")
+
+    int_coefs = np.asarray(reg["interaction_coefficients"])
+    names = list(reg["feature_names"])
+    pairs = reg.get("interaction_pairs", [])
+    r2 = np.asarray(reg.get("r_squared_degree2", reg["r_squared_degree1"]))
+
+    top_idx = np.argsort(r2)[-top_n:][::-1]
+    top_coefs = int_coefs[top_idx]
+    top_names = [names[i] for i in top_idx]
+    pair_names = [f"({p[0]},{p[1]})" for p in pairs]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=top_coefs,
+        x=pair_names,
+        y=top_names,
+        colorscale="RdBu_r",
+        zmid=0,
+        colorbar={"title": "Interaction"},
+    ))
+    fig.update_layout(
+        title=f"Interaction Coefficients (top {min(top_n, len(top_names))} by R\u00b2)",
+        xaxis_title="Archetype Pair",
+        yaxis_title="Feature",
+        height=max(400, len(top_names) * 20),
+    )
+
+    if save_path:
+        fig.write_html(save_path)
+    if show:
+        fig.show()
+    return fig
+
+
+def r2_barplot(
+    adata: AnnData,
+    *,
+    top_n: int = 50,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """Horizontal bar plot of features ranked by R^2.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have regression results in ``uns['peach_simplex_regression']``.
+    top_n : int
+        Number of top features to display.
+    save_path : str or None
+        If provided, save figure as HTML to this path.
+    show : bool
+        Whether to call ``fig.show()``.
+
+    Returns
+    -------
+    go.Figure
+    """
+    reg = _get_regression_data(adata)
+    r2 = np.asarray(reg["r_squared_degree1"])
+    names = list(reg["feature_names"])
+
+    top_idx = np.argsort(r2)[-top_n:][::-1]
+    top_r2 = r2[top_idx]
+    top_names = [names[i] for i in top_idx]
+
+    # Reverse so highest is at top of horizontal bar chart
+    fig = go.Figure(data=go.Bar(
+        x=top_r2[::-1],
+        y=top_names[::-1],
+        orientation="h",
+        marker_color="steelblue",
+    ))
+    fig.update_layout(
+        title=f"Top {min(top_n, len(top_names))} Features by R\u00b2",
+        xaxis_title="R\u00b2",
+        yaxis_title="Feature",
+        height=max(400, len(top_names) * 20),
+    )
+
+    if save_path:
+        fig.write_html(save_path)
+    if show:
+        fig.show()
+    return fig
+
+
+def vertex_radar(
+    adata: AnnData,
+    feature: str,
+    *,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """Spider/radar plot of vertex coefficients for one feature.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have regression results in ``uns['peach_simplex_regression']``.
+    feature : str
+        Feature name to visualize.
+    save_path : str or None
+        If provided, save figure as HTML to this path.
+    show : bool
+        Whether to call ``fig.show()``.
+
+    Returns
+    -------
+    go.Figure
+    """
+    reg = _get_regression_data(adata)
+    names = list(reg["feature_names"])
+    coefs = np.asarray(reg["vertex_coefficients"])
+
+    if feature not in names:
+        raise ValueError(f"Feature '{feature}' not found in regression results.")
+
+    idx = names.index(feature)
+    betas = coefs[idx]
+    K = len(betas)
+    arch_names = [f"Archetype {k}" for k in range(K)]
+
+    fig = go.Figure(data=go.Scatterpolar(
+        r=list(betas) + [betas[0]],  # close the polygon
+        theta=arch_names + [arch_names[0]],
+        fill="toself",
+        name=feature,
+    ))
+    fig.update_layout(
+        polar={"radialaxis": {"visible": True}},
+        title=f"Vertex Coefficients: {feature}",
+    )
+
+    if save_path:
+        fig.write_html(save_path)
+    if show:
+        fig.show()
+    return fig
+
+
+def regression_volcano(
+    adata: AnnData,
+    *,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """Scatter plot: R^2 vs max vertex contrast (max beta - min beta).
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have regression results in ``uns['peach_simplex_regression']``.
+    save_path : str or None
+        If provided, save figure as HTML to this path.
+    show : bool
+        Whether to call ``fig.show()``.
+
+    Returns
+    -------
+    go.Figure
+    """
+    reg = _get_regression_data(adata)
+    r2 = np.asarray(reg["r_squared_degree1"])
+    coefs = np.asarray(reg["vertex_coefficients"])
+    names = list(reg["feature_names"])
+
+    contrast = np.ptp(coefs, axis=1)  # max - min per feature
+
+    fig = go.Figure(data=go.Scatter(
+        x=contrast,
+        y=r2,
+        mode="markers",
+        text=names,
+        marker={"size": 5, "opacity": 0.6, "color": "steelblue"},
+    ))
+    fig.update_layout(
+        title="Regression Volcano: R\u00b2 vs Vertex Contrast",
+        xaxis_title="Max Vertex Contrast (max \u03b2 - min \u03b2)",
+        yaxis_title="R\u00b2",
+    )
+
+    if save_path:
+        fig.write_html(save_path)
+    if show:
+        fig.show()
+    return fig
+
+
+def pattern_summary(
+    adata: AnnData,
+    *,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """Bar chart of pattern counts from classification results.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have pattern classification results in ``uns['peach_feature_patterns']``.
+    save_path : str or None
+        If provided, save figure as HTML to this path.
+    show : bool
+        Whether to call ``fig.show()``.
+
+    Returns
+    -------
+    go.Figure
+    """
+    if "peach_feature_patterns" not in adata.uns:
+        raise ValueError(
+            "No pattern classification results found. "
+            "Run pc.tl.classify_feature_patterns() first."
+        )
+
+    patterns = adata.uns["peach_feature_patterns"]
+    counts = patterns["pattern_counts"]
+
+    fig = go.Figure(data=go.Bar(
+        x=list(counts.keys()),
+        y=list(counts.values()),
+        marker_color="steelblue",
+    ))
+    fig.update_layout(
+        title="Feature Pattern Distribution",
+        xaxis_title="Pattern Type",
+        yaxis_title="Count",
+    )
+
+    if save_path:
+        fig.write_html(save_path)
+    if show:
+        fig.show()
+    return fig
