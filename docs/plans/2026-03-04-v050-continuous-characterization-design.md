@@ -1,6 +1,6 @@
 # PEACH v0.5.0 Design: Continuous Archetype Characterization + Cross-Condition Flow Matching
 
-**Status**: Design approved 2026-03-04
+**Status**: Design approved 2026-03-04, hardened via gremlin review 2026-03-04
 **Branch from**: `main` (commit 90e98ba)
 **Scope**: Simplex regression, pattern classification, flipped regression, GMM decomposition, flow matching, ternary visualization, spatial pair enrichment
 
@@ -40,6 +40,28 @@ v0.5.0 replaces this with:
 
 ---
 
+## Gremlin Review Resolutions (2026-03-04)
+
+Issues surfaced via adversarial design review, with resolutions:
+
+| Issue | Severity | Resolution |
+|-------|----------|------------|
+| Sparse matrix densification OOM | CRITICAL | Keep sparse matrices sparse throughout; never densify full adata.X. scipy sparse supports OLS operations. |
+| Flipped regression design matrix explosion | CRITICAL | Default `max_interaction_features=50`. Full 200-geneset interactions feasible on HPC but not first-class default. |
+| Archetype weights sum-to-1 fragility | HIGH | PEACH enforces this with 1e-8 epsilon for boundary stability. Tolerance is 1e-8. Assert strictly, do not silently renormalize — raise error if violated. |
+| K redundant regressions in flipped version | HIGH | Fit K-1 regressions on ILR-transformed weights. Back-transform coefficients to simplex for interpretation. |
+| flow_between() "same PCA space" validation | HIGH | Error if n_PCs don't match between AnnDatas. Caution notes in tutorials for users who PCA'd separately. |
+| h5ad serialization of model objects | HIGH | Store only serializable summary stats (dicts, arrays, DataFrames) in adata.uns. Keep Pydantic models, sklearn GMM, and PyTorch FlowModel objects separate with save/load utilities. |
+| Bootstrap wall time (n=1000) | MEDIUM | Keep n_bootstrap=1000 default (acceptable for K<15). Add tqdm progress bar. Document that users can reduce for speed. |
+| Flow permutation test wall time | MEDIUM | Reduce to 200 epochs per permutation training (not full 1000). Ensure GPU-ready. Default 100 permutations. |
+| ILR transform at zero weights | MEDIUM | Use epsilon=1e-3 before log. Larger epsilon avoids extreme outliers near vertices. Document the smoothing. |
+| Ternary regression overlay marginalization | MEDIUM | Zero-pad other weights (project onto face boundary). Document clearly. |
+| Archetype correspondence coordinate space | MEDIUM | Archetypes translated to PCA space via `peach.tl.archetypal_coordinates()`. Verify coordinate system match before transport. |
+| Overwrite-on-rerun | LOW | Warn when overwriting existing results. Both degree 1 and 2 remain default-on. |
+| Pattern classification threshold noise | LOW | Raise R^2 floor to 0.05 (5% variance explained). Effect-size threshold auto-calibrated from data. |
+
+---
+
 ## Architecture
 
 ### File Layout
@@ -76,35 +98,46 @@ All analysis modules accept the same `(feature_matrix, feature_names)` pattern:
 ```python
 def resolve_features(adata, feature_matrix=None, feature_names=None):
     """
-    Returns (np.ndarray[n_cells, n_features], list[str]).
+    Returns (matrix[n_cells, n_features], list[str]).
+    Matrix may be sparse (scipy.sparse) or dense (np.ndarray).
 
     Resolution:
-      feature_matrix=None       -> adata.X (densified if sparse)
+      feature_matrix=None       -> adata.X (kept sparse if sparse; never densified)
       feature_matrix='key'      -> adata.obsm['key']
       feature_matrix=np.ndarray -> use directly
       feature_names=None        -> infer from adata.var_names or generate
+
+    Downstream consumers must handle both sparse and dense inputs.
     """
 
-def get_archetype_weights(adata, renormalize=True):
-    """Extract archetype weights from adata.obsm, assert/enforce sum-to-1."""
+def get_archetype_weights(adata):
+    """Extract archetype weights from adata.obsm.
+    Assert sum-to-1 within 1e-8 tolerance (PEACH's boundary epsilon).
+    Raises ValueError if violated — never silently renormalizes."""
 
 def store_result(adata, key, result, domain='uns'):
-    """Store result in adata with peach_ prefix."""
+    """Store serializable summary in adata with peach_ prefix.
+    Warns (logging.warning) if overwriting existing results at the same key."""
 ```
 
 **Storage convention** (registered in `types_index.py`):
 
 ```
-adata.uns['peach_simplex_regression']     -> SimplexRegressionResult
-adata.uns['peach_driver_regression']      -> DriverRegressionResult
-adata.uns['peach_feature_patterns']       -> PatternClassificationResult
-adata.uns['peach_gmm']                    -> GMMResult
-adata.uns['peach_flow_{name}']            -> FlowResult (per named flow)
+adata.uns['peach_simplex_regression']     -> dict (serializable summary stats only)
+adata.uns['peach_driver_regression']      -> dict (serializable summary stats only)
+adata.uns['peach_feature_patterns']       -> dict (serializable summary stats only)
+adata.uns['peach_gmm']                    -> dict (serializable summary stats only)
+adata.uns['peach_flow_{name}']            -> dict (serializable summary stats only)
 adata.obsm['peach_gmm_labels']            -> component assignments (n_cells,)
 adata.obsm['peach_residuals']             -> residual matrix (n_cells, n_features)
 ```
 
-All results also returned from the function call for users who prefer functional style.
+**Serialization rule**: Only plain dicts, numpy arrays, and DataFrames go into adata.uns/obsm
+(h5ad-safe). Pydantic result objects, sklearn GMM models, and PyTorch FlowModel objects are
+returned from the function call and can be saved separately via `peach.io.save_model()` /
+`peach.io.load_model()` utilities. This prevents silent data loss on `adata.write()`.
+
+All results also returned from the function call as rich typed objects for users who prefer functional style.
 
 ### Shared Resampling Infrastructure
 
@@ -162,7 +195,7 @@ H_diag = np.sum((W @ WtW_inv) * W, axis=1)  # [n], O(np^2)
 # HC3: Var(beta) = (WtW)^-1 (Sigma_i w_i w_i^T * e_i^2 / (1 - h_ii)^2) (WtW)^-1
 ```
 
-**No-intercept assertion**: Assert `abs(weights.sum(axis=1) - 1.0).max() < 1e-6` or renormalize.
+**No-intercept assertion**: Assert `abs(weights.sum(axis=1) - 1.0).max() < 1e-8`. Raise ValueError if violated — PEACH enforces sum-to-1 with 1e-8 boundary epsilon, so any larger deviation indicates a bug upstream.
 
 **Multiple testing**: Global FDR (Benjamini-Hochberg) across all genes for the F-test. Per-gene FDR for coefficient-level t-tests.
 
@@ -171,7 +204,7 @@ H_diag = np.sum((W @ WtW_inv) * W, axis=1)  # [n], O(np^2)
 | Method | Default | Purpose |
 |--------|---------|---------|
 | HC3 SEs | On | Analytic coefficient uncertainty, heteroscedasticity-robust |
-| Bootstrap CIs | On (`n_bootstrap=1000`) | 95% CIs on each beta_k and beta_{jk} |
+| Bootstrap CIs | On (`n_bootstrap=1000`, with tqdm progress bar) | 95% CIs on each beta_k and beta_{jk}. Reduce n_bootstrap for speed if needed. |
 | Permutation test | Off (`permutation_test=False`) | Null distribution of R^2 for model significance |
 
 ### Public API
@@ -225,19 +258,21 @@ Standard simplex regression: weights predict features.
 Flipped: features predict weights.
 
 ```
-E[w_k] = alpha_k + Sigma_g gamma_kg * GS_g + Sigma_{g<h} gamma_k,gh * GS_g * GS_h
+E[ILR(w)_m] = alpha_m + Sigma_g gamma_mg * GS_g + Sigma_{g<h} gamma_m,gh * GS_g * GS_h
 ```
 
-- gamma_kg = how much geneset g contributes to archetype k membership
-- gamma_k,gh = joint effect of genesets g and h on archetype k (interaction driving specialization)
+- Fit K-1 regressions on ILR-transformed archetype weights (avoids redundancy from sum-to-1 constraint)
+- gamma_mg = how much geneset g contributes to ILR component m
+- gamma_m,gh = joint effect of genesets g and h on ILR component m
 - Intercept required (geneset scores are not compositional)
-- K separate OLS regressions (one per archetype weight)
+- Coefficients back-transformed to simplex space for biological interpretation:
+  gamma_kg (per-archetype) recovered via inverse ILR of the coefficient matrix
 
 ### Design Matrix Scaling
 
-With G genesets, the interaction design matrix has G-choose-2 columns. For G=50 pathways, that's 1,225 interaction terms — manageable. For G=200, it's 19,900 — still feasible for OLS but getting large. For G=2000+, interaction terms become impractical.
+With G genesets, the interaction design matrix has G-choose-2 columns. For G=50 pathways, that's 1,225 interaction terms — manageable. For G>50, the design matrix grows rapidly.
 
-**Safeguard**: If n_interactions > 5000, warn and suggest pre-filtering genesets or disabling interactions. The function should not silently build a 100k-column design matrix.
+**Safeguard**: Default `max_interaction_features=50`. Error if n_features exceeds this for degree=2. Full 200-geneset interactions are feasible in HPC contexts but not the default path — users must explicitly raise the limit.
 
 ### Public API
 
@@ -249,7 +284,7 @@ pc.tl.archetype_driver_regression(
     max_degree=2,               # 1 = main effects only, 2 = with interactions
     n_bootstrap=1000,
     robust_se=True,
-    max_interaction_features=200,  # safeguard: error if n_features exceeds this for degree=2
+    max_interaction_features=50,   # safeguard: error if n_features exceeds this for degree=2; raise for HPC
     copy=False,
 )
 # Returns: DriverRegressionResult (stored in adata.uns['peach_driver_regression'])
@@ -257,12 +292,14 @@ pc.tl.archetype_driver_regression(
 
 ### Key Outputs (DriverRegressionResult)
 
-Per archetype:
-- `main_coefficients`: [K x n_features] — gamma_kg values
-- `interaction_coefficients`: [K x n_features-choose-2] — gamma_k,gh values
-- `main_pvalues`, `interaction_pvalues`: significance
-- `main_ci_lower`, `main_ci_upper`: bootstrap CIs
-- `r_squared`: per-archetype R^2 (how well genesets explain this archetype's weight)
+Per ILR component (K-1 regressions) + back-transformed to per-archetype:
+- `main_coefficients_ilr`: [(K-1) x n_features] — raw ILR-space coefficients
+- `main_coefficients`: [K x n_features] — back-transformed to simplex (gamma_kg per archetype)
+- `interaction_coefficients_ilr`: [(K-1) x n_features-choose-2]
+- `interaction_coefficients`: [K x n_features-choose-2] — back-transformed
+- `main_pvalues`, `interaction_pvalues`: significance (computed in ILR space)
+- `main_ci_lower`, `main_ci_upper`: bootstrap CIs (back-transformed)
+- `r_squared`: per-ILR-component R^2 (K-1 values)
 
 ---
 
@@ -287,7 +324,7 @@ Interpretation layer on simplex regression coefficients. No new statistical test
 ### Classification Logic
 
 Rule-based on coefficient magnitudes, significance, and R^2 thresholds:
-1. If R^2 < threshold (default 0.01) -> flat
+1. If R^2 < threshold (default 0.05) -> flat
 2. If max(beta_k) - min(beta_k) < effect_threshold AND no significant interactions -> flat
 3. If any significant interaction terms -> ridge or valley (by sign)
 4. Count how many beta_k are significantly above the mean -> exclusive (1), gradient (1 dominant + others), shared (2+), antagonistic (high spread)
@@ -300,7 +337,7 @@ Each feature gets a primary classification + confidence score + detailed breakdo
 pc.tl.classify_feature_patterns(
     adata,
     regression_result=None,     # default: read from adata.uns['peach_simplex_regression']
-    r2_threshold=0.01,
+    r2_threshold=0.05,          # 5% variance explained minimum
     significance_threshold=0.05,
     effect_size_threshold=None, # auto-calibrated from data if None
 )
@@ -338,7 +375,9 @@ pc.tl.archetype_summary(
 
 1. **ILR transform**: Archetype weights (simplex) -> unconstrained R^{K-1} via isometric log-ratio
    - Helmert sub-composition basis (choice doesn't matter for full-covariance GMM — rotation-invariant)
-   - Handle zeros: add small epsilon before log (standard compositional data practice)
+   - Handle zeros: add epsilon=1e-3 before log, then renormalize. Larger epsilon avoids
+     extreme outliers near vertices (log(1e-10) ≈ -23 would distort GMM fitting). Document
+     that this smooths vertex-adjacent cells slightly.
 
 2. **GMM fitting**: sklearn GaussianMixture on ILR-transformed weights
    - Fit for n_components = K through K_max (default: 3K)
@@ -483,7 +522,13 @@ pc.tl.flow_between(
 - `flows`: dict of {(source_label, target_label): FlowWithinResult}
 - `archetype_correspondence`: dict of {(src, tgt): np.ndarray[K_src x K_tgt]} — soft mapping
 
-**Archetype correspondence**: For each pair, transport source archetype positions (from `adata.uns['peach_results']`) through the learned flow, compute normalized inverse-distance to target archetypes.
+**Input validation**: Error if `n_PCs` (shape of obsm[pca_key]) differs between AnnDatas. Tutorials
+should caution that all inputs must share the same PCA embedding (computed on the combined dataset
+before splitting by condition).
+
+**Archetype correspondence**: For each pair, extract archetype positions in PCA space via
+`peach.tl.archetypal_coordinates()`, transport source archetype positions through the learned flow,
+compute normalized inverse-distance to target archetypes → soft K_src × K_tgt mapping.
 
 ### flow_gene_alignment()
 
@@ -531,7 +576,9 @@ pc.tl.flow_significance(
 # Returns: p_value, observed_stat, null_distribution
 ```
 
-Permutes condition labels, retrains flow per permutation, compares observed MMD improvement against null. Default 100 permutations (not 1000) because each requires full training.
+Permutes condition labels, retrains flow per permutation (200 epochs per permutation, not full 1000),
+compares observed MMD improvement against null. Default 100 permutations. Ensure GPU-ready via
+`device` parameter propagation. Total cost: 100 × 200 = 20k epochs (vs 1k for a single full training).
 
 ---
 
@@ -569,7 +616,10 @@ pc.pl.ternary_facet_grid(
 
 ### Visualization Options
 
-The `regression_overlay=True` option plots the Scheffe polynomial predicted surface as contour lines on top of the cell scatter. This directly connects Module 2 output to the ternary visualization.
+The `regression_overlay=True` option plots the Scheffe polynomial predicted surface as contour lines
+on top of the cell scatter. Uses zero-padding for other archetype weights (projects onto the 3-face
+boundary where all other weights are zero). Document clearly that this shows the conditional
+prediction at the face boundary, not a marginal over the full simplex.
 
 ---
 
