@@ -58,6 +58,13 @@ from .flow import (
     archetype_correspondence,
 )
 
+# Archetype comparison visualization
+from .comparison import (
+    mmd_heatmap,
+    contrast_volcano,
+    feature_similarity_heatmap,
+)
+
 __all__ = [
     "archetypal_space",
     "archetypal_space_multi",
@@ -102,4 +109,8 @@ __all__ = [
     "flow_magnitude",
     "density_comparison",
     "archetype_correspondence",
+    # Archetype comparison
+    "mmd_heatmap",
+    "contrast_volcano",
+    "feature_similarity_heatmap",
 ]
