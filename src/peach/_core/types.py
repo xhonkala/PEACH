@@ -3474,6 +3474,77 @@ class DriverRegressionResult(BaseModel):
         return d
 
 
+class ArchetypeMMDResult(BaseModel):
+    """MMD similarity matrix between archetypes."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    mmd_matrix: np.ndarray          # [K, K] or [K_A, K_B]
+    pvalue_matrix: np.ndarray       # [K, K] or [K_A, K_B]
+    n_permutations: int
+    is_between_fit: bool = False
+    archetype_names_a: list[str]
+    archetype_names_b: list[str] | None = None
+
+    def to_serializable(self) -> dict:
+        d = {}
+        for field_name, value in self:
+            if value is None:
+                continue
+            if isinstance(value, np.ndarray):
+                d[field_name] = value
+            else:
+                d[field_name] = value
+        return d
+
+
+class ArchetypeFeatureSimilarityResult(BaseModel):
+    """Feature-level similarity between archetypes."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    silhouette_per_archetype: np.ndarray   # [K]
+    silhouette_overall: float
+    spearman_matrix: np.ndarray            # [K, K] or [K_A, K_B]
+    spearman_pvalue_matrix: np.ndarray     # [K, K] or [K_A, K_B]
+    n_shared_features: int
+    is_between_fit: bool = False
+    archetype_names_a: list[str]
+    archetype_names_b: list[str] | None = None
+
+    def to_serializable(self) -> dict:
+        d = {}
+        for field_name, value in self:
+            if value is None:
+                continue
+            if isinstance(value, np.ndarray):
+                d[field_name] = value
+            else:
+                d[field_name] = value
+        return d
+
+
+class ArchetypeContrastsResult(BaseModel):
+    """Pairwise Wald contrasts between archetype regression coefficients."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    pairs: list[tuple[int, int]]
+    delta_beta: dict[tuple[int, int], np.ndarray]
+    delta_se: dict[tuple[int, int], np.ndarray]
+    z_scores: dict[tuple[int, int], np.ndarray]
+    pvalues: dict[tuple[int, int], np.ndarray]
+    pvalues_fdr: dict[tuple[int, int], np.ndarray]
+    feature_names: list[str]
+    n_features: int
+    n_archetypes: int
+
+    def to_serializable(self) -> dict:
+        d = {"pairs": self.pairs, "feature_names": self.feature_names,
+             "n_features": self.n_features, "n_archetypes": self.n_archetypes}
+        for key in ("delta_beta", "delta_se", "z_scores", "pvalues", "pvalues_fdr"):
+            val = getattr(self, key)
+            d[key] = {str(k): v for k, v in val.items()}
+        return d
+
+
 class PatternClassificationResult(BaseModel):
     """Result of feature pattern classification from regression coefficients."""
     model_config = ConfigDict(arbitrary_types_allowed=True)

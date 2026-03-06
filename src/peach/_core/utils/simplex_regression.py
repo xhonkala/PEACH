@@ -56,7 +56,7 @@ def scheffe_design_matrix(W, degree=1):
     return X, pairs
 
 
-def ols_fit(W, Y, robust_se=True, chunk_size=5000):
+def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False):
     """Vectorized OLS: regress each feature on design matrix W (no intercept).
 
     Fits Y = W @ beta + epsilon for each column of Y simultaneously.
@@ -76,6 +76,9 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000):
         If False, compute classical (homoscedastic) OLS standard errors.
     chunk_size : int
         Number of features to process at once when Y is sparse.
+    return_covariance : bool
+        If True, include full covariance matrices in return dict.
+        Needed for Wald contrasts. Default False (SEs only).
 
     Returns
     -------
@@ -176,6 +179,27 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000):
             var_diag = np.diag(WtW_inv)
             se = np.sqrt(np.outer(sigma2, var_diag))
 
+    # Full covariance matrices (for Wald contrasts)
+    covariance = None
+    if return_covariance:
+        if is_sparse:
+            # For sparse, recompute on dense residuals (already materialized above)
+            if robust_se:
+                covariance = _hc3_covariance(W, residuals, WtW_inv, H_diag)
+            else:
+                covariance = []
+                for g in range(n_features):
+                    sigma2_g = ss_res[g] / max(n - p, 1)
+                    covariance.append(sigma2_g * WtW_inv)
+        else:
+            if robust_se:
+                covariance = _hc3_covariance(W, residuals, WtW_inv, H_diag)
+            else:
+                covariance = []
+                for g in range(n_features):
+                    sigma2_g = ss_res[g] / max(n - p, 1)
+                    covariance.append(sigma2_g * WtW_inv)
+
     r_squared = np.where(ss_tot > 0, 1 - ss_res / ss_tot, 0.0)
 
     # t-statistics and two-sided p-values
@@ -197,7 +221,7 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000):
             f_stats[valid] = np.where(ms_res > 0, ms_reg / ms_res, np.inf)
         f_pvalues[valid] = stats.f.sf(f_stats[valid], dfn=df_reg, dfd=df_res)
 
-    return {
+    result_dict = {
         "coefficients": beta,
         "r_squared": r_squared,
         "residuals": residuals,
@@ -207,6 +231,9 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000):
         "f_statistics": f_stats,
         "f_pvalues": f_pvalues,
     }
+    if return_covariance:
+        result_dict["covariance"] = covariance
+    return result_dict
 
 
 def _hc3_standard_errors(W, residuals, WtW_inv, H_diag):
@@ -254,3 +281,21 @@ def _hc3_standard_errors(W, residuals, WtW_inv, H_diag):
         se[g] = np.sqrt(np.maximum(np.diag(sandwich), 0))
 
     return se
+
+
+def _hc3_covariance(W, residuals, WtW_inv, H_diag):
+    """Full HC3 sandwich covariance per feature.
+
+    Returns list of [p, p] matrices, one per feature.
+    """
+    n, p = W.shape
+    n_features = residuals.shape[1]
+    adjustment = 1.0 / (1 - H_diag)
+    cov_list = []
+    for g in range(n_features):
+        e_adj = residuals[:, g] * adjustment
+        We = W * (e_adj ** 2)[:, np.newaxis]
+        meat = W.T @ We
+        sandwich = WtW_inv @ meat @ WtW_inv
+        cov_list.append(sandwich)
+    return cov_list
