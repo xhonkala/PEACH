@@ -127,3 +127,70 @@ class TestFeatureSimplexRegression:
         )
         assert result.permutation_pvalue is None
         assert result.permutation_pvalue_fdr is None
+
+
+class TestPathwaySimplexRegression:
+    def test_basic_run(self):
+        """pathway_simplex_regression uses obsm['pathway_scores']."""
+        import peach as pc
+
+        rng = np.random.default_rng(42)
+        K = 3
+        n = 200
+        n_pathways = 15
+
+        weights = rng.dirichlet([1] * K, size=n)
+        pathway_scores = rng.standard_normal((n, n_pathways))
+
+        adata = AnnData(np.zeros((n, 10)))
+        adata.obsm["cell_archetype_weights"] = weights
+        adata.obsm["pathway_scores"] = pathway_scores
+
+        result = pc.tl.pathway_simplex_regression(adata, n_bootstrap=0)
+        assert result.vertex_coefficients.shape == (n_pathways, K)
+        assert len(result.r_squared_degree1) == n_pathways
+
+
+class TestK2EdgeCase:
+    def test_k2_regression(self):
+        """Simplex regression works with K=2 archetypes."""
+        import peach as pc
+
+        rng = np.random.default_rng(42)
+        K = 2
+        n = 300
+        n_genes = 20
+
+        weights = rng.dirichlet([1] * K, size=n)
+        true_beta = np.array([[5.0, 1.0]] * 10 + [[1.0, 5.0]] * 10)
+        noise = rng.normal(0, 0.3, size=(n, n_genes))
+        X = weights @ true_beta.T + noise
+
+        adata = AnnData(X)
+        adata.var_names = [f"gene_{i}" for i in range(n_genes)]
+        adata.obsm["cell_archetype_weights"] = weights
+
+        result = pc.tl.feature_simplex_regression(adata, n_bootstrap=0)
+        assert result.vertex_coefficients.shape == (n_genes, K)
+        # With K=2 the first gene should have high beta_0
+        assert result.vertex_coefficients[0, 0] > 3.0
+
+    def test_k2_degree2(self):
+        """K=2 with degree=2 produces 1 interaction column."""
+        import peach as pc
+
+        rng = np.random.default_rng(42)
+        K = 2
+        n = 200
+        n_genes = 10
+
+        weights = rng.dirichlet([1] * K, size=n)
+        X = rng.standard_normal((n, n_genes))
+
+        adata = AnnData(X)
+        adata.var_names = [f"gene_{i}" for i in range(n_genes)]
+        adata.obsm["cell_archetype_weights"] = weights
+
+        result = pc.tl.feature_simplex_regression(adata, max_degree=2, n_bootstrap=0)
+        assert result.interaction_coefficients is not None
+        assert result.interaction_coefficients.shape == (n_genes, 1)  # K*(K-1)/2 = 1

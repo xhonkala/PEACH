@@ -102,3 +102,108 @@ class TestGeneAlignment:
         assert len(alignment.top_aligned) == 10
         assert len(alignment.top_opposed) == 10
         assert alignment.alignment_scores.shape == (50,)
+
+
+class TestFlowJacobian:
+    def test_basic_run(self, flow_adata):
+        """Jacobian returns correct shapes."""
+        import peach as pc
+        from peach._core.utils.flow_matching import FlowModel
+
+        # Train model manually (flow_within doesn't expose it)
+        source_pca = flow_adata.obsm["X_pca"][:200]
+        target_pca = flow_adata.obsm["X_pca"][200:]
+        dim = source_pca.shape[1]
+
+        model = FlowModel(dim, hidden_dims=(32, 32), lr=1e-3)
+        model.train(source_pca, target_pca, n_epochs=50, batch_size=64)
+
+        # Build a FlowWithinResult manually for the API
+        from peach._core.types import FlowWithinResult
+        from peach._core.utils.flow_matching import compute_mmd
+
+        source_mask = np.array([True] * 200 + [False] * 200)
+        target_mask = ~source_mask
+        transported = model.transport(source_pca, n_steps=10)
+
+        flow_result = FlowWithinResult(
+            source_mask=source_mask,
+            target_mask=target_mask,
+            transported=transported,
+            losses=[0.0],
+            mmd_before=compute_mmd(source_pca, target_pca),
+            mmd_after=compute_mmd(transported, target_pca),
+            pca_key="X_pca",
+        )
+
+        jac_result = pc.tl.flow_jacobian(flow_adata, flow_result, model, t=0.5)
+        assert jac_result.jacobian_det.shape == (200,)
+        assert jac_result.mean_jacobian.shape == (dim, dim)
+        assert jac_result.feature_expansion.shape == (50,)
+        assert jac_result.t == 0.5
+
+    def test_custom_evaluation_points(self, flow_adata):
+        """Works with custom evaluation points subset."""
+        import peach as pc
+        from peach._core.utils.flow_matching import FlowModel, compute_mmd
+        from peach._core.types import FlowWithinResult
+
+        source_pca = flow_adata.obsm["X_pca"][:200]
+        target_pca = flow_adata.obsm["X_pca"][200:]
+        dim = source_pca.shape[1]
+
+        model = FlowModel(dim, hidden_dims=(32, 32), lr=1e-3)
+        model.train(source_pca, target_pca, n_epochs=50, batch_size=64)
+
+        source_mask = np.array([True] * 200 + [False] * 200)
+        target_mask = ~source_mask
+        transported = model.transport(source_pca, n_steps=10)
+        flow_result = FlowWithinResult(
+            source_mask=source_mask, target_mask=target_mask,
+            transported=transported, losses=[0.0],
+            mmd_before=1.0, mmd_after=0.5, pca_key="X_pca",
+        )
+
+        # Evaluate on just 10 points
+        eval_pts = source_pca[:10]
+        jac_result = pc.tl.flow_jacobian(
+            flow_adata, flow_result, model, evaluation_points=eval_pts
+        )
+        assert jac_result.jacobian_det.shape == (10,)
+
+
+class TestFlowSignificance:
+    def test_returns_pvalue(self, flow_adata):
+        """Permutation test returns p_value and null distribution."""
+        import peach as pc
+
+        result = pc.tl.flow_significance(
+            flow_adata,
+            source={"treatment": "Base"},
+            target={"treatment": "PD1"},
+            n_permutations=5,
+            n_epochs_per_perm=20,
+            hidden_dims=(16, 16),
+            n_steps=5,
+        )
+        assert "p_value" in result
+        assert "observed_stat" in result
+        assert "null_distribution" in result
+        assert 0.0 <= result["p_value"] <= 1.0
+        assert len(result["null_distribution"]) == 5
+
+    def test_shifted_distributions_significant(self, flow_adata):
+        """Well-separated conditions should have small p-value (or at least observed > null mean)."""
+        import peach as pc
+
+        result = pc.tl.flow_significance(
+            flow_adata,
+            source={"treatment": "Base"},
+            target={"treatment": "PD1"},
+            n_permutations=9,
+            n_epochs_per_perm=50,
+            hidden_dims=(32, 32),
+            n_steps=10,
+        )
+        # Observed MMD should be larger than typical null values
+        assert result["observed_stat"] > np.mean(result["null_distribution"])

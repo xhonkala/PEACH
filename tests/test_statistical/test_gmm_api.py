@@ -126,3 +126,36 @@ class TestFeatureSimplexDecomposition:
             gmm_adata, n_initializations=3, n_components_range=(2, 4)
         )
         assert result.component_assignments.shape == (400,)
+
+    def test_recovers_planted_clusters(self, gmm_adata):
+        """GMM separates the two planted clusters (archetype 0 vs 1)."""
+        import peach as pc
+
+        result = pc.tl.feature_simplex_decomposition(
+            gmm_adata, n_initializations=5, n_components_range=(2, 4)
+        )
+        labels = result.component_assignments
+        # First 200 cells are cluster 0, next 200 are cluster 1
+        # Labels may be permuted, so check that clusters are internally consistent
+        labels_first = labels[:200]
+        labels_second = labels[200:]
+        # Majority of first 200 should share a label, majority of second 200 another
+        mode_first = np.bincount(labels_first.astype(int)).argmax()
+        mode_second = np.bincount(labels_second.astype(int)).argmax()
+        assert mode_first != mode_second, "GMM should assign different labels to different clusters"
+        # At least 80% purity within each planted cluster
+        purity_first = np.mean(labels_first == mode_first)
+        purity_second = np.mean(labels_second == mode_second)
+        assert purity_first > 0.8, f"Cluster 0 purity {purity_first:.2f} < 0.8"
+        assert purity_second > 0.8, f"Cluster 1 purity {purity_second:.2f} < 0.8"
+
+    def test_bic_minimum_at_planted_k(self, gmm_adata):
+        """BIC-optimal n_components should be near the planted k=2."""
+        import peach as pc
+
+        result = pc.tl.feature_simplex_decomposition(
+            gmm_adata, n_initializations=5, n_components_range=(2, 5)
+        )
+        assert result.n_components_optimal in (2, 3), (
+            f"BIC-optimal k={result.n_components_optimal}, expected 2 or 3"
+        )

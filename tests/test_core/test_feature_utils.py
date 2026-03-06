@@ -94,10 +94,33 @@ class TestGetArchetypeWeights:
         """Weights not summing to 1 raises ValueError — never silently renormalizes."""
         from peach._core.utils.feature_utils import get_archetype_weights
 
+        rng = np.random.default_rng(42)
         adata = AnnData(np.zeros((100, 10)))
-        weights = np.random.rand(100, 4)  # won't sum to 1
+        weights = rng.random((100, 4))  # won't sum to 1
         adata.obsm["cell_archetype_weights"] = weights
         with pytest.raises(ValueError, match="sum-to-1"):
+            get_archetype_weights(adata)
+
+    def test_nan_weights_raises(self):
+        """NaN in weights raises ValueError."""
+        from peach._core.utils.feature_utils import get_archetype_weights
+
+        rng = np.random.default_rng(42)
+        adata = AnnData(np.zeros((100, 10)))
+        weights = rng.dirichlet([1, 1, 1], size=100)
+        weights[0, 0] = np.nan
+        adata.obsm["cell_archetype_weights"] = weights
+        with pytest.raises(ValueError, match="NaN"):
+            get_archetype_weights(adata)
+
+    def test_negative_weights_raises(self):
+        """Negative weights raise ValueError."""
+        from peach._core.utils.feature_utils import get_archetype_weights
+
+        adata = AnnData(np.zeros((100, 10)))
+        weights = np.array([[0.5, 0.7, -0.2]] * 100)  # sum=1 but negative
+        adata.obsm["cell_archetype_weights"] = weights
+        with pytest.raises(ValueError, match="negative"):
             get_archetype_weights(adata)
 
 

@@ -49,8 +49,9 @@ class TestILRTransform:
         """K weights produce K-1 ILR coordinates."""
         from peach._core.utils.ilr_transform import ilr_transform
 
+        rng = np.random.default_rng(42)
         K = 5
-        W = np.random.dirichlet([1] * K, size=50)
+        W = rng.dirichlet([1] * K, size=50)
         ilr_coords = ilr_transform(W)
         assert ilr_coords.shape == (50, K - 1)
 
