@@ -66,6 +66,21 @@ def ilr_transform(W, epsilon=ILR_EPSILON):
     W = np.asarray(W, dtype=np.float64)
     K = W.shape[1]
 
+    if K < 2:
+        raise ValueError(
+            f"ILR transform requires K >= 2 components, got K={K}. "
+            "A single-archetype model has no compositional structure to transform."
+        )
+
+    if np.any(np.isnan(W)):
+        raise ValueError("Weight matrix contains NaN values.")
+
+    if np.any(W < -1e-10):
+        raise ValueError(
+            f"Weight matrix contains negative values (min={W.min():.2e}). "
+            "Simplex weights must be non-negative."
+        )
+
     # Zero smoothing: add epsilon, renormalize
     W_smooth = W + epsilon
     W_smooth = W_smooth / W_smooth.sum(axis=1, keepdims=True)

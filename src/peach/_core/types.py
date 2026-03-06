@@ -3396,6 +3396,10 @@ class SimplexRegressionResult(BaseModel):
     interaction_se: np.ndarray | None = None
     r_squared_degree2: np.ndarray | None = None
 
+    # Permutation test — None if permutation_test=False
+    permutation_pvalue: np.ndarray | None = None  # [n_features]
+    permutation_pvalue_fdr: np.ndarray | None = None  # [n_features]
+
     # Bootstrap CIs — None if n_bootstrap=0
     vertex_ci_lower: np.ndarray | None = None  # [n_features, K]
     vertex_ci_upper: np.ndarray | None = None

@@ -25,6 +25,7 @@ def flow_within(
     batch_size: int = 256,
     n_steps: int = 50,
     device: str = "cpu",
+    solver_method: str = "euler",
     name: str | None = None,
     random_state: int = 42,
     copy: bool = False,
@@ -42,8 +43,10 @@ def flow_within(
         Key in adata.obsm for PCA coordinates.
     hidden_dims, lr, n_epochs, batch_size : model params
     n_steps : int
-        Euler integration steps.
+        ODE integration steps.
     device : str
+    solver_method : str
+        ODE solver method: 'euler', 'midpoint', 'heun3', 'dopri5'.
     name : str or None
         Name for storage key.
     random_state : int
@@ -67,7 +70,8 @@ def flow_within(
     # Train flow model
     import torch
     torch.manual_seed(random_state)
-    model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr, device=device)
+    model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr,
+                      solver_method=solver_method, device=device)
     losses = model.train(source_pca, target_pca, n_epochs=n_epochs, batch_size=batch_size)
 
     # Transport
@@ -114,6 +118,7 @@ def flow_between(
     batch_size: int = 256,
     n_steps: int = 50,
     device: str = "cpu",
+    solver_method: str = "euler",
     random_state: int = 42,
 ) -> FlowBetweenResult:
     """Inter-model flow between separate AnnDatas.
@@ -141,11 +146,14 @@ def flow_between(
     if condition_labels is None:
         condition_labels = [f"condition_{i}" for i in range(len(adatas))]
 
-    # Add condition labels and concatenate
+    # Add condition labels to copies (never mutate caller's data)
+    adatas_copy = []
     for a, label in zip(adatas, condition_labels):
-        a.obs[condition_key] = label
+        a_copy = a.copy()
+        a_copy.obs[condition_key] = label
+        adatas_copy.append(a_copy)
 
-    adata_combined = ad.concat(adatas, label=condition_key, keys=condition_labels)
+    adata_combined = ad.concat(adatas_copy, label=condition_key, keys=condition_labels)
 
     # Determine pairs
     if pairs is None:
@@ -154,7 +162,7 @@ def flow_between(
 
     # Train flows for each pair
     flows = {}
-    for src_label, tgt_label in pairs:
+    for pair_idx, (src_label, tgt_label) in enumerate(pairs):
         result = flow_within(
             adata_combined,
             source={condition_key: src_label},
@@ -166,8 +174,9 @@ def flow_between(
             batch_size=batch_size,
             n_steps=n_steps,
             device=device,
+            solver_method=solver_method,
             name=f"{src_label}_to_{tgt_label}",
-            random_state=random_state,
+            random_state=random_state + pair_idx,
         )
         flows[(src_label, tgt_label)] = result
 
@@ -314,6 +323,7 @@ def flow_significance(
     batch_size: int = 256,
     n_steps: int = 50,
     device: str = "cpu",
+    solver_method: str = "euler",
     random_state: int = 42,
 ) -> dict:
     """Permutation test for flow significance.
@@ -358,7 +368,8 @@ def flow_significance(
 
         # Train short flow
         torch.manual_seed(random_state + i)
-        perm_model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr, device=device)
+        perm_model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr,
+                               solver_method=solver_method, device=device)
         perm_model.train(perm_source, perm_target, n_epochs=n_epochs_per_perm, batch_size=batch_size)
         perm_transported = perm_model.transport(perm_source, n_steps=n_steps)
 
@@ -367,7 +378,8 @@ def flow_significance(
 
     # Observed improvement
     torch.manual_seed(random_state)
-    obs_model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr, device=device)
+    obs_model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr,
+                          solver_method=solver_method, device=device)
     obs_model.train(source_pca, target_pca, n_epochs=n_epochs_per_perm, batch_size=batch_size)
     obs_transported = obs_model.transport(source_pca, n_steps=n_steps)
     observed_improvement = observed_mmd - compute_mmd(obs_transported, target_pca)
@@ -400,4 +412,10 @@ def _build_mask(adata, filters):
         if col not in adata.obs.columns:
             raise ValueError(f"Column '{col}' not found in adata.obs")
         mask &= (adata.obs[col] == val).values
+
+    if not mask.any():
+        raise ValueError(
+            f"No cells match filter {filters}. Check obs column values."
+        )
+
     return mask

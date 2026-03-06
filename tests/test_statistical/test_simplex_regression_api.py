@@ -92,3 +92,38 @@ class TestFeatureSimplexRegression:
         import peach as pc
         result = pc.tl.gene_simplex_regression(regression_adata, n_bootstrap=0)
         assert result.vertex_coefficients.shape[0] == 50
+
+    def test_permutation_test_returns_pvalues(self, regression_adata):
+        """permutation_test=True produces per-feature p-values."""
+        import peach as pc
+        result = pc.tl.feature_simplex_regression(
+            regression_adata, permutation_test=True, n_permutations=50,
+            n_bootstrap=0,
+        )
+        assert result.permutation_pvalue is not None
+        assert result.permutation_pvalue_fdr is not None
+        assert result.permutation_pvalue.shape == (50,)
+        assert result.permutation_pvalue_fdr.shape == (50,)
+        assert np.all(result.permutation_pvalue >= 0)
+        assert np.all(result.permutation_pvalue <= 1)
+
+    def test_permutation_test_detects_signal(self, regression_adata):
+        """Genes with strong archetype signal get low permutation p-values."""
+        import peach as pc
+        result = pc.tl.feature_simplex_regression(
+            regression_adata, permutation_test=True, n_permutations=99,
+            n_bootstrap=0,
+        )
+        # Gene 0 (exclusive, strong signal) should be significant
+        assert result.permutation_pvalue[0] < 0.05
+        # Gene 2 (gradient, strong signal) should be significant
+        assert result.permutation_pvalue[2] < 0.05
+
+    def test_permutation_test_disabled_by_default(self, regression_adata):
+        """permutation_test=False (default) leaves fields as None."""
+        import peach as pc
+        result = pc.tl.feature_simplex_regression(
+            regression_adata, n_bootstrap=0,
+        )
+        assert result.permutation_pvalue is None
+        assert result.permutation_pvalue_fdr is None

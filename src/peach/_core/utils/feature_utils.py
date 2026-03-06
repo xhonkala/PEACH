@@ -94,6 +94,22 @@ def get_archetype_weights(adata: AnnData) -> np.ndarray:
             "Run pc.tl.extract_archetype_weights() first."
         )
     weights = np.asarray(adata.obsm[WEIGHTS_KEY])
+
+    # NaN check (gates all downstream: ILR log, GMM, regression)
+    if np.any(np.isnan(weights)):
+        raise ValueError(
+            "Archetype weights contain NaN values. This indicates a bug upstream "
+            "(training divergence, missing data, or corrupt adata)."
+        )
+
+    # Non-negativity check (negative weights break ILR log transform)
+    if np.any(weights < -WEIGHTS_TOLERANCE):
+        min_val = weights.min()
+        raise ValueError(
+            f"Archetype weights contain negative values (min={min_val:.2e}). "
+            "Simplex weights must be non-negative. This indicates a bug upstream."
+        )
+
     row_sums = weights.sum(axis=1)
     max_deviation = np.abs(row_sums - 1.0).max()
     if max_deviation > WEIGHTS_TOLERANCE:

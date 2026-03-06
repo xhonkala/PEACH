@@ -89,6 +89,16 @@ def feature_simplex_regression(
         interaction_se = result2["standard_errors"][:, K:]
         r_squared_degree2 = result2["r_squared"]
 
+    # Permutation test for model significance
+    permutation_pvalue = None
+    permutation_pvalue_fdr = None
+
+    if permutation_test:
+        permutation_pvalue, permutation_pvalue_fdr = _permutation_test_regression(
+            weights, Y, n_permutations=n_permutations,
+            observed_r2=result1["r_squared"],
+        )
+
     # Bootstrap CIs
     vertex_ci_lower = None
     vertex_ci_upper = None
@@ -128,6 +138,8 @@ def feature_simplex_regression(
         interaction_pvalues=interaction_pvalues,
         interaction_se=interaction_se,
         r_squared_degree2=r_squared_degree2,
+        permutation_pvalue=permutation_pvalue,
+        permutation_pvalue_fdr=permutation_pvalue_fdr,
         vertex_ci_lower=vertex_ci_lower,
         vertex_ci_upper=vertex_ci_upper,
         interaction_ci_lower=interaction_ci_lower,
@@ -152,6 +164,48 @@ def pathway_simplex_regression(adata: AnnData, **kwargs) -> SimplexRegressionRes
     )
 
 
+def _permutation_test_regression(weights, Y, *, n_permutations, observed_r2, seed=42):
+    """Vectorized permutation test for simplex regression R².
+
+    Shuffles weight rows (breaking cell-weight correspondence), re-fits
+    degree-1 Scheffe regression for all features simultaneously, collects
+    null R² distribution per feature.
+
+    Returns (permutation_pvalue, permutation_pvalue_fdr), each [n_features].
+    """
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(seed)
+    n = weights.shape[0]
+    n_features = Y.shape[1] if not sp.issparse(Y) else Y.shape[1]
+
+    # Densify Y once for efficiency
+    if sp.issparse(Y):
+        Y_dense = Y.toarray()
+    else:
+        Y_dense = np.asarray(Y, dtype=np.float64)
+
+    null_r2 = np.empty((n_permutations, n_features))
+
+    for i in range(n_permutations):
+        perm_idx = rng.permutation(n)
+        W_perm, _ = scheffe_design_matrix(weights[perm_idx], degree=1)
+        perm_result = ols_fit(W_perm, Y_dense, robust_se=False)
+        null_r2[i] = perm_result["r_squared"]
+
+    # Per-feature p-value: fraction of null >= observed
+    permutation_pvalue = (
+        np.sum(null_r2 >= observed_r2[np.newaxis, :], axis=0) + 1
+    ) / (n_permutations + 1)
+
+    # FDR correction
+    _, permutation_pvalue_fdr, _, _ = multipletests(
+        permutation_pvalue, method="fdr_bh"
+    )
+
+    return permutation_pvalue, permutation_pvalue_fdr
+
+
 def _bootstrap_regression_cis(weights, Y, degree, n_bootstrap, K, ci_level=0.95, seed=42):
     """Bootstrap CIs for regression coefficients.
 
@@ -167,6 +221,7 @@ def _bootstrap_regression_cis(weights, Y, degree, n_bootstrap, K, ci_level=0.95,
     n_features = Y.shape[1] if not sp.issparse(Y) else Y.shape[1]
 
     boot_coefs = np.empty((n_bootstrap, n_features, p))
+    n_failed = 0
     for b in range(n_bootstrap):
         idx = rng.integers(0, n, size=n)
         W_boot = W_design[idx]
@@ -174,12 +229,23 @@ def _bootstrap_regression_cis(weights, Y, degree, n_bootstrap, K, ci_level=0.95,
             Y_boot = Y[idx].toarray()
         else:
             Y_boot = np.asarray(Y)[idx]
-        result = ols_fit(W_boot, Y_boot, robust_se=False)
-        boot_coefs[b] = result["coefficients"]
+        try:
+            result = ols_fit(W_boot, Y_boot, robust_se=False)
+            boot_coefs[b] = result["coefficients"]
+        except (ValueError, np.linalg.LinAlgError):
+            # Singular bootstrap sample (duplicate rows) — use NaN, filter later
+            boot_coefs[b] = np.nan
+            n_failed += 1
+
+    if n_failed > 0:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"{n_failed}/{n_bootstrap} bootstrap samples were singular and skipped."
+        )
 
     alpha = 1 - ci_level
-    ci_lower = np.percentile(boot_coefs, 100 * alpha / 2, axis=0)
-    ci_upper = np.percentile(boot_coefs, 100 * (1 - alpha / 2), axis=0)
+    ci_lower = np.nanpercentile(boot_coefs, 100 * alpha / 2, axis=0)
+    ci_upper = np.nanpercentile(boot_coefs, 100 * (1 - alpha / 2), axis=0)
     return ci_lower, ci_upper
 
 
@@ -290,7 +356,13 @@ def archetype_driver_regression(
     intercepts = np.zeros(K - 1)
 
     DtD = design.T @ design
-    DtD_inv = np.linalg.inv(DtD)
+    try:
+        DtD_inv = np.linalg.solve(DtD, np.eye(DtD.shape[0]))
+    except np.linalg.LinAlgError:
+        raise ValueError(
+            "Feature design matrix is singular. This usually means features "
+            "are perfectly collinear or n_cells < n_parameters."
+        )
 
     for m in range(K - 1):
         y = ilr_weights[:, m]  # [n_cells]
@@ -307,9 +379,10 @@ def archetype_driver_regression(
 
         # Standard errors
         if robust_se:
-            # HC3 sandwich estimator
+            # HC3 sandwich estimator — clip H_diag BEFORE division
             H_diag = np.sum((design @ DtD_inv) * design, axis=1)
-            adjustment = np.clip(1.0 / (1 - H_diag), 0, 1e6)
+            H_diag = np.clip(H_diag, 0, 1 - 1e-10)
+            adjustment = 1.0 / (1 - H_diag)
             e_adj = residuals * adjustment
             meat = design.T @ (design * (e_adj**2)[:, np.newaxis])
             sandwich = DtD_inv @ meat @ DtD_inv
@@ -404,7 +477,12 @@ def _bootstrap_driver_cis(
         D_boot = design[idx]
         Y_boot = ilr_weights[idx]
 
-        DtD_inv_boot = np.linalg.inv(D_boot.T @ D_boot)
+        try:
+            DtD_boot = D_boot.T @ D_boot
+            DtD_inv_boot = np.linalg.solve(DtD_boot, np.eye(DtD_boot.shape[0]))
+        except np.linalg.LinAlgError:
+            boot_simplex_coefs[b] = np.nan
+            continue
 
         # [K-1, n_features] main coefficients in ILR space
         main_ilr = np.zeros((K - 1, n_features))
@@ -418,6 +496,6 @@ def _bootstrap_driver_cis(
             boot_simplex_coefs[b, :, g] = perturbed - center
 
     alpha = 1 - ci_level
-    ci_lower = np.percentile(boot_simplex_coefs, 100 * alpha / 2, axis=0)
-    ci_upper = np.percentile(boot_simplex_coefs, 100 * (1 - alpha / 2), axis=0)
+    ci_lower = np.nanpercentile(boot_simplex_coefs, 100 * alpha / 2, axis=0)
+    ci_upper = np.nanpercentile(boot_simplex_coefs, 100 * (1 - alpha / 2), axis=0)
     return ci_lower, ci_upper

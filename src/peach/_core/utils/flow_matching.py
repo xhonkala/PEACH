@@ -1,19 +1,13 @@
 """Flow matching: velocity network, training, transport, and Jacobian analysis.
 
-Learns continuous transport maps between cell populations in PCA/latent space.
-Uses conditional flow matching with linear interpolation paths:
-    x_t = (1 - t) * x_0 + t * x_1
-
-This implements the standard conditional flow matching objective directly,
-without requiring external libraries. The ``_check_flow_matching()`` helper
-is provided for future integration with Facebook's ``flow_matching`` library,
-which offers more sophisticated probability paths (e.g., optimal transport
-conditional paths), but is not currently called.
+Learns continuous transport maps between cell populations in PCA/latent space
+using Facebook Research's ``flow_matching`` library for conditional flow matching
+with linear interpolation (conditional optimal transport) paths.
 
 Main Classes
 ------------
 VelocityNetwork : MLP mapping (x, t) -> v
-FlowModel : Training, Euler transport, velocity evaluation, Jacobian
+FlowModel : Training via CondOTProbPath, ODESolver transport, velocity evaluation, Jacobian
 
 Utility Functions
 -----------------
@@ -22,8 +16,13 @@ compute_mmd : Maximum Mean Discrepancy for evaluating transport quality
 Dependencies
 ------------
 - torch (already required by PEACH)
+- flow_matching (Facebook Research) — required for flow analysis
 - scipy (already required by PEACH, used in MMD computation)
-- flow_matching (optional, Facebook Research -- reserved for future use)
+
+References
+----------
+Lipman et al. (2023). "Flow Matching for Generative Modeling." ICLR 2023.
+https://github.com/facebookresearch/flow_matching
 """
 
 import numpy as np
@@ -32,18 +31,13 @@ import torch.nn as nn
 
 
 def _check_flow_matching():
-    """Import flow_matching with helpful error on failure.
-
-    Reserved for future use. The current implementation uses standard
-    conditional flow matching with linear interpolation and does not
-    require this library.
-    """
+    """Import flow_matching with helpful error on failure."""
     try:
         import flow_matching
         return flow_matching
     except ImportError:
         raise ImportError(
-            "flow_matching is required for advanced flow analysis. "
+            "flow_matching is required for flow analysis. "
             "Install it with: pip install flow-matching"
         )
 
@@ -93,13 +87,29 @@ class VelocityNetwork(nn.Module):
         return self.net(xt)
 
 
-class FlowModel:
-    """Wraps velocity network with training and transport functionality.
+class _VelocityWrapper(nn.Module):
+    """Wraps VelocityNetwork for fb ODESolver compatibility.
 
-    Implements conditional flow matching with linear interpolation paths.
-    Given source distribution x_0 and target distribution x_1, learns a
-    velocity field v(x, t) such that integrating from t=0 to t=1 transports
-    source samples to target samples.
+    ODESolver expects a callable(x, t) where t has the same batch dim as x.
+    Our VelocityNetwork already handles this, so this is a thin adapter.
+    """
+
+    def __init__(self, velocity_net):
+        super().__init__()
+        self.velocity_net = velocity_net
+
+    def forward(self, x, t, **extras):
+        # ODESolver passes t as shape [batch] or scalar; ensure [batch, 1]
+        if t.dim() == 0:
+            t = t.expand(x.shape[0])
+        return self.velocity_net(x, t)
+
+
+class FlowModel:
+    """Wraps velocity network with fb flow_matching training and transport.
+
+    Uses ``CondOTProbPath`` for conditional optimal transport path sampling
+    during training, and ``ODESolver`` for integration during transport.
 
     Parameters
     ----------
@@ -109,13 +119,20 @@ class FlowModel:
         MLP hidden layer dimensions.
     lr : float
         Learning rate for Adam optimizer.
+    solver_method : str
+        ODE solver method for transport. 'euler' (default), 'midpoint',
+        'heun3', or 'dopri5' (adaptive).
     device : str
         ``'cpu'`` or ``'cuda'``.
     """
 
-    def __init__(self, dim, hidden_dims=(128, 128, 128), lr=1e-3, device="cpu"):
+    def __init__(self, dim, hidden_dims=(128, 128, 128), lr=1e-3,
+                 solver_method="euler", device="cpu"):
+        _check_flow_matching()
+
         self.dim = dim
         self.device = device
+        self.solver_method = solver_method
         self.velocity_net = VelocityNetwork(dim, hidden_dims).to(device)
         self.optimizer = torch.optim.Adam(self.velocity_net.parameters(), lr=lr)
         self._losses = []
@@ -123,9 +140,9 @@ class FlowModel:
     def train(self, source, target, n_epochs=1000, batch_size=256):
         """Train velocity field to transport source to target.
 
-        Uses conditional flow matching: sample random time t, interpolate
-        ``x_t = (1 - t) * x_0 + t * x_1``, learn ``v(x_t, t)`` to predict
-        ``x_1 - x_0`` (the constant velocity along the linear path).
+        Uses fb ``CondOTProbPath`` for conditional optimal transport path
+        sampling: ``x_t = (1-t)*x_0 + t*x_1``, learns ``v(x_t, t)`` to
+        predict the conditional velocity ``dx_t = x_1 - x_0``.
 
         Parameters
         ----------
@@ -136,14 +153,17 @@ class FlowModel:
         n_epochs : int
             Number of training epochs.
         batch_size : int
-            Not used directly for batching (full random pairing each epoch),
-            but controls the number of pairs sampled per epoch.
+            Number of pairs sampled per epoch.
 
         Returns
         -------
         list of float
             Training losses per epoch.
         """
+        from flow_matching.path import CondOTProbPath
+
+        prob_path = CondOTProbPath()
+
         source_t = torch.tensor(source, dtype=torch.float32, device=self.device)
         target_t = torch.tensor(target, dtype=torch.float32, device=self.device)
 
@@ -152,26 +172,25 @@ class FlowModel:
 
         for epoch in range(n_epochs):
             # Random pairing (sample with replacement to match sizes)
-            n = min(len(source_t), len(target_t))
+            n = min(len(source_t), len(target_t), batch_size)
             idx_s = torch.randint(0, len(source_t), (n,), device=self.device)
             idx_t = torch.randint(0, len(target_t), (n,), device=self.device)
             x0 = source_t[idx_s]
             x1 = target_t[idx_t]
 
             # Random time
-            t = torch.rand(n, 1, device=self.device)
+            t = torch.rand(n, device=self.device)
 
-            # Interpolation: x_t = (1-t)*x0 + t*x1
-            x_t = (1 - t) * x0 + t * x1
-
-            # Target velocity: x1 - x0 (constant along linear path)
-            v_target = x1 - x0
+            # fb library: sample conditional path
+            path_sample = prob_path.sample(x_0=x0, x_1=x1, t=t)
+            # path_sample.x_t: interpolated point
+            # path_sample.dx_t: target velocity (x_1 - x_0 for CondOT)
 
             # Predicted velocity
-            v_pred = self.velocity_net(x_t, t)
+            v_pred = self.velocity_net(path_sample.x_t, t)
 
-            # MSE loss
-            loss = torch.mean((v_pred - v_target) ** 2)
+            # MSE loss against conditional velocity
+            loss = torch.mean((v_pred - path_sample.dx_t) ** 2)
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -183,16 +202,17 @@ class FlowModel:
         return self._losses
 
     def transport(self, x0, n_steps=50, return_trajectory=False):
-        """Transport points from source to target via Euler integration.
+        """Transport points from source to target via ODE integration.
 
-        Integrates the learned velocity field from t=0 to t=1.
+        Uses fb ``ODESolver`` to integrate the learned velocity field
+        from t=0 to t=1.
 
         Parameters
         ----------
         x0 : np.ndarray
             Starting points, shape ``[n_points, dim]``.
         n_steps : int
-            Number of Euler integration steps.
+            Number of integration steps (used as step_size=1/n_steps).
         return_trajectory : bool
             If True, return the full trajectory with shape
             ``[n_steps + 1, n_points, dim]``.
@@ -203,23 +223,39 @@ class FlowModel:
             Transported points ``[n_points, dim]``, or full trajectory
             ``[n_steps + 1, n_points, dim]`` if ``return_trajectory=True``.
         """
+        from flow_matching.solver import ODESolver
+
         self.velocity_net.eval()
-        x = torch.tensor(x0, dtype=torch.float32, device=self.device)
-        dt = 1.0 / n_steps
+        wrapper = _VelocityWrapper(self.velocity_net).to(self.device)
+        solver = ODESolver(velocity_model=wrapper)
 
-        trajectory = [x.detach().cpu().numpy()] if return_trajectory else None
-
-        with torch.no_grad():
-            for step in range(n_steps):
-                t = torch.full((len(x), 1), step * dt, device=self.device)
-                v = self.velocity_net(x, t)
-                x = x + v * dt
-                if return_trajectory:
-                    trajectory.append(x.detach().cpu().numpy())
+        x_init = torch.tensor(x0, dtype=torch.float32, device=self.device)
+        step_size = 1.0 / n_steps
 
         if return_trajectory:
-            return np.stack(trajectory, axis=0)
-        return x.detach().cpu().numpy()
+            # Create time grid for intermediates
+            time_grid = torch.linspace(0, 1, n_steps + 1, device=self.device)
+            with torch.no_grad():
+                result = solver.sample(
+                    x_init=x_init,
+                    step_size=step_size,
+                    method=self.solver_method,
+                    time_grid=time_grid,
+                    return_intermediates=True,
+                )
+            # result is a list of tensors at each time step
+            trajectory = np.stack(
+                [r.detach().cpu().numpy() for r in result], axis=0
+            )
+            return trajectory
+        else:
+            with torch.no_grad():
+                result = solver.sample(
+                    x_init=x_init,
+                    step_size=step_size,
+                    method=self.solver_method,
+                )
+            return result.detach().cpu().numpy()
 
     def velocity_at(self, x, t):
         """Evaluate learned velocity field at given points and time.
@@ -283,11 +319,13 @@ class FlowModel:
         return np.stack(jacobians, axis=0)
 
 
-def compute_mmd(X, Y, bandwidth=None):
+def compute_mmd(X, Y, bandwidth=None, max_samples=5000):
     """Compute Maximum Mean Discrepancy between two point sets.
 
     Uses an RBF (Gaussian) kernel. Useful for evaluating how well
     transport maps source distribution onto target distribution.
+
+    For large inputs (>max_samples), subsamples to avoid O(n^2) memory.
 
     Parameters
     ----------
@@ -298,6 +336,8 @@ def compute_mmd(X, Y, bandwidth=None):
     bandwidth : float or None
         RBF kernel bandwidth. If None, uses the median pairwise distance
         of a subsample (median heuristic).
+    max_samples : int
+        Maximum number of points per set. Subsamples if exceeded.
 
     Returns
     -------
@@ -305,6 +345,17 @@ def compute_mmd(X, Y, bandwidth=None):
         MMD^2 value. Near zero means distributions are similar.
     """
     from scipy.spatial.distance import cdist, pdist
+
+    # Guard against degenerate inputs
+    if len(X) < 2 or len(Y) < 2:
+        return 0.0
+
+    # Subsample large inputs to avoid O(n^2) kernel matrix OOM
+    rng = np.random.default_rng(42)
+    if len(X) > max_samples:
+        X = X[rng.choice(len(X), max_samples, replace=False)]
+    if len(Y) > max_samples:
+        Y = Y[rng.choice(len(Y), max_samples, replace=False)]
 
     if bandwidth is None:
         XY = np.vstack([X, Y])

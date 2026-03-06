@@ -48,6 +48,14 @@ def classify_single_feature(
     """
     K = len(vertex_betas)
 
+    # Guard against NaN R² (propagates from upstream numerical issues)
+    if np.isnan(r2):
+        return {
+            "pattern": "flat",
+            "confidence": 0.0,
+            "details": {"reason": "nan_r2"},
+        }
+
     # Auto-calibrate effect size threshold
     if effect_size_threshold is None:
         beta_range = np.ptp(vertex_betas)
