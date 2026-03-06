@@ -130,7 +130,7 @@ class TestGmmBicCurve:
     def test_layout_titles(self, gmm_viz_adata):
         fig = gmm_bic_curve(gmm_viz_adata, show=False)
         assert "BIC" in fig.layout.title.text
-        assert fig.layout.xaxis.title.text == "Number of Components"
+        assert fig.layout.xaxis.title.text == "Components"
         assert fig.layout.yaxis.title.text == "BIC"
 
 

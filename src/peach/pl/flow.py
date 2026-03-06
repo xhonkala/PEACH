@@ -4,6 +4,19 @@ import numpy as np
 import plotly.graph_objects as go
 from anndata import AnnData
 
+from ._style import (
+    CATEGORICAL_PALETTE,
+    COLOR_MUTED,
+    COLOR_NEGATIVE,
+    COLOR_POSITIVE,
+    COLOR_PRIMARY,
+    DIVERGING_COLORSCALE,
+    HEAT_COLORSCALE,
+    SCATTER_MARKER_BG,
+    apply_style,
+    save_and_show,
+)
+
 
 def velocity_quiver(
     adata: AnnData,
@@ -49,50 +62,36 @@ def velocity_quiver(
     dx = transported[idx, 0] - x
     dy = transported[idx, 1] - y
 
-    # Scale arrows
     scale = 0.3
 
     fig = go.Figure()
 
-    # Background: all cells
+    # Background: all cells — minimal ink
     fig.add_trace(go.Scatter(
         x=pca[:, 0], y=pca[:, 1],
         mode="markers",
-        marker={"size": 2, "opacity": 0.2, "color": "gray"},
+        marker=SCATTER_MARKER_BG,
         name="All cells",
-        showlegend=True,
+        showlegend=False,
     ))
 
-    # Arrows via annotations
+    # Arrows via annotations — thin, single color
     for i in range(n):
         fig.add_annotation(
             x=x[i] + dx[i] * scale,
             y=y[i] + dy[i] * scale,
-            ax=x[i],
-            ay=y[i],
-            xref="x",
-            yref="y",
-            axref="x",
-            ayref="y",
+            ax=x[i], ay=y[i],
+            xref="x", yref="y", axref="x", ayref="y",
             showarrow=True,
-            arrowhead=2,
-            arrowsize=1,
-            arrowwidth=1,
-            arrowcolor="red",
+            arrowhead=2, arrowsize=1,
+            arrowwidth=0.8,
+            arrowcolor=COLOR_NEGATIVE,
         )
 
-    fig.update_layout(
-        title="Flow Velocity Field",
-        xaxis_title="PC1",
-        yaxis_title="PC2",
-        showlegend=True,
-    )
+    apply_style(fig, title="Flow velocity field",
+                xaxis_title="PC1", yaxis_title="PC2")
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def gene_alignment_barplot(
@@ -133,7 +132,7 @@ def gene_alignment_barplot(
     combined_names = [names[i] for i in combined_idx]
     combined_scores = scores[combined_idx]
 
-    colors = ["red" if s < 0 else "blue" for s in combined_scores]
+    colors = [COLOR_NEGATIVE if s < 0 else COLOR_PRIMARY for s in combined_scores]
 
     fig = go.Figure(data=go.Bar(
         x=combined_scores,
@@ -141,17 +140,11 @@ def gene_alignment_barplot(
         orientation="h",
         marker_color=colors,
     ))
-    fig.update_layout(
-        title=f"Gene Alignment with Flow (top {n_top} each direction)",
-        xaxis_title="Alignment Score",
-        height=max(400, len(combined_names) * 15),
-    )
+    apply_style(fig, title=f"Gene–flow alignment (top {n_top} each)",
+                xaxis_title="Alignment score",
+                height=max(400, len(combined_names) * 15))
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def jacobian_heatmap(
@@ -186,21 +179,14 @@ def jacobian_heatmap(
         z=jac,
         x=labels,
         y=labels,
-        colorscale="RdBu_r",
+        colorscale=DIVERGING_COLORSCALE,
         zmid=0,
-        colorbar={"title": "dv/dx"},
+        colorbar=dict(title="∂v/∂x", thickness=12, len=0.6),
     ))
-    fig.update_layout(
-        title=f"Mean Flow Jacobian (t={jacobian_result.t})",
-        xaxis_title="Input PC",
-        yaxis_title="Output PC",
-    )
+    apply_style(fig, title=f"Mean flow Jacobian (t={jacobian_result.t:.2f})",
+                xaxis_title="Input PC", yaxis_title="Output PC")
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def trajectory_ribbon(
@@ -260,32 +246,31 @@ def trajectory_ribbon(
         traj = np.stack([(1 - t) * source + t * transported for t in times])
 
     fig = go.Figure()
-    for step in range(len(traj)):
-        t_val = step / max(len(traj) - 1, 1)
+
+    # Sequential blue→red using a perceptual ramp
+    n_frames = len(traj)
+    for step in range(n_frames):
+        t_val = step / max(n_frames - 1, 1)
+        # Interpolate from blue (COLOR_PRIMARY) to vermillion (COLOR_NEGATIVE)
+        r = int(0 + t_val * 213)
+        g = int(114 - t_val * 114)
+        b = int(178 - t_val * 178)
+        color = f"rgb({r},{g},{b})"
+
+        show_in_legend = step % max(1, n_frames // 5) == 0
         fig.add_trace(go.Scatter(
             x=traj[step, :, 0],
             y=traj[step, :, 1],
             mode="markers",
-            marker={
-                "size": 3,
-                "opacity": 0.4,
-                "color": f"rgb({int(255 * t_val)}, 0, {int(255 * (1 - t_val))})",
-            },
-            name=f"t={t_val:.2f}",
-            showlegend=step % max(1, len(traj) // 5) == 0,
+            marker=dict(size=2, opacity=0.4, color=color),
+            name=f"t={t_val:.2f}" if show_in_legend else "",
+            showlegend=show_in_legend,
         ))
 
-    fig.update_layout(
-        title="Flow Trajectory",
-        xaxis_title="PC1",
-        yaxis_title="PC2",
-    )
+    apply_style(fig, title="Flow trajectory",
+                xaxis_title="PC1", yaxis_title="PC2")
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def flow_magnitude(
@@ -295,7 +280,7 @@ def flow_magnitude(
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """2D scatter colored by transport magnitude (||transported - source||).
+    """2D scatter colored by transport magnitude (‖transported − source‖).
 
     Parameters
     ----------
@@ -322,24 +307,19 @@ def flow_magnitude(
         x=source_pca[:, 0],
         y=source_pca[:, 1],
         mode="markers",
-        marker={
-            "size": 4,
-            "color": magnitude,
-            "colorscale": "Hot",
-            "colorbar": {"title": "||transport||"},
-        },
+        hovertemplate="PC1=%{x:.2f}<br>PC2=%{y:.2f}<br>‖Δ‖=%{marker.color:.3f}<extra></extra>",
+        marker=dict(
+            size=3,
+            opacity=0.6,
+            color=magnitude,
+            colorscale=HEAT_COLORSCALE,
+            colorbar=dict(title="‖Δ‖", thickness=12, len=0.6),
+        ),
     ))
-    fig.update_layout(
-        title="Flow Magnitude",
-        xaxis_title="PC1",
-        yaxis_title="PC2",
-    )
+    apply_style(fig, title="Transport magnitude",
+                xaxis_title="PC1", yaxis_title="PC2")
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def density_comparison(
@@ -377,9 +357,9 @@ def density_comparison(
 
     fig = go.Figure()
     for data, name, color in [
-        (source_pc1, "Source", "blue"),
-        (transported_pc1, "Transported", "green"),
-        (target_pc1, "Target", "red"),
+        (source_pc1, "Source", COLOR_PRIMARY),
+        (transported_pc1, "Transported", COLOR_POSITIVE),
+        (target_pc1, "Target", COLOR_NEGATIVE),
     ]:
         fig.add_trace(go.Histogram(
             x=data,
@@ -390,18 +370,11 @@ def density_comparison(
             histnorm="probability density",
         ))
 
-    fig.update_layout(
-        title="Density Comparison (PC1)",
-        xaxis_title="PC1",
-        yaxis_title="Density",
-        barmode="overlay",
-    )
+    apply_style(fig, title="Density comparison (PC1)",
+                xaxis_title="PC1", yaxis_title="Density")
+    fig.update_layout(barmode="overlay")
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def archetype_correspondence(
@@ -410,7 +383,7 @@ def archetype_correspondence(
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """K_src x K_tgt heatmap for archetype correspondence.
+    """K_src × K_tgt heatmap for archetype correspondence.
 
     Parameters
     ----------
@@ -435,21 +408,15 @@ def archetype_correspondence(
         K_src, K_tgt = corr_matrix.shape
         fig.add_trace(go.Heatmap(
             z=corr_matrix,
-            x=[f"Tgt {i}" for i in range(K_tgt)],
-            y=[f"Src {i}" for i in range(K_src)],
+            x=[f"Target {i}" for i in range(K_tgt)],
+            y=[f"Source {i}" for i in range(K_src)],
             colorscale="Blues",
-            name=f"{src} -> {tgt}",
+            colorbar=dict(title="Weight", thickness=12, len=0.6),
         ))
         break  # Show first pair only
 
-    fig.update_layout(
-        title="Archetype Correspondence",
-        xaxis_title="Target Archetypes",
-        yaxis_title="Source Archetypes",
-    )
+    apply_style(fig, title="Archetype correspondence",
+                xaxis_title="Target archetypes",
+                yaxis_title="Source archetypes")
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)

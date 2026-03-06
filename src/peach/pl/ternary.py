@@ -12,6 +12,11 @@ import scipy.sparse as sp
 from anndata import AnnData
 from itertools import combinations
 
+from ._style import (
+    SEQUENTIAL_COLORSCALE,
+    save_and_show,
+)
+
 
 def ternary_facet(
     adata: AnnData,
@@ -83,9 +88,6 @@ def ternary_facet(
     colorbar_title = ""
     if color_by is not None:
         if color_by == "density":
-            # Density coloring: use sum of original 3 weights as a proxy
-            # (cells with higher combined weight for these 3 archetypes are
-            # more "relevant" to this sub-simplex)
             color_values = w3_sum.ravel()
             colorbar_title = "Sub-simplex relevance"
         elif color_by in adata.obs.columns:
@@ -104,7 +106,7 @@ def ternary_facet(
 
     marker_opts = {
         "size": kwargs.pop("marker_size", 3),
-        "opacity": kwargs.pop("marker_opacity", 0.6),
+        "opacity": kwargs.pop("marker_opacity", 0.5),
     }
 
     # Numeric continuous coloring
@@ -112,8 +114,9 @@ def ternary_facet(
         np.asarray(color_values).dtype, np.number
     ):
         marker_opts["color"] = color_values
-        marker_opts["colorscale"] = kwargs.pop("colorscale", "Viridis")
-        marker_opts["colorbar"] = {"title": colorbar_title}
+        marker_opts["colorscale"] = kwargs.pop("colorscale", SEQUENTIAL_COLORSCALE)
+        marker_opts["colorbar"] = dict(title=colorbar_title,
+                                       thickness=12, len=0.6)
 
     fig.add_trace(
         go.Scatterternary(
@@ -125,25 +128,29 @@ def ternary_facet(
         )
     )
 
+    # Minimal ternary chrome — thin axis lines, no heavy borders
     fig.update_layout(
-        ternary={
-            "sum": 1,
-            "aaxis": {"title": f"Archetype {i}", "min": 0, "linewidth": 2},
-            "baxis": {"title": f"Archetype {j}", "min": 0, "linewidth": 2},
-            "caxis": {"title": f"Archetype {k}", "min": 0, "linewidth": 2},
-        },
-        title=f"Ternary: Archetypes ({i}, {j}, {k})",
-        width=600,
-        height=500,
+        ternary=dict(
+            sum=1,
+            aaxis=dict(title=f"A{i}", min=0, linewidth=1, linecolor="#333",
+                       gridcolor="#eee", ticklen=3),
+            baxis=dict(title=f"A{j}", min=0, linewidth=1, linecolor="#333",
+                       gridcolor="#eee", ticklen=3),
+            caxis=dict(title=f"A{k}", min=0, linewidth=1, linecolor="#333",
+                       gridcolor="#eee", ticklen=3),
+            bgcolor="white",
+        ),
+        font=dict(family="Arial, Helvetica, sans-serif", size=12),
+        title=dict(text=f"Archetypes ({i}, {j}, {k})", x=0.02,
+                   xanchor="left", font=dict(size=14)),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=40, r=30, t=40, b=40),
+        width=550,
+        height=480,
     )
 
-    if save_path:
-        fig.write_html(save_path)
-
-    if show:
-        fig.show()
-
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def ternary_facet_grid(

@@ -184,7 +184,7 @@ class TestGeneAlignmentBarplot:
     def test_title_contains_alignment(self, flow_viz_data, alignment_data):
         adata, _ = flow_viz_data
         fig = gene_alignment_barplot(adata, alignment_data, show=False)
-        assert "Alignment" in fig.layout.title.text
+        assert "alignment" in fig.layout.title.text.lower()
 
     def test_save_path(self, flow_viz_data, alignment_data, tmp_path):
         adata, _ = flow_viz_data
@@ -425,8 +425,8 @@ class TestArchetypeCorrespondence:
         )
         assert len(fig.data[0].x) == 3
         assert len(fig.data[0].y) == 4
-        assert "Tgt" in fig.data[0].x[0]
-        assert "Src" in fig.data[0].y[0]
+        assert "Target" in fig.data[0].x[0] or "Tgt" in fig.data[0].x[0]
+        assert "Source" in fig.data[0].y[0] or "Src" in fig.data[0].y[0]
 
     def test_no_correspondence_raises(self, between_result_no_correspondence):
         with pytest.raises(ValueError, match="No archetype correspondence"):
@@ -438,9 +438,9 @@ class TestArchetypeCorrespondence:
         fig = archetype_correspondence(
             between_result_with_correspondence, show=False
         )
-        assert "Correspondence" in fig.layout.title.text
-        assert fig.layout.xaxis.title.text == "Target Archetypes"
-        assert fig.layout.yaxis.title.text == "Source Archetypes"
+        assert "correspondence" in fig.layout.title.text.lower()
+        assert "target" in fig.layout.xaxis.title.text.lower()
+        assert "source" in fig.layout.yaxis.title.text.lower()
 
     def test_save_path(self, between_result_with_correspondence, tmp_path):
         save_path = str(tmp_path / "correspondence.html")

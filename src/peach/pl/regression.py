@@ -1,8 +1,16 @@
-"""Regression visualization: coefficient heatmaps, R^2 plots, pattern summaries."""
+"""Regression visualization: coefficient heatmaps, R² plots, pattern summaries."""
 
 import numpy as np
 import plotly.graph_objects as go
 from anndata import AnnData
+
+from ._style import (
+    CATEGORICAL_PALETTE,
+    COLOR_PRIMARY,
+    DIVERGING_COLORSCALE,
+    apply_style,
+    save_and_show,
+)
 
 
 def _get_regression_data(adata):
@@ -21,14 +29,14 @@ def coefficient_heatmap(
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """Heatmap of vertex coefficients (beta_k) for top features by R^2.
+    """Heatmap of vertex coefficients (β_k) for top features by R².
 
     Parameters
     ----------
     adata : AnnData
         Must have regression results in ``uns['peach_simplex_regression']``.
     top_n : int
-        Number of top features to display, ranked by R^2.
+        Number of top features to display, ranked by R².
     save_path : str or None
         If provided, save figure as HTML to this path.
     show : bool
@@ -43,7 +51,6 @@ def coefficient_heatmap(
     names = list(reg["feature_names"])
     r2 = np.asarray(reg["r_squared_degree1"])
 
-    # Top features by R^2
     top_idx = np.argsort(r2)[-top_n:][::-1]
     top_coefs = coefs[top_idx]
     top_names = [names[i] for i in top_idx]
@@ -55,22 +62,15 @@ def coefficient_heatmap(
         z=top_coefs,
         x=arch_names,
         y=top_names,
-        colorscale="RdBu_r",
+        colorscale=DIVERGING_COLORSCALE,
         zmid=0,
-        colorbar={"title": "Coefficient"},
+        colorbar=dict(title="β", thickness=12, len=0.6),
     ))
-    fig.update_layout(
-        title=f"Vertex Coefficients (top {min(top_n, len(top_names))} by R\u00b2)",
-        xaxis_title="Archetype",
-        yaxis_title="Feature",
-        height=max(400, len(top_names) * 20),
-    )
+    n_shown = min(top_n, len(top_names))
+    apply_style(fig, title=f"Vertex coefficients — top {n_shown} by R²",
+                height=max(400, n_shown * 18))
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def interaction_heatmap(
@@ -80,14 +80,14 @@ def interaction_heatmap(
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """Heatmap of interaction coefficients (beta_{jk}) for top features.
+    """Heatmap of interaction coefficients (β_{jk}) for top features.
 
     Parameters
     ----------
     adata : AnnData
         Must have degree-2 regression results in ``uns['peach_simplex_regression']``.
     top_n : int
-        Number of top features to display, ranked by R^2.
+        Number of top features to display, ranked by R².
     save_path : str or None
         If provided, save figure as HTML to this path.
     show : bool
@@ -116,22 +116,15 @@ def interaction_heatmap(
         z=top_coefs,
         x=pair_names,
         y=top_names,
-        colorscale="RdBu_r",
+        colorscale=DIVERGING_COLORSCALE,
         zmid=0,
-        colorbar={"title": "Interaction"},
+        colorbar=dict(title="β_int", thickness=12, len=0.6),
     ))
-    fig.update_layout(
-        title=f"Interaction Coefficients (top {min(top_n, len(top_names))} by R\u00b2)",
-        xaxis_title="Archetype Pair",
-        yaxis_title="Feature",
-        height=max(400, len(top_names) * 20),
-    )
+    n_shown = min(top_n, len(top_names))
+    apply_style(fig, title=f"Interaction coefficients — top {n_shown} by R²",
+                height=max(400, n_shown * 18))
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def r2_barplot(
@@ -141,7 +134,7 @@ def r2_barplot(
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """Horizontal bar plot of features ranked by R^2.
+    """Horizontal bar plot of features ranked by R².
 
     Parameters
     ----------
@@ -171,20 +164,14 @@ def r2_barplot(
         x=top_r2[::-1],
         y=top_names[::-1],
         orientation="h",
-        marker_color="steelblue",
+        marker_color=COLOR_PRIMARY,
     ))
-    fig.update_layout(
-        title=f"Top {min(top_n, len(top_names))} Features by R\u00b2",
-        xaxis_title="R\u00b2",
-        yaxis_title="Feature",
-        height=max(400, len(top_names) * 20),
-    )
+    n_shown = min(top_n, len(top_names))
+    apply_style(fig, title=f"Top {n_shown} features by R²",
+                xaxis_title="R²",
+                height=max(400, n_shown * 18))
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def vertex_radar(
@@ -227,18 +214,32 @@ def vertex_radar(
         r=list(betas) + [betas[0]],  # close the polygon
         theta=arch_names + [arch_names[0]],
         fill="toself",
+        fillcolor=f"rgba(0, 114, 178, 0.15)",
+        line=dict(color=COLOR_PRIMARY, width=2),
         name=feature,
     ))
     fig.update_layout(
-        polar={"radialaxis": {"visible": True}},
-        title=f"Vertex Coefficients: {feature}",
+        polar=dict(
+            radialaxis=dict(visible=True, gridcolor="#ddd", linewidth=0),
+            angularaxis=dict(linewidth=0, gridcolor="#ddd"),
+            bgcolor="white",
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=60, r=60, t=40, b=40),
+        font=dict(family="Arial, Helvetica, sans-serif", size=12),
+    )
+    apply_style(fig, title=feature)
+    # Radar plots need the polar layout preserved, so re-apply polar specifics
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, gridcolor="#eee", linewidth=0),
+            angularaxis=dict(linewidth=0, gridcolor="#eee"),
+            bgcolor="white",
+        ),
     )
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def regression_volcano(
@@ -247,7 +248,7 @@ def regression_volcano(
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """Scatter plot: R^2 vs max vertex contrast (max beta - min beta).
+    """Scatter plot: R² vs max vertex contrast (max β − min β).
 
     Parameters
     ----------
@@ -274,19 +275,14 @@ def regression_volcano(
         y=r2,
         mode="markers",
         text=names,
-        marker={"size": 5, "opacity": 0.6, "color": "steelblue"},
+        hovertemplate="%{text}<br>R²=%{y:.3f}<br>Contrast=%{x:.2f}<extra></extra>",
+        marker=dict(size=4, opacity=0.5, color=COLOR_PRIMARY),
     ))
-    fig.update_layout(
-        title="Regression Volcano: R\u00b2 vs Vertex Contrast",
-        xaxis_title="Max Vertex Contrast (max \u03b2 - min \u03b2)",
-        yaxis_title="R\u00b2",
-    )
+    apply_style(fig, title="R² vs vertex contrast",
+                xaxis_title="max β − min β",
+                yaxis_title="R²")
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def pattern_summary(
@@ -318,20 +314,19 @@ def pattern_summary(
 
     patterns = adata.uns["peach_feature_patterns"]
     counts = patterns["pattern_counts"]
+    labels = list(counts.keys())
+    values = list(counts.values())
+
+    # One color per pattern type
+    colors = [CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)]
+              for i in range(len(labels))]
 
     fig = go.Figure(data=go.Bar(
-        x=list(counts.keys()),
-        y=list(counts.values()),
-        marker_color="steelblue",
+        x=labels,
+        y=values,
+        marker_color=colors,
     ))
-    fig.update_layout(
-        title="Feature Pattern Distribution",
-        xaxis_title="Pattern Type",
-        yaxis_title="Count",
-    )
+    apply_style(fig, title="Feature pattern distribution",
+                yaxis_title="Count")
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)

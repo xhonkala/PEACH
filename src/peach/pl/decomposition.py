@@ -4,6 +4,17 @@ import numpy as np
 import plotly.graph_objects as go
 from anndata import AnnData
 
+from ._style import (
+    CATEGORICAL_PALETTE,
+    COLOR_MUTED,
+    COLOR_NEGATIVE,
+    COLOR_PRIMARY,
+    SCATTER_MARKER,
+    SEQUENTIAL_COLORSCALE,
+    apply_style,
+    save_and_show,
+)
+
 
 def _get_gmm_data(adata: AnnData) -> dict:
     """Helper to extract GMM results from adata.uns."""
@@ -53,14 +64,15 @@ def component_scatter(
 
     fig = go.Figure()
     unique_labels = np.unique(labels[labels >= 0])
-    for label in unique_labels:
+    for i, label in enumerate(unique_labels):
         mask = labels == label
+        color = CATEGORICAL_PALETTE[int(i) % len(CATEGORICAL_PALETTE)]
         fig.add_trace(go.Scatter(
             x=pca[mask, 0],
             y=pca[mask, 1],
             mode="markers",
-            marker={"size": 3, "opacity": 0.6},
-            name=f"Component {label}",
+            marker=dict(**SCATTER_MARKER, color=color),
+            name=f"Component {int(label)}",
         ))
 
     # Unassigned cells (-1)
@@ -70,21 +82,14 @@ def component_scatter(
             x=pca[unassigned, 0],
             y=pca[unassigned, 1],
             mode="markers",
-            marker={"size": 2, "opacity": 0.3, "color": "gray"},
+            marker=dict(size=2, opacity=0.15, color=COLOR_MUTED),
             name="Unassigned",
         ))
 
-    fig.update_layout(
-        title="GMM Components in PCA Space",
-        xaxis_title="PC1",
-        yaxis_title="PC2",
-    )
+    apply_style(fig, title="GMM components",
+                xaxis_title="PC1", yaxis_title="PC2")
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def gmm_bic_curve(
@@ -118,25 +123,27 @@ def gmm_bic_curve(
         x=n_range,
         y=bic,
         mode="lines+markers",
+        line=dict(color=COLOR_PRIMARY, width=2),
+        marker=dict(size=6, color=COLOR_PRIMARY),
         name="BIC",
     ))
-    fig.add_vline(
-        x=optimal,
-        line_dash="dash",
-        line_color="red",
-        annotation_text=f"Optimal: {optimal}",
-    )
-    fig.update_layout(
-        title="BIC Curve",
-        xaxis_title="Number of Components",
-        yaxis_title="BIC",
-    )
+    # Mark optimal with a single dot, no annotation text clutter
+    opt_idx = list(n_range).index(optimal) if optimal in n_range else None
+    if opt_idx is not None:
+        fig.add_trace(go.Scatter(
+            x=[optimal],
+            y=[bic[opt_idx]],
+            mode="markers",
+            marker=dict(size=12, color=COLOR_NEGATIVE,
+                        symbol="circle-open", line=dict(width=2)),
+            name=f"Optimal (k={optimal})",
+            showlegend=True,
+        ))
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    apply_style(fig, title="BIC curve",
+                xaxis_title="Components", yaxis_title="BIC")
+
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def component_heatmap(
@@ -199,19 +206,13 @@ def component_heatmap(
         z=top_profiles,
         x=top_names,
         y=comp_names,
-        colorscale="Viridis",
-        colorbar={"title": "Mean value"},
+        colorscale=SEQUENTIAL_COLORSCALE,
+        colorbar=dict(title="Mean", thickness=12, len=0.6),
     ))
-    fig.update_layout(
-        title=f"Component Feature Profiles (top {actual_top_n} by variance)",
-        height=max(400, len(comp_names) * 40),
-    )
+    apply_style(fig, title=f"Component feature profiles — top {actual_top_n}",
+                height=max(300, len(comp_names) * 40))
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def component_stability(
@@ -239,25 +240,22 @@ def component_stability(
     scores = np.asarray(gmm["component_stability_scores"])
     n = len(scores)
 
+    # Color bars by whether they meet the stability threshold
+    colors = [COLOR_PRIMARY if s >= 0.7 else COLOR_MUTED for s in scores]
+
     fig = go.Figure(data=go.Bar(
         x=[f"Comp {i}" for i in range(n)],
         y=scores,
-        marker_color="steelblue",
+        marker_color=colors,
     ))
     fig.add_hline(
         y=0.7,
-        line_dash="dash",
-        line_color="red",
-        annotation_text="Stability threshold",
+        line_dash="dot",
+        line_color=COLOR_MUTED,
+        line_width=1,
     )
-    fig.update_layout(
-        title="Component Stability Scores",
-        yaxis_title="Stability",
-        yaxis_range=[0, 1.05],
-    )
+    apply_style(fig, title="Component stability",
+                yaxis_title="Stability score")
+    fig.update_yaxes(range=[0, 1.05])
 
-    if save_path:
-        fig.write_html(save_path)
-    if show:
-        fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
