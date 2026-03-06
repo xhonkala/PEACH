@@ -63,6 +63,13 @@ from .flow import (
     flow_significance,
 )
 
+# v0.5.0: Archetype comparison
+from .comparison import (
+    archetype_mmd,
+    archetype_feature_similarity,
+    archetype_contrasts,
+)
+
 __all__ = [
     "train_archetypal",
     "archetypal_coordinates",
@@ -107,4 +114,8 @@ __all__ = [
     "flow_gene_alignment",
     "flow_jacobian",
     "flow_significance",
+    # v0.5.0: Archetype comparison
+    "archetype_mmd",
+    "archetype_feature_similarity",
+    "archetype_contrasts",
 ]

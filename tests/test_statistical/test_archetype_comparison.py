@@ -146,3 +146,29 @@ class TestArchetypeContrasts:
         sig_01 = np.sum(result["pvalues_fdr"][(0, 1)] < 0.05)
         sig_02 = np.sum(result["pvalues_fdr"][(0, 2)] < 0.05)
         assert sig_01 < sig_02
+
+
+class TestPublicAPI:
+    def test_archetype_mmd_api(self, comparison_adata):
+        import peach as pc
+        result = pc.tl.archetype_mmd(comparison_adata, n_permutations=10)
+        assert hasattr(result, "mmd_matrix")
+        assert hasattr(result, "pvalue_matrix")
+        assert result.mmd_matrix.shape == (4, 4)
+        assert "peach_archetype_mmd" in comparison_adata.uns
+
+    def test_archetype_feature_similarity_api(self, comparison_adata):
+        import peach as pc
+        pc.tl.feature_simplex_regression(comparison_adata, n_bootstrap=0)
+        result = pc.tl.archetype_feature_similarity(comparison_adata)
+        assert hasattr(result, "spearman_matrix")
+        assert hasattr(result, "silhouette_overall")
+        assert "peach_archetype_feature_similarity" in comparison_adata.uns
+
+    def test_archetype_contrasts_api(self, comparison_adata):
+        import peach as pc
+        pc.tl.feature_simplex_regression(comparison_adata, n_bootstrap=0)
+        result = pc.tl.archetype_contrasts(comparison_adata)
+        assert hasattr(result, "pairs")
+        assert hasattr(result, "delta_beta")
+        assert "peach_archetype_contrasts" in comparison_adata.uns
