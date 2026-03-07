@@ -10,7 +10,7 @@ from anndata import AnnData
 logger = logging.getLogger(__name__)
 
 WEIGHTS_KEY = "cell_archetype_weights"
-WEIGHTS_TOLERANCE = 1e-8
+WEIGHTS_TOLERANCE = 1e-6
 
 
 def resolve_features(
