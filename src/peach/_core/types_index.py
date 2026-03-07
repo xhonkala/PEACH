@@ -407,6 +407,33 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "tl.flow_significance": ("dict", ["p_value, observed_stat, null_distribution"]),
+    # v0.5.0: Archetype comparison
+    "tl.archetype_mmd": (
+        "ArchetypeMMDResult",
+        [
+            "mmd_matrix: [K, K] or [K_A, K_B] MMD values",
+            "pvalue_matrix: permutation p-values",
+            "stored in adata.uns['peach_archetype_mmd']",
+        ],
+    ),
+    "tl.archetype_feature_similarity": (
+        "ArchetypeFeatureSimilarityResult",
+        [
+            "silhouette_per_archetype: [K]",
+            "silhouette_overall: float",
+            "spearman_matrix: [K, K] rank correlation",
+            "stored in adata.uns['peach_archetype_feature_similarity']",
+        ],
+    ),
+    "tl.archetype_contrasts": (
+        "ArchetypeContrastsResult",
+        [
+            "pairs: list of (j, k) tuples",
+            "delta_beta: {(j,k): [n_features]}",
+            "pvalues_fdr: {(j,k): [n_features]} BH-corrected",
+            "stored in adata.uns['peach_archetype_contrasts']",
+        ],
+    ),
     "tl.archetype_pair_enrichment": (
         "dict",
         [
@@ -435,6 +462,10 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
     "pl.flow_magnitude": ("go.Figure", ["Transport magnitude scatter"]),
     "pl.density_comparison": ("go.Figure", ["Source vs target KDE"]),
     "pl.archetype_correspondence": ("go.Figure", ["K x K correspondence"]),
+    # Archetype comparison
+    "pl.mmd_heatmap": ("go.Figure", ["Heatmap of K x K MMD matrix"]),
+    "pl.contrast_volcano": ("go.Figure", ["Volcano plot: delta-beta vs -log10(FDR q)"]),
+    "pl.feature_similarity_heatmap": ("go.Figure", ["Spearman correlation heatmap"]),
     # =========================================================================
     # _core (INTERNAL) - Key functions
     # =========================================================================
