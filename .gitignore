@@ -95,3 +95,14 @@ coverage.xml
 
 # ruff
 .ruff_cache/
+
+# E2E test outputs (large HTML/executed notebooks)
+tests/e2e_outputs/
+tests/e2e_outputs_v12/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Dev scratch files
+working_memory.md
+claude.md
