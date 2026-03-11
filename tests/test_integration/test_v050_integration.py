@@ -35,14 +35,14 @@ class TestV050Pipeline:
 
         # Regression
         reg = pc.tl.feature_simplex_regression(v050_adata, n_bootstrap=0)
-        assert reg.vertex_coefficients.shape == (30, 3)
-        assert len(reg.r_squared_degree1) == 30
+        assert np.asarray(reg["vertex_coefficients"]).shape == (30, 3)
+        assert len(reg["r_squared_degree1"]) == 30
         assert "peach_simplex_regression" in v050_adata.uns
 
         # Classification
         patterns = pc.tl.classify_feature_patterns(v050_adata)
-        assert sum(patterns.pattern_counts.values()) == 30
-        assert patterns.classifications[0]["pattern"] == "archetype-exclusive"
+        assert sum(patterns["pattern_counts"].values()) == 30
+        assert patterns["classifications"][0]["pattern"] == "archetype-exclusive"
         assert "peach_feature_patterns" in v050_adata.uns
 
         # Summary
@@ -58,9 +58,9 @@ class TestV050Pipeline:
         driver = pc.tl.archetype_driver_regression(
             v050_adata, n_bootstrap=0, max_degree=1
         )
-        assert driver.main_coefficients_ilr.shape == (2, 30)  # K-1=2 ILR dims
-        assert driver.main_coefficients.shape == (3, 30)  # K=3 simplex
-        assert len(driver.r_squared) == 2
+        assert np.asarray(driver["main_coefficients_ilr"]).shape == (2, 30)  # K-1=2 ILR dims
+        assert np.asarray(driver["main_coefficients"]).shape == (3, 30)  # K=3 simplex
+        assert len(driver["r_squared"]) == 2
         assert "peach_driver_regression" in v050_adata.uns
 
     def test_gmm_pipeline(self, v050_adata):
@@ -72,8 +72,8 @@ class TestV050Pipeline:
             n_initializations=3,
             n_components_range=(2, 4),
         )
-        assert gmm.n_components_stable >= 1
-        assert len(gmm.component_assignments) == 300
+        assert gmm["n_components_stable"] >= 1
+        assert len(gmm["component_assignments"]) == 300
         assert "peach_gmm" in v050_adata.uns
         assert "peach_gmm_labels" in v050_adata.obsm
 

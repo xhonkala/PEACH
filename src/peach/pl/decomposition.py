@@ -191,8 +191,10 @@ def component_heatmap(
 
     # Feature names (try from regression results or var_names)
     feature_names = None
-    if "peach_simplex_regression" in adata.uns:
-        feature_names = adata.uns["peach_simplex_regression"].get("feature_names")
+    from peach._core.utils.feature_utils import resolve_regression_result
+    _reg = resolve_regression_result(adata, prefer="genes")
+    if _reg is not None:
+        feature_names = _reg.get("feature_names")
     if feature_names is not None and len(feature_names) == n_features:
         top_names = [feature_names[i] for i in top_idx]
     elif adata.n_vars == n_features:

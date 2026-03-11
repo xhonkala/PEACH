@@ -4,6 +4,8 @@ import numpy as np
 import plotly.graph_objects as go
 from anndata import AnnData
 
+from peach._core.utils.feature_utils import resolve_regression_result
+
 from ._style import (
     CATEGORICAL_PALETTE,
     COLOR_PRIMARY,
@@ -13,13 +15,18 @@ from ._style import (
 )
 
 
-def _get_regression_data(adata):
-    """Helper to extract regression results from adata.uns."""
-    if "peach_simplex_regression" not in adata.uns:
+def _get_regression_data(adata, feature_type="genes"):
+    """Helper to extract regression results from adata.uns.
+
+    Tries namespaced key first (e.g. peach_simplex_regression_genes),
+    falls back to generic peach_simplex_regression.
+    """
+    result = resolve_regression_result(adata, prefer=feature_type)
+    if result is None:
         raise ValueError(
             "No regression results found. Run pc.tl.feature_simplex_regression() first."
         )
-    return adata.uns["peach_simplex_regression"]
+    return result
 
 
 def coefficient_heatmap(

@@ -119,14 +119,14 @@ def main():
         r2_str = f"R2={r2:.3f}" if r2 else "R2=N/A"
         done(f"({r2_str}, {elapsed:.1f}s)")
 
-        # Extract weights
+        # Workflow 04 steps: weights, coordinates, assignment
         pc.tl.extract_archetype_weights(adata_train)
+        pc.tl.archetypal_coordinates(adata_train, verbose=False)
 
         # Store training results for later
         cell_data[name]["weights"] = adata_train.obsm["cell_archetype_weights"]
         cell_data[name]["uns"] = dict(adata_train.uns)
-        if "archetype_distances" in adata_train.obsm:
-            cell_data[name]["arch_dist"] = adata_train.obsm["archetype_distances"]
+        cell_data[name]["arch_dist"] = adata_train.obsm["archetype_distances"]
         models[name] = result
 
     # Reload sparse X for regression (one cell type at a time to manage memory)
@@ -141,8 +141,7 @@ def main():
         adata_obj = ad.AnnData(X=X_sparse, obs=cell_data[name]["obs"].copy(), var=var_df)
         adata_obj.obsm["X_pca"] = cell_data[name]["pca"]
         adata_obj.obsm["cell_archetype_weights"] = cell_data[name]["weights"]
-        if "arch_dist" in cell_data[name]:
-            adata_obj.obsm["archetype_distances"] = cell_data[name]["arch_dist"]
+        adata_obj.obsm["archetype_distances"] = cell_data[name]["arch_dist"]
         for k, v in cell_data[name]["uns"].items():
             adata_obj.uns[k] = v
         pc.tl.assign_archetypes(adata_obj)
@@ -164,10 +163,10 @@ def main():
             ad_obj, max_degree=2, n_bootstrap=0, robust_se=True,
         )
         elapsed = time.time() - t1
-        median_r2 = np.median(reg.r_squared_degree1)
-        top_genes = np.argsort(reg.r_squared_degree1)[-5:][::-1]
-        top_names = [reg.feature_names[i] for i in top_genes]
-        top_r2s = reg.r_squared_degree1[top_genes]
+        median_r2 = np.median(reg["r_squared_degree1"])
+        top_genes = np.argsort(reg["r_squared_degree1"])[-5:][::-1]
+        top_names = [reg["feature_names"][i] for i in top_genes]
+        top_r2s = reg["r_squared_degree1"][top_genes]
         done(f"(median R2={median_r2:.3f}, {elapsed:.1f}s)")
         for g, r in zip(top_names, top_r2s):
             print(f"      {g}: R2={r:.3f}", flush=True)
@@ -189,34 +188,35 @@ def main():
         step(f"Within-fit MMD for {name}")
         mmd_result = pc.tl.archetype_mmd(ad_obj, n_permutations=100)
         mask = ~np.eye(K, dtype=bool)
-        mmd_vals = mmd_result.mmd_matrix[mask]
+        mmd_vals = mmd_result["mmd_matrix"][mask]
         done(f"(MMD range: {mmd_vals.min():.4f}-{mmd_vals.max():.4f})")
 
     # 5b. Between-fit MMD
     step("Between-fit MMD (CMP vs Mono)")
     mmd_between = pc.tl.archetype_mmd(adata_cmp, adata_mono, n_permutations=100)
-    done(f"(shape: {mmd_between.mmd_matrix.shape})")
-    print(f"      MMD matrix:\n{np.array2string(mmd_between.mmd_matrix, precision=4)}", flush=True)
+    done(f"(shape: {mmd_between['mmd_matrix'].shape})")
+    print(f"      MMD matrix:\n{np.array2string(mmd_between['mmd_matrix'], precision=4)}", flush=True)
 
     # 5c. Feature similarity
     for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
         step(f"Feature similarity for {name}")
         sim = pc.tl.archetype_feature_similarity(ad_obj)
-        done(f"(silhouette={sim.silhouette_overall:.3f})")
+        done(f"(silhouette={sim['silhouette_overall']:.3f})")
 
     # 5d. Between-fit feature similarity
     step("Between-fit feature similarity (CMP vs Mono)")
     sim_between = pc.tl.archetype_feature_similarity(adata_cmp, adata_mono)
-    done(f"(n_shared={sim_between.n_shared_features})")
-    print(f"      Spearman matrix:\n{np.array2string(sim_between.spearman_matrix, precision=3)}", flush=True)
+    done(f"(n_shared={sim_between['n_shared_features']})")
+    print(f"      Spearman matrix:\n{np.array2string(sim_between['spearman_matrix'], precision=3)}", flush=True)
 
     # 5e. Wald contrasts
     for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
         step(f"Wald contrasts for {name}")
         contrasts = pc.tl.archetype_contrasts(ad_obj)
         pair_summary = []
-        for pair in contrasts.pairs:
-            n_sig = int(np.sum(contrasts.pvalues_fdr[pair] < 0.05))
+        for pair in contrasts["pairs"]:
+            key = str(tuple(pair)) if not isinstance(pair, str) else pair
+            n_sig = int(np.sum(contrasts["pvalues_fdr"][key] < 0.05))
             pair_summary.append(f"{pair}:{n_sig}")
         done(f"(sig genes per pair: {', '.join(pair_summary)})")
 
@@ -255,7 +255,7 @@ def main():
         device="cpu",
     )
     elapsed = time.time() - t1
-    done(f"(MMD: {flow_result.mmd_before:.4f} -> {flow_result.mmd_after:.4f}, {elapsed:.1f}s)")
+    done(f"(MMD: {flow_result['mmd_before']:.4f} -> {flow_result['mmd_after']:.4f}, {elapsed:.1f}s)")
 
     # ─── 7. Visualization ────────────────────────────────────────────
     section("7. Visualization")

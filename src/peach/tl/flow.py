@@ -5,12 +5,6 @@ from anndata import AnnData
 
 from peach._core.utils.feature_utils import store_result
 from peach._core.utils.flow_matching import FlowModel, compute_mmd
-from peach._core.types import (
-    FlowWithinResult,
-    FlowBetweenResult,
-    GeneAlignmentResult,
-    FlowJacobianResult,
-)
 
 
 def flow_within(
@@ -29,7 +23,7 @@ def flow_within(
     name: str | None = None,
     random_state: int = 42,
     copy: bool = False,
-) -> FlowWithinResult:
+) -> dict:
     """Intra-model flow between obs-defined cell subsets.
 
     Parameters
@@ -81,16 +75,16 @@ def flow_within(
     mmd_before = compute_mmd(source_pca, target_pca)
     mmd_after = compute_mmd(transported, target_pca)
 
-    result = FlowWithinResult(
-        source_mask=source_mask,
-        target_mask=target_mask,
-        transported=transported,
-        losses=losses,
-        mmd_before=mmd_before,
-        mmd_after=mmd_after,
-        pca_key=pca_key,
-        name=name,
-    )
+    result = {
+        "source_mask": source_mask,
+        "target_mask": target_mask,
+        "transported": transported,
+        "losses": losses,
+        "mmd_before": mmd_before,
+        "mmd_after": mmd_after,
+        "pca_key": pca_key,
+        "name": name,
+    }
 
     # Store summary (not the model itself)
     storage_key = f"flow_{name}" if name else "flow_within"
@@ -120,7 +114,7 @@ def flow_between(
     device: str = "cpu",
     solver_method: str = "euler",
     random_state: int = 42,
-) -> FlowBetweenResult:
+) -> dict:
     """Inter-model flow between separate AnnDatas.
 
     Parameters
@@ -180,22 +174,22 @@ def flow_between(
         )
         flows[(src_label, tgt_label)] = result
 
-    return FlowBetweenResult(
-        condition_key=condition_key,
-        condition_labels=condition_labels,
-        flows=flows,
-        archetype_correspondence=None,  # computed on demand
-    )
+    return {
+        "condition_key": condition_key,
+        "condition_labels": condition_labels,
+        "flows": flows,
+        "archetype_correspondence": None,  # computed on demand
+    }
 
 
 def flow_gene_alignment(
     adata: AnnData,
-    flow_result: FlowWithinResult,
+    flow_result: dict,
     *,
     t: float = 0.5,
     n_top: int = 50,
     pca_loadings_key: str | None = None,
-) -> GeneAlignmentResult:
+) -> dict:
     """Compute gene alignment with flow velocity.
 
     Parameters
@@ -219,8 +213,8 @@ def flow_gene_alignment(
     gene_names = list(adata.var_names)
 
     # Use the transported - source difference as mean velocity
-    source_pca = adata.obsm[flow_result.pca_key][flow_result.source_mask]
-    mean_velocity = (flow_result.transported - source_pca).mean(axis=0)  # [dim]
+    source_pca = adata.obsm[flow_result["pca_key"]][flow_result["source_mask"]]
+    mean_velocity = (flow_result["transported"] - source_pca).mean(axis=0)  # [dim]
 
     # Trim loadings to match PCA dims
     n_pcs = len(mean_velocity)
@@ -234,25 +228,25 @@ def flow_gene_alignment(
     top_opposed = [gene_names[i] for i in sorted_idx[:n_top]]
     top_aligned = [gene_names[i] for i in sorted_idx[-n_top:][::-1]]
 
-    return GeneAlignmentResult(
-        alignment_scores=alignment_scores,
-        gene_names=gene_names,
-        top_aligned=top_aligned,
-        top_opposed=top_opposed,
-        t=t,
-    )
+    return {
+        "alignment_scores": alignment_scores,
+        "gene_names": gene_names,
+        "top_aligned": top_aligned,
+        "top_opposed": top_opposed,
+        "t": t,
+    }
 
 
 def flow_jacobian(
     adata: AnnData,
-    flow_result: FlowWithinResult,
+    flow_result: dict,
     flow_model: "FlowModel",
     *,
     t: float = 0.5,
     evaluation_points: np.ndarray | None = None,
     pca_loadings_key: str | None = None,
     aggregate: str = "mean",
-) -> FlowJacobianResult:
+) -> dict:
     """Compute Jacobian of the flow velocity field.
 
     Parameters
@@ -269,7 +263,7 @@ def flow_jacobian(
         'mean', 'median', or None (per-cell).
     """
     if evaluation_points is None:
-        evaluation_points = adata.obsm[flow_result.pca_key][flow_result.source_mask]
+        evaluation_points = adata.obsm[flow_result["pca_key"]][flow_result["source_mask"]]
 
     # Compute Jacobian
     jac = flow_model.jacobian(evaluation_points, t)  # [n_points, dim, dim]
@@ -300,17 +294,17 @@ def flow_jacobian(
     else:
         feature_expansion = np.zeros(0)
 
-    return FlowJacobianResult(
-        jacobian_det=jac_det,
-        feature_expansion=feature_expansion,
-        mean_jacobian=mean_jac,
-        t=t,
-    )
+    return {
+        "jacobian_det": jac_det,
+        "feature_expansion": feature_expansion,
+        "mean_jacobian": mean_jac,
+        "t": t,
+    }
 
 
 def flow_significance(
     adata: AnnData,
-    flow_result: FlowWithinResult | None = None,
+    flow_result: dict | None = None,
     *,
     source: dict | None = None,
     target: dict | None = None,
@@ -337,9 +331,9 @@ def flow_significance(
     import torch
 
     if flow_result is not None:
-        source_mask = flow_result.source_mask
-        target_mask = flow_result.target_mask
-        pca_key = flow_result.pca_key
+        source_mask = flow_result["source_mask"]
+        target_mask = flow_result["target_mask"]
+        pca_key = flow_result["pca_key"]
     elif source is not None and target is not None:
         source_mask = _build_mask(adata, source)
         target_mask = _build_mask(adata, target)

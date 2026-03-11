@@ -12,6 +12,44 @@ logger = logging.getLogger(__name__)
 WEIGHTS_KEY = "cell_archetype_weights"
 WEIGHTS_TOLERANCE = 1e-6
 
+# Map feature_matrix argument to storage key suffix
+_FEATURE_MATRIX_SUFFIX = {
+    None: "genes",
+    "pathway_scores": "pathways",
+}
+
+
+def regression_storage_suffix(feature_matrix) -> str:
+    """Map feature_matrix argument to uns storage key suffix.
+
+    None (adata.X)       -> 'genes'
+    'pathway_scores'     -> 'pathways'
+    other str            -> that string
+    array-like           -> 'custom'
+    """
+    if feature_matrix in _FEATURE_MATRIX_SUFFIX:
+        return _FEATURE_MATRIX_SUFFIX[feature_matrix]
+    if isinstance(feature_matrix, str):
+        return feature_matrix
+    return "custom"
+
+
+def resolve_regression_result(adata, prefer: str = "genes"):
+    """Find simplex regression results, preferring the namespaced key.
+
+    Lookup order:
+      1. adata.uns['peach_simplex_regression_{prefer}']
+      2. adata.uns['peach_simplex_regression']  (backward compat)
+
+    Returns None if neither exists.
+    """
+    specific = f"peach_simplex_regression_{prefer}"
+    if specific in adata.uns:
+        return adata.uns[specific]
+    if "peach_simplex_regression" in adata.uns:
+        return adata.uns["peach_simplex_regression"]
+    return None
+
 
 def resolve_features(
     adata: AnnData,

@@ -5,7 +5,7 @@ from itertools import combinations
 from scipy import stats
 from anndata import AnnData
 
-from .feature_utils import get_archetype_weights
+from .feature_utils import get_archetype_weights, resolve_regression_result
 
 
 def compute_archetype_mmd(
@@ -117,7 +117,7 @@ def compute_feature_similarity(
     """
     from sklearn.metrics import silhouette_score, silhouette_samples
 
-    reg_a = adata.uns.get("peach_simplex_regression")
+    reg_a = resolve_regression_result(adata, prefer="genes")
     if reg_a is None:
         raise ValueError(
             "No regression results. Run pc.tl.feature_simplex_regression() first."
@@ -128,7 +128,7 @@ def compute_feature_similarity(
     K_a = coefs_a.shape[1]
 
     if adata_b is not None:
-        reg_b = adata_b.uns.get("peach_simplex_regression")
+        reg_b = resolve_regression_result(adata_b, prefer="genes")
         if reg_b is None:
             raise ValueError("No regression results in adata_b.")
         coefs_b = np.asarray(reg_b["vertex_coefficients"])
@@ -212,7 +212,7 @@ def compute_wald_contrasts(
     from .simplex_regression import ols_fit, scheffe_design_matrix
     from .feature_utils import resolve_features
 
-    reg = adata.uns.get("peach_simplex_regression")
+    reg = resolve_regression_result(adata, prefer="genes")
     if reg is None:
         raise ValueError(
             "No regression results. Run pc.tl.feature_simplex_regression() first."

@@ -23,7 +23,7 @@ def archetype_mmd(
     n_permutations: int = 1000,
     seed: int = 42,
     copy: bool = False,
-) -> ArchetypeMMDResult:
+) -> dict:
     """K x K MMD similarity matrix between archetype cell populations.
 
     Parameters
@@ -42,8 +42,8 @@ def archetype_mmd(
 
     Returns
     -------
-    ArchetypeMMDResult
-        Also stored in adata.uns['peach_archetype_mmd'].
+    dict
+        Serialized ArchetypeMMDResult. Also stored in adata.uns['peach_archetype_mmd'].
     """
     if copy:
         adata = adata.copy()
@@ -69,8 +69,9 @@ def archetype_mmd(
         archetype_names_a=arch_names_a,
         archetype_names_b=arch_names_b,
     )
-    store_result(adata, "archetype_mmd", result.to_serializable())
-    return result
+    serialized = result.to_serializable()
+    store_result(adata, "archetype_mmd", serialized)
+    return serialized
 
 
 def archetype_feature_similarity(
@@ -79,7 +80,7 @@ def archetype_feature_similarity(
     *,
     pca_key: str = "X_pca",
     copy: bool = False,
-) -> ArchetypeFeatureSimilarityResult:
+) -> dict:
     """Feature-level archetype similarity: silhouette + Spearman on beta vectors.
 
     Parameters
@@ -93,8 +94,8 @@ def archetype_feature_similarity(
 
     Returns
     -------
-    ArchetypeFeatureSimilarityResult
-        Also stored in adata.uns['peach_archetype_feature_similarity'].
+    dict
+        Serialized ArchetypeFeatureSimilarityResult. Also stored in adata.uns['peach_archetype_feature_similarity'].
     """
     if copy:
         adata = adata.copy()
@@ -119,8 +120,9 @@ def archetype_feature_similarity(
         archetype_names_a=arch_names_a,
         archetype_names_b=arch_names_b,
     )
-    store_result(adata, "archetype_feature_similarity", result.to_serializable())
-    return result
+    serialized = result.to_serializable()
+    store_result(adata, "archetype_feature_similarity", serialized)
+    return serialized
 
 
 def archetype_contrasts(
@@ -128,7 +130,7 @@ def archetype_contrasts(
     *,
     robust_se: bool = True,
     copy: bool = False,
-) -> ArchetypeContrastsResult:
+) -> dict:
     """Pairwise Wald contrasts between archetype regression coefficients.
 
     For each pair (j, k), tests H0: beta_j = beta_k for every feature using
@@ -144,8 +146,8 @@ def archetype_contrasts(
 
     Returns
     -------
-    ArchetypeContrastsResult
-        Also stored in adata.uns['peach_archetype_contrasts'].
+    dict
+        Serialized ArchetypeContrastsResult. Also stored in adata.uns['peach_archetype_contrasts'].
     """
     if copy:
         adata = adata.copy()
@@ -163,5 +165,6 @@ def archetype_contrasts(
         n_features=contrasts["n_features"],
         n_archetypes=contrasts["n_archetypes"],
     )
-    store_result(adata, "archetype_contrasts", result.to_serializable())
-    return result
+    serialized = result.to_serializable()
+    store_result(adata, "archetype_contrasts", serialized)
+    return serialized
