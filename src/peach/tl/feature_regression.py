@@ -6,6 +6,7 @@ from statsmodels.stats.multitest import multipletests
 
 from peach._core.utils.feature_utils import (
     get_archetype_weights,
+    regression_storage_suffix,
     resolve_features,
     store_result,
 )
@@ -25,7 +26,7 @@ def feature_simplex_regression(
     robust_se: bool = True,
     store_residuals: bool = True,
     copy: bool = False,
-) -> SimplexRegressionResult:
+) -> dict:
     """Simplex regression of features on archetype weights (Scheffe polynomials).
 
     Parameters
@@ -53,8 +54,12 @@ def feature_simplex_regression(
 
     Returns
     -------
-    SimplexRegressionResult
-        Also stored in adata.uns['peach_simplex_regression'].
+    dict
+        Serialized SimplexRegressionResult. Stored in namespaced key:
+        adata.uns['peach_simplex_regression_genes'] (when feature_matrix=None),
+        adata.uns['peach_simplex_regression_pathways'] (when feature_matrix='pathway_scores'),
+        or adata.uns['peach_simplex_regression_{feature_matrix}'] for other obsm keys.
+        Also stored at adata.uns['peach_simplex_regression'] for backward compat.
     """
     if copy:
         adata = adata.copy()
@@ -117,7 +122,7 @@ def feature_simplex_regression(
             interaction_ci_upper = int_ci_hi[:, K:]
 
     # Store residuals
-    if store_residuals:
+    if store_residuals and result1["residuals"] is not None:
         store_result(adata, "residuals", result1["residuals"], domain="obsm")
 
     # Build result
@@ -146,18 +151,21 @@ def feature_simplex_regression(
         interaction_ci_upper=interaction_ci_upper,
     )
 
-    # Store serializable summary
-    store_result(adata, "simplex_regression", result.to_serializable())
+    # Store serializable summary at namespaced key + generic fallback
+    serialized = result.to_serializable()
+    suffix = regression_storage_suffix(feature_matrix)
+    store_result(adata, f"simplex_regression_{suffix}", serialized)
+    store_result(adata, "simplex_regression", serialized)
 
-    return result
+    return serialized
 
 
-def gene_simplex_regression(adata: AnnData, **kwargs) -> SimplexRegressionResult:
+def gene_simplex_regression(adata: AnnData, **kwargs) -> dict:
     """Convenience: simplex regression on adata.X (gene expression)."""
     return feature_simplex_regression(adata, feature_matrix=None, **kwargs)
 
 
-def pathway_simplex_regression(adata: AnnData, **kwargs) -> SimplexRegressionResult:
+def pathway_simplex_regression(adata: AnnData, **kwargs) -> dict:
     """Convenience: simplex regression on adata.obsm['pathway_scores']."""
     return feature_simplex_regression(
         adata, feature_matrix="pathway_scores", **kwargs
@@ -190,7 +198,7 @@ def _permutation_test_regression(weights, Y, *, n_permutations, observed_r2, see
     for i in range(n_permutations):
         perm_idx = rng.permutation(n)
         W_perm, _ = scheffe_design_matrix(weights[perm_idx], degree=1)
-        perm_result = ols_fit(W_perm, Y_dense, robust_se=False)
+        perm_result = ols_fit(W_perm, Y_dense, robust_se=False, return_residuals=False)
         null_r2[i] = perm_result["r_squared"]
 
     # Per-feature p-value: fraction of null >= observed
@@ -230,7 +238,7 @@ def _bootstrap_regression_cis(weights, Y, degree, n_bootstrap, K, ci_level=0.95,
         else:
             Y_boot = np.asarray(Y)[idx]
         try:
-            result = ols_fit(W_boot, Y_boot, robust_se=False)
+            result = ols_fit(W_boot, Y_boot, robust_se=False, return_residuals=False)
             boot_coefs[b] = result["coefficients"]
         except (ValueError, np.linalg.LinAlgError):
             # Singular bootstrap sample (duplicate rows) — use NaN, filter later
@@ -259,7 +267,7 @@ def archetype_driver_regression(
     robust_se: bool = True,
     max_interaction_features: int = 50,
     copy: bool = False,
-) -> DriverRegressionResult:
+) -> dict:
     """Flipped regression: features predict archetype weights (in ILR space).
 
     Identifies which features (genesets, pathways) drive archetypal
@@ -290,8 +298,8 @@ def archetype_driver_regression(
 
     Returns
     -------
-    DriverRegressionResult
-        Also stored in adata.uns['peach_driver_regression'].
+    dict
+        Serialized DriverRegressionResult. Also stored in adata.uns['peach_driver_regression'].
     """
     from itertools import combinations
 
@@ -448,8 +456,9 @@ def archetype_driver_regression(
         intercepts=intercepts,
     )
 
-    store_result(adata, "driver_regression", result.to_serializable())
-    return result
+    serialized = result.to_serializable()
+    store_result(adata, "driver_regression", serialized)
+    return serialized
 
 
 def _bootstrap_driver_cis(

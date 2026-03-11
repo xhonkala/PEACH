@@ -56,7 +56,7 @@ def scheffe_design_matrix(W, degree=1):
     return X, pairs
 
 
-def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False):
+def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False, return_residuals=True):
     """Vectorized OLS: regress each feature on design matrix W (no intercept).
 
     Fits Y = W @ beta + epsilon for each column of Y simultaneously.
@@ -79,13 +79,18 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False):
     return_covariance : bool
         If True, include full covariance matrices in return dict.
         Needed for Wald contrasts. Default False (SEs only).
+    return_residuals : bool
+        If True, include residual matrix in return dict. If False, residuals
+        entry is None. Memory savings are significant only for sparse Y
+        (avoids accumulating dense chunks). For dense Y, residuals are still
+        computed temporarily for SE/SS calculations but not returned.
 
     Returns
     -------
     dict
         coefficients : np.ndarray [n_features, p]
         r_squared : np.ndarray [n_features]
-        residuals : np.ndarray [n_cells, n_features] or None (sparse + large)
+        residuals : np.ndarray [n_cells, n_features] or None
         standard_errors : np.ndarray [n_features, p]
         t_statistics : np.ndarray [n_features, p]
         t_pvalues : np.ndarray [n_features, p]
@@ -105,22 +110,23 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False):
 
     # Solve normal equations with stability check
     WtW = W.T @ W
-    try:
-        WtW_inv = np.linalg.solve(WtW, np.eye(p))
-    except np.linalg.LinAlgError:
-        raise ValueError(
-            "Design matrix W'W is singular. This usually means archetype weights "
-            "are degenerate (e.g., all cells at one vertex, or n ≈ p)."
-        )
-
-    # Check condition number for near-singular warning
     cond = np.linalg.cond(WtW)
     if cond > 1e12:
         warnings.warn(
             f"Design matrix is near-singular (condition number {cond:.1e}). "
-            "Results may be numerically unstable.",
+            "Falling back to pseudoinverse for numerical stability.",
             RuntimeWarning,
         )
+        WtW_inv = np.linalg.pinv(WtW)
+    else:
+        try:
+            WtW_inv = np.linalg.solve(WtW, np.eye(p))
+        except np.linalg.LinAlgError:
+            warnings.warn(
+                "W'W is singular; falling back to pseudoinverse.",
+                RuntimeWarning,
+            )
+            WtW_inv = np.linalg.pinv(WtW)
 
     # Compute beta: sparse-safe (W.T @ sparse_Y works in scipy)
     if is_sparse:
@@ -135,6 +141,18 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False):
     if robust_se:
         H_diag = np.sum((W @ WtW_inv) * W, axis=1)  # [n]
         H_diag = np.clip(H_diag, 0, 1 - 1e-10)
+        n_extreme = np.sum(H_diag > 0.99)
+        if n_extreme > 0:
+            warnings.warn(
+                f"{n_extreme} cells have leverage h_ii > 0.99 (near-saturated). "
+                "HC3 standard errors for these cells may be unreliable. "
+                "This usually means some cells sit exactly on an archetype vertex "
+                "with no other cells nearby.",
+                RuntimeWarning,
+            )
+
+    # Whether we need to materialize residuals
+    need_residuals = return_residuals or return_covariance
 
     # Compute residual statistics
     ss_res = np.zeros(n_features)
@@ -143,7 +161,7 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False):
 
     if is_sparse:
         # Sparse path: process in chunks to avoid OOM
-        residual_chunks = []
+        _residual_chunks = [] if need_residuals else None
         for start in range(0, n_features, chunk_size):
             end = min(start + chunk_size, n_features)
             Y_chunk = Y[:, start:end].toarray()
@@ -161,44 +179,51 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False):
                 var_diag = np.diag(WtW_inv)
                 se[start:end] = np.sqrt(np.outer(sigma2, var_diag))
 
-            residual_chunks.append(res_chunk)
+            if need_residuals:
+                _residual_chunks.append(res_chunk)
 
-        residuals = np.hstack(residual_chunks)
+        residuals = np.hstack(_residual_chunks) if need_residuals else None
     else:
         # Dense path: compute all at once
         Y_hat = W @ beta.T
-        residuals = Y_dense - Y_hat
-        ss_res = np.sum(residuals ** 2, axis=0)
-        y_mean = Y_dense.mean(axis=0, keepdims=True)
-        ss_tot = np.sum((Y_dense - y_mean) ** 2, axis=0)
+        if need_residuals:
+            residuals = Y_dense - Y_hat
+            ss_res = np.sum(residuals ** 2, axis=0)
+            y_mean = Y_dense.mean(axis=0, keepdims=True)
+            ss_tot = np.sum((Y_dense - y_mean) ** 2, axis=0)
 
-        if robust_se:
-            se = _hc3_standard_errors(W, residuals, WtW_inv, H_diag)
+            if robust_se:
+                se = _hc3_standard_errors(W, residuals, WtW_inv, H_diag)
+            else:
+                sigma2 = ss_res / max(n - p, 1)
+                var_diag = np.diag(WtW_inv)
+                se = np.sqrt(np.outer(sigma2, var_diag))
         else:
-            sigma2 = ss_res / max(n - p, 1)
-            var_diag = np.diag(WtW_inv)
-            se = np.sqrt(np.outer(sigma2, var_diag))
+            # Compute stats in-place without keeping full residual matrix
+            diff = Y_dense - Y_hat
+            ss_res = np.sum(diff ** 2, axis=0)
+            y_mean = Y_dense.mean(axis=0, keepdims=True)
+            ss_tot = np.sum((Y_dense - y_mean) ** 2, axis=0)
+
+            if robust_se:
+                se = _hc3_standard_errors(W, diff, WtW_inv, H_diag)
+            else:
+                sigma2 = ss_res / max(n - p, 1)
+                var_diag = np.diag(WtW_inv)
+                se = np.sqrt(np.outer(sigma2, var_diag))
+            del diff
+            residuals = None
 
     # Full covariance matrices (for Wald contrasts)
     covariance = None
     if return_covariance:
-        if is_sparse:
-            # For sparse, recompute on dense residuals (already materialized above)
-            if robust_se:
-                covariance = _hc3_covariance(W, residuals, WtW_inv, H_diag)
-            else:
-                covariance = []
-                for g in range(n_features):
-                    sigma2_g = ss_res[g] / max(n - p, 1)
-                    covariance.append(sigma2_g * WtW_inv)
+        if robust_se:
+            covariance = _hc3_covariance(W, residuals, WtW_inv, H_diag)
         else:
-            if robust_se:
-                covariance = _hc3_covariance(W, residuals, WtW_inv, H_diag)
-            else:
-                covariance = []
-                for g in range(n_features):
-                    sigma2_g = ss_res[g] / max(n - p, 1)
-                    covariance.append(sigma2_g * WtW_inv)
+            covariance = []
+            for g in range(n_features):
+                sigma2_g = ss_res[g] / max(n - p, 1)
+                covariance.append(sigma2_g * WtW_inv)
 
     r_squared = np.where(ss_tot > 0, 1 - ss_res / ss_tot, 0.0)
 
@@ -207,24 +232,28 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False):
     df = max(n - p, 1)
     t_pvalues = 2 * stats.t.sf(np.abs(t_stats), df=df)
 
-    # Overall model F-test: H0: all beta_j = 0
+    # Overall model F-test
+    # On the simplex (sum w_i = 1), a constant model is always fit implicitly,
+    # so the correct null is H0: all beta_j equal (not all zero).
+    # This gives df_reg = p - 1, not p.
     ss_reg = ss_tot - ss_res
-    df_reg = p
+    df_reg = p - 1
     df_res = max(n - p, 1)
     f_stats = np.zeros(n_features)
     f_pvalues = np.ones(n_features)
-    valid = (ss_tot > 0) & (ss_reg > 0)
-    if np.any(valid):
-        ms_reg = ss_reg[valid] / df_reg
-        ms_res = ss_res[valid] / df_res
-        with np.errstate(divide="ignore", invalid="ignore"):
-            f_stats[valid] = np.where(ms_res > 0, ms_reg / ms_res, np.inf)
-        f_pvalues[valid] = stats.f.sf(f_stats[valid], dfn=df_reg, dfd=df_res)
+    if df_reg >= 1:
+        valid = (ss_tot > 0) & (ss_reg > 0)
+        if np.any(valid):
+            ms_reg = ss_reg[valid] / df_reg
+            ms_res = ss_res[valid] / df_res
+            with np.errstate(divide="ignore", invalid="ignore"):
+                f_stats[valid] = np.where(ms_res > 0, ms_reg / ms_res, np.inf)
+            f_pvalues[valid] = stats.f.sf(f_stats[valid], dfn=df_reg, dfd=df_res)
 
     result_dict = {
         "coefficients": beta,
         "r_squared": r_squared,
-        "residuals": residuals,
+        "residuals": residuals if return_residuals else None,
         "standard_errors": se,
         "t_statistics": t_stats,
         "t_pvalues": t_pvalues,
