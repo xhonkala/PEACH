@@ -1396,10 +1396,14 @@ def visualize_archetypal_space_3d_single(
 
             # Set up colors
             if categorical_colors is None:
-                if len(categories) <= 10:
-                    colors = px.colors.qualitative.Set1[: len(categories)]
+                n_cat = len(categories)
+                palette = px.colors.qualitative.Set1
+                if n_cat <= len(palette):
+                    colors = palette[:n_cat]
                 else:
-                    colors = px.colors.sample_colorscale("hsv", len(categories))
+                    colors = px.colors.sample_colorscale(
+                        "hsv", [i / n_cat for i in range(n_cat)]
+                    )
             else:
                 colors = [
                     categorical_colors.get(
@@ -1889,10 +1893,14 @@ def visualize_archetypal_space_3d_multi(
 
             # Set up colors
             if categorical_colors is None:
-                if len(categories) <= 10:
-                    colors = px.colors.qualitative.Set1[: len(categories)]
+                n_cat = len(categories)
+                palette = px.colors.qualitative.Set1
+                if n_cat <= len(palette):
+                    colors = palette[:n_cat]
                 else:
-                    colors = px.colors.sample_colorscale("hsv", len(categories))
+                    colors = px.colors.sample_colorscale(
+                        "hsv", [i / n_cat for i in range(n_cat)]
+                    )
             else:
                 colors = [
                     categorical_colors.get(

@@ -22,6 +22,7 @@ def flow_within(
     solver_method: str = "euler",
     name: str | None = None,
     random_state: int = 42,
+    return_model: bool = False,
     copy: bool = False,
 ) -> dict:
     """Intra-model flow between obs-defined cell subsets.
@@ -44,6 +45,9 @@ def flow_within(
     name : str or None
         Name for storage key.
     random_state : int
+    return_model : bool
+        If True, include the trained FlowModel in the result dict under
+        key ``'model'``. Needed for Jacobian and trajectory analysis.
     copy : bool
     """
     if copy:
@@ -85,6 +89,8 @@ def flow_within(
         "pca_key": pca_key,
         "name": name,
     }
+    if return_model:
+        result["model"] = model
 
     # Store summary (not the model itself)
     storage_key = f"flow_{name}" if name else "flow_within"
