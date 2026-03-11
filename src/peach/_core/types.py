@@ -3387,12 +3387,14 @@ class SimplexRegressionResult(BaseModel):
     f_pvalue: np.ndarray  # [n_features] raw
     f_pvalue_fdr: np.ndarray  # [n_features] BH-corrected
     vertex_pvalues: np.ndarray  # [n_features, K]
+    vertex_pvalues_fdr: np.ndarray  # [n_features, K] FDR-corrected
     vertex_se: np.ndarray  # [n_features, K]
 
     # Degree 2 (interactions) — None if max_degree=1
     interaction_coefficients: np.ndarray | None = None  # [n_features, K-choose-2]
     interaction_pairs: list[tuple] | None = None
     interaction_pvalues: np.ndarray | None = None
+    interaction_pvalues_fdr: np.ndarray | None = None  # [n_features, K-choose-2] FDR-corrected
     interaction_se: np.ndarray | None = None
     r_squared_degree2: np.ndarray | None = None
 
@@ -3626,8 +3628,8 @@ class GMMResult(BaseModel):
     n_components_stable : int
         Number of components after stability filtering.
     component_assignments : np.ndarray [n_cells]
-        Cluster labels for stable components. Cells assigned to unstable
-        components get label -1.
+        Cluster labels for stable components. Cells from unstable
+        components are reassigned to the nearest stable component.
     component_simplex_means : np.ndarray [n_stable, K]
         Centroids mapped back to the weight simplex (rows sum to 1).
     component_archetype_map : np.ndarray [n_stable]
@@ -3650,6 +3652,7 @@ class GMMResult(BaseModel):
     component_archetype_map: np.ndarray  # [n_stable]
     component_stability_scores: np.ndarray  # [n_stable]
     component_feature_profiles: np.ndarray | None = None  # [n_stable, n_features]
+    component_weight_means: np.ndarray | None = None  # [n_stable, K] arithmetic mean of weights
     bic_values: np.ndarray  # [n_tested]
     n_components_tested: np.ndarray  # [n_tested]
 

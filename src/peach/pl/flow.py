@@ -40,7 +40,7 @@ def velocity_quiver(
     n_arrows : int
         Number of arrows to draw (subsampled from source cells).
     save_path : str or None
-        If provided, save figure as HTML to this path.
+        If provided, save figure to this path (format inferred from extension).
     show : bool
         Whether to call ``fig.show()``.
 
@@ -49,8 +49,8 @@ def velocity_quiver(
     go.Figure
     """
     pca = adata.obsm[pca_key]
-    source_pca = pca[flow_result.source_mask]
-    transported = flow_result.transported
+    source_pca = pca[flow_result["source_mask"]]
+    transported = flow_result["transported"]
 
     # Subsample
     n = min(n_arrows, len(source_pca))
@@ -61,8 +61,6 @@ def velocity_quiver(
     y = source_pca[idx, 1]
     dx = transported[idx, 0] - x
     dy = transported[idx, 1] - y
-
-    scale = 0.3
 
     fig = go.Figure()
 
@@ -75,11 +73,11 @@ def velocity_quiver(
         showlegend=False,
     ))
 
-    # Arrows via annotations — thin, single color
+    # Arrows via annotations — full displacement, thin, single color
     for i in range(n):
         fig.add_annotation(
-            x=x[i] + dx[i] * scale,
-            y=y[i] + dy[i] * scale,
+            x=x[i] + dx[i],
+            y=y[i] + dy[i],
             ax=x[i], ay=y[i],
             xref="x", yref="y", axref="x", ayref="y",
             showarrow=True,
@@ -113,7 +111,7 @@ def gene_alignment_barplot(
     n_top : int
         Number of top genes to show in each direction.
     save_path : str or None
-        If provided, save figure as HTML to this path.
+        If provided, save figure to this path (format inferred from extension).
     show : bool
         Whether to call ``fig.show()``.
 
@@ -121,8 +119,8 @@ def gene_alignment_barplot(
     -------
     go.Figure
     """
-    scores = alignment_result.alignment_scores
-    names = alignment_result.gene_names
+    scores = alignment_result["alignment_scores"]
+    names = alignment_result["gene_names"]
 
     sorted_idx = np.argsort(scores)
     top_aligned = sorted_idx[-n_top:][::-1]
@@ -163,7 +161,7 @@ def jacobian_heatmap(
     jacobian_result : FlowJacobianResult
         Result from ``pc.tl.flow_jacobian()``.
     save_path : str or None
-        If provided, save figure as HTML to this path.
+        If provided, save figure to this path (format inferred from extension).
     show : bool
         Whether to call ``fig.show()``.
 
@@ -171,7 +169,7 @@ def jacobian_heatmap(
     -------
     go.Figure
     """
-    jac = jacobian_result.mean_jacobian
+    jac = jacobian_result["mean_jacobian"]
     dim = jac.shape[0]
     labels = [f"PC{i+1}" for i in range(dim)]
 
@@ -183,7 +181,8 @@ def jacobian_heatmap(
         zmid=0,
         colorbar=dict(title="∂v/∂x", thickness=12, len=0.6),
     ))
-    apply_style(fig, title=f"Mean flow Jacobian (t={jacobian_result.t:.2f})",
+    t_val = jacobian_result["t"]
+    apply_style(fig, title=f"Mean flow Jacobian (t={t_val:.2f})",
                 xaxis_title="Input PC", yaxis_title="Output PC")
 
     return save_and_show(fig, save_path=save_path, show=show)
@@ -218,7 +217,7 @@ def trajectory_ribbon(
     n_steps : int
         Number of time steps for the trajectory.
     save_path : str or None
-        If provided, save figure as HTML to this path.
+        If provided, save figure to this path (format inferred from extension).
     show : bool
         Whether to call ``fig.show()``.
 
@@ -226,8 +225,8 @@ def trajectory_ribbon(
     -------
     go.Figure
     """
-    pca = adata.obsm[flow_result.pca_key]
-    source_pca = pca[flow_result.source_mask]
+    pca = adata.obsm[flow_result["pca_key"]]
+    source_pca = pca[flow_result["source_mask"]]
 
     # Subsample
     rng = np.random.default_rng(42)
@@ -240,7 +239,7 @@ def trajectory_ribbon(
         )
     else:
         # Linear interpolation fallback
-        transported = flow_result.transported[idx]
+        transported = flow_result["transported"][idx]
         source = source_pca[idx]
         times = np.linspace(0, 1, n_steps + 1)
         traj = np.stack([(1 - t) * source + t * transported for t in times])
@@ -289,7 +288,7 @@ def flow_magnitude(
     flow_result : FlowWithinResult
         Result from ``pc.tl.flow_within()``.
     save_path : str or None
-        If provided, save figure as HTML to this path.
+        If provided, save figure to this path (format inferred from extension).
     show : bool
         Whether to call ``fig.show()``.
 
@@ -297,9 +296,9 @@ def flow_magnitude(
     -------
     go.Figure
     """
-    pca = adata.obsm[flow_result.pca_key]
-    source_pca = pca[flow_result.source_mask]
-    transported = flow_result.transported
+    pca = adata.obsm[flow_result["pca_key"]]
+    source_pca = pca[flow_result["source_mask"]]
+    transported = flow_result["transported"]
 
     magnitude = np.linalg.norm(transported - source_pca, axis=1)
 
@@ -342,7 +341,7 @@ def density_comparison(
     flow_result : FlowWithinResult
         Result from ``pc.tl.flow_within()``.
     save_path : str or None
-        If provided, save figure as HTML to this path.
+        If provided, save figure to this path (format inferred from extension).
     show : bool
         Whether to call ``fig.show()``.
 
@@ -350,10 +349,10 @@ def density_comparison(
     -------
     go.Figure
     """
-    pca = adata.obsm[flow_result.pca_key]
-    source_pc1 = pca[flow_result.source_mask, 0]
-    target_pc1 = pca[flow_result.target_mask, 0]
-    transported_pc1 = flow_result.transported[:, 0]
+    pca = adata.obsm[flow_result["pca_key"]]
+    source_pc1 = pca[flow_result["source_mask"], 0]
+    target_pc1 = pca[flow_result["target_mask"], 0]
+    transported_pc1 = flow_result["transported"][:, 0]
 
     fig = go.Figure()
     for data, name, color in [
@@ -391,7 +390,7 @@ def archetype_correspondence(
         Result from ``pc.tl.flow_between()`` with archetype
         correspondence computed.
     save_path : str or None
-        If provided, save figure as HTML to this path.
+        If provided, save figure to this path (format inferred from extension).
     show : bool
         Whether to call ``fig.show()``.
 
@@ -399,11 +398,11 @@ def archetype_correspondence(
     -------
     go.Figure
     """
-    if flow_between_result.archetype_correspondence is None:
+    if flow_between_result["archetype_correspondence"] is None:
         raise ValueError("No archetype correspondence computed.")
 
     fig = go.Figure()
-    for pair, corr_matrix in flow_between_result.archetype_correspondence.items():
+    for pair, corr_matrix in flow_between_result["archetype_correspondence"].items():
         src, tgt = pair
         K_src, K_tgt = corr_matrix.shape
         fig.add_trace(go.Heatmap(

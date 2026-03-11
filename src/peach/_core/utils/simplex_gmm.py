@@ -25,6 +25,7 @@ def fit_simplex_gmm(
     n_initializations=20,
     stability_threshold=0.7,
     random_state=42,
+    ilr_epsilon=1e-3,
 ):
     """Fit GMM in ILR-transformed weight space with BIC selection and stability analysis.
 
@@ -53,7 +54,7 @@ def fit_simplex_gmm(
             Number of components after stability filtering.
         component_assignments : np.ndarray [n_cells]
             Cluster labels for stable components. Cells assigned to unstable
-            components get label -1.
+            components are reassigned to the nearest stable component.
         component_simplex_means : np.ndarray [n_stable, K]
             Centroids mapped back to the weight simplex.
         component_archetype_map : np.ndarray [n_stable]
@@ -74,7 +75,7 @@ def fit_simplex_gmm(
     n_cells = weights.shape[0]
 
     # Transform to ILR space
-    ilr_coords = ilr_transform(weights)  # [n_cells, K-1]
+    ilr_coords = ilr_transform(weights, epsilon=ilr_epsilon)  # [n_cells, K-1]
 
     # Determine range
     if n_components_range is None:
@@ -127,14 +128,32 @@ def fit_simplex_gmm(
     stable_centroids = simplex_centroids[stable_indices]
     stable_stability = stability_scores[stable_indices]
 
-    # Remap labels to only stable components
+    # Remap labels — assign cells in stable components
     label_map = {old: new for new, old in enumerate(stable_indices)}
     component_assignments = np.full(n_cells, -1, dtype=int)
     for old_label, new_label in label_map.items():
         component_assignments[all_labels == old_label] = new_label
 
+    # Reassign unstable cells to nearest stable component (ILR distance)
+    unstable_mask = component_assignments == -1
+    if np.any(unstable_mask) and n_stable > 0:
+        unstable_ilr = ilr_coords[unstable_mask]
+        stable_ilr_centroids = ilr_centroids[stable_indices]
+        dists = np.array([
+            np.linalg.norm(unstable_ilr - stable_ilr_centroids[s], axis=1)
+            for s in range(n_stable)
+        ]).T  # [n_unstable, n_stable]
+        component_assignments[unstable_mask] = np.argmin(dists, axis=1)
+
     # Nearest archetype per component
     archetype_map = np.argmax(stable_centroids, axis=1)
+
+    # Arithmetic mean of archetype weights per component
+    component_weight_means = np.zeros((n_stable, K))
+    for c in range(n_stable):
+        mask = component_assignments == c
+        if np.any(mask):
+            component_weight_means[c] = weights[mask].mean(axis=0)
 
     return {
         "n_components_optimal": best_n,
@@ -143,6 +162,7 @@ def fit_simplex_gmm(
         "component_simplex_means": stable_centroids,
         "component_archetype_map": archetype_map,
         "component_stability_scores": stable_stability,
+        "component_weight_means": component_weight_means,
         "bic_values": bic_values,
         "n_components_tested": n_range,
         "gmm_model": best_gmm,
@@ -188,13 +208,13 @@ def characterize_components(component_assignments, feature_matrix, n_components)
 def _compute_stability(
     ilr_coords, n_components, covariance_type, n_initializations, random_state
 ):
-    """Compute component stability across multiple initializations.
+    """Compute per-component stability via cell recovery rate across initializations.
 
-    For each pair of runs, matches components via the Hungarian algorithm on
-    centroid distances. A component in the reference run is "matched" if the
-    corresponding component in the test run has centroid distance below an
-    adaptive threshold. Stability = fraction of runs where each component
-    appears.
+    Fits GMM n_initializations times with different seeds. Uses the first run as
+    reference. For each subsequent run, builds a confusion matrix between reference
+    and test labels, applies Hungarian matching to find optimal component
+    correspondence, then measures what fraction of cells assigned to each reference
+    component are recovered in the matched test component.
 
     Parameters
     ----------
@@ -215,7 +235,7 @@ def _compute_stability(
         Stability score per component (in [0, 1]).
     """
     rng = np.random.default_rng(random_state)
-    all_centroids = []
+    all_labels = []
 
     for i in range(n_initializations):
         gmm = GaussianMixture(
@@ -225,30 +245,43 @@ def _compute_stability(
             random_state=int(rng.integers(0, 2**31)),
         )
         gmm.fit(ilr_coords)
-        all_centroids.append(gmm.means_)
+        all_labels.append(gmm.predict(ilr_coords))
 
-    # Use first run as reference
-    ref = all_centroids[0]
-    matches = np.zeros(n_components)
+    # Reference: first run
+    ref_labels = all_labels[0]
+
+    # Pre-compute per-component ref masks and counts
+    ref_masks = [(ref_labels == c) for c in range(n_components)]
+    ref_counts = [int(np.sum(m)) for m in ref_masks]
+
+    recovery_sums = np.zeros(n_components)
+    n_comparisons = n_initializations - 1
 
     for i in range(1, n_initializations):
-        # Cost matrix: pairwise distances between ref and run i centroids
-        cost = np.zeros((n_components, n_components))
+        test_labels = all_labels[i]
+
+        # Build confusion matrix ONCE per initialization
+        confusion = np.zeros((n_components, n_components))
         for r in range(n_components):
-            for c in range(n_components):
-                cost[r, c] = np.linalg.norm(ref[r] - all_centroids[i][c])
+            for t in range(n_components):
+                confusion[r, t] = np.sum((ref_labels == r) & (test_labels == t))
 
-        # Hungarian matching
-        row_ind, col_ind = linear_sum_assignment(cost)
+        # Hungarian matching (maximize overlap = minimize negative overlap)
+        row_ind, col_ind = linear_sum_assignment(-confusion)
 
-        # Count matches within adaptive threshold
-        threshold = np.median(cost) * 0.5
-        for r, c in zip(row_ind, col_ind):
-            if cost[r, c] < threshold:
-                matches[r] += 1
+        # Accumulate recovery for each component
+        for c in range(n_components):
+            if ref_counts[c] == 0:
+                continue
+            matched_test = col_ind[c]
+            n_recovered = np.sum(ref_masks[c] & (test_labels == matched_test))
+            recovery_sums[c] += n_recovered / ref_counts[c]
 
-    # Stability = fraction of (n_init - 1) runs with a match
-    # +1 for reference run itself
-    stability = (matches + 1) / n_initializations
+    component_stability = np.zeros(n_components)
+    for c in range(n_components):
+        if ref_counts[c] == 0 or n_comparisons == 0:
+            component_stability[c] = 0.0
+        else:
+            component_stability[c] = recovery_sums[c] / n_comparisons
 
-    return stability
+    return component_stability

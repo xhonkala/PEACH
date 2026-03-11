@@ -19,6 +19,8 @@ import numpy as np
 import plotly.graph_objects as go
 from anndata import AnnData
 
+from ._style import save_and_show
+
 
 def nhood_enrichment(
     adata: AnnData,
@@ -28,6 +30,7 @@ def nhood_enrichment(
     title: str = "Archetype Neighborhood Enrichment",
     colorscale: str = "RdBu_r",
     save_path: str | None = None,
+    show: bool = True,
     **kwargs: Any,
 ) -> go.Figure:
     """Heatmap of archetype neighborhood enrichment z-scores.
@@ -48,7 +51,9 @@ def nhood_enrichment(
     colorscale : str, default: "RdBu_r"
         Plotly colorscale. RdBu_r: red=enriched, blue=depleted.
     save_path : str | None, default: None
-        Path to save the figure as HTML.
+        Path to save the figure.
+    show : bool, default: True
+        Whether to display the figure.
 
     Returns
     -------
@@ -100,12 +105,7 @@ def nhood_enrichment(
         plot_bgcolor="white",
     )
 
-    if save_path:
-        fig.write_html(save_path)
-        print(f"  Saved to {save_path}")
-
-    fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def co_occurrence(
@@ -115,6 +115,7 @@ def co_occurrence(
     cluster_key: str = "archetypes",
     title: str = "Archetype Spatial Co-occurrence",
     save_path: str | None = None,
+    show: bool = True,
     **kwargs: Any,
 ) -> go.Figure:
     """Line plot of distance-dependent archetype co-occurrence ratios.
@@ -134,7 +135,9 @@ def co_occurrence(
     title : str, default: "Archetype Spatial Co-occurrence"
         Plot title.
     save_path : str | None, default: None
-        Path to save the figure as HTML.
+        Path to save the figure.
+    show : bool, default: True
+        Whether to display the figure.
 
     Returns
     -------
@@ -192,12 +195,7 @@ def co_occurrence(
         yaxis=dict(gridcolor="#F0F0F0"),
     )
 
-    if save_path:
-        fig.write_html(save_path)
-        print(f"  Saved to {save_path}")
-
-    fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 _ARCHETYPE_COLORS = [
@@ -225,6 +223,7 @@ def spatial_archetypes(
     opacity: float = 0.7,
     title: str = "Spatial Archetype Map",
     save_path: str | None = None,
+    show: bool = True,
     colors: list[str] | None = None,
     legend_marker_size: float = 12.0,
     **kwargs: Any,
@@ -246,7 +245,9 @@ def spatial_archetypes(
     title : str, default: "Spatial Archetype Map"
         Plot title.
     save_path : str | None, default: None
-        Path to save the figure as HTML.
+        Path to save the figure.
+    show : bool, default: True
+        Whether to display the figure.
     colors : list[str] | None, default: None
         Custom color list. If None, uses a perceptually distinct palette
         designed for archetype visualization.
@@ -316,12 +317,7 @@ def spatial_archetypes(
         ),
     )
 
-    if save_path:
-        fig.write_html(save_path)
-        print(f"  Saved to {save_path}")
-
-    fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def interaction_boundaries(
@@ -333,6 +329,7 @@ def interaction_boundaries(
     colorscale: str = "Inferno",
     title: str | None = None,
     save_path: str | None = None,
+    show: bool = True,
     **kwargs: Any,
 ) -> go.Figure:
     """Spatial map of interaction boundary scores between cell types.
@@ -357,7 +354,9 @@ def interaction_boundaries(
     title : str | None, default: None
         Plot title. Auto-generated from boundary result if None.
     save_path : str | None, default: None
-        Path to save the figure as HTML.
+        Path to save the figure.
+    show : bool, default: True
+        Whether to display the figure.
 
     Returns
     -------
@@ -405,12 +404,7 @@ def interaction_boundaries(
         height=700,
     )
 
-    if save_path:
-        fig.write_html(save_path)
-        print(f"  Saved to {save_path}")
-
-    fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def spatial_autocorr(
@@ -419,6 +413,7 @@ def spatial_autocorr(
     uns_key: str = "archetype_spatial_autocorr",
     title: str | None = None,
     save_path: str | None = None,
+    show: bool = True,
     **kwargs: Any,
 ) -> go.Figure:
     """Dot plot of spatial autocorrelation per archetype weight.
@@ -437,7 +432,9 @@ def spatial_autocorr(
     title : str | None, default: None
         Plot title. Auto-detected from data if None.
     save_path : str | None, default: None
-        Path to save the figure as HTML.
+        Path to save the figure.
+    show : bool, default: True
+        Whether to display the figure.
 
     Returns
     -------
@@ -553,12 +550,7 @@ def spatial_autocorr(
         legend=dict(orientation="h", yanchor="bottom", y=-0.2, x=0.5, xanchor="center"),
     )
 
-    if save_path:
-        fig.write_html(save_path)
-        print(f"  Saved to {save_path}")
-
-    fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)
 
 
 def cross_correlations(
@@ -567,6 +559,7 @@ def cross_correlations(
     uns_key: str = "archetype_interaction_boundaries",
     title: str | None = None,
     save_path: str | None = None,
+    show: bool = True,
     **kwargs: Any,
 ) -> go.Figure:
     """Diverging dot plot of per-archetype cross-correlations between cell types.
@@ -589,7 +582,9 @@ def cross_correlations(
     title : str | None, default: None
         Plot title. Auto-generated from cell type names if None.
     save_path : str | None, default: None
-        Path to save the figure as HTML.
+        Path to save the figure.
+    show : bool, default: True
+        Whether to display the figure.
 
     Returns
     -------
@@ -715,9 +710,4 @@ def cross_correlations(
         ],
     )
 
-    if save_path:
-        fig.write_html(save_path)
-        print(f"  Saved to {save_path}")
-
-    fig.show()
-    return fig
+    return save_and_show(fig, save_path=save_path, show=show)

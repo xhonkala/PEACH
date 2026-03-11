@@ -23,9 +23,10 @@ def feature_simplex_decomposition(
     n_initializations: int = 20,
     stability_threshold: float = 0.7,
     characterize_features: bool = True,
+    ilr_epsilon: float = 1e-3,
     random_state: int = 42,
     copy: bool = False,
-) -> GMMResult:
+) -> dict:
     """Decompose cell populations by GMM in ILR-transformed weight space.
 
     Fits a Gaussian Mixture Model to archetype weights after ILR transform,
@@ -63,8 +64,9 @@ def feature_simplex_decomposition(
 
     Returns
     -------
-    GMMResult
-        Stored in adata.uns['peach_gmm'], labels in adata.obsm['peach_gmm_labels'].
+    dict
+        Plain dict with GMM results. Stored in adata.uns['peach_gmm'],
+        labels in adata.obsm['peach_gmm_labels'].
     """
     if copy:
         adata = adata.copy()
@@ -78,6 +80,7 @@ def feature_simplex_decomposition(
         n_initializations=n_initializations,
         stability_threshold=stability_threshold,
         random_state=random_state,
+        ilr_epsilon=ilr_epsilon,
     )
 
     # Component characterization
@@ -90,7 +93,7 @@ def feature_simplex_decomposition(
             gmm_result["n_components_stable"],
         )
 
-    result = GMMResult(
+    result_obj = GMMResult(
         n_components_optimal=gmm_result["n_components_optimal"],
         n_components_stable=gmm_result["n_components_stable"],
         component_assignments=gmm_result["component_assignments"],
@@ -98,12 +101,16 @@ def feature_simplex_decomposition(
         component_archetype_map=gmm_result["component_archetype_map"],
         component_stability_scores=gmm_result["component_stability_scores"],
         component_feature_profiles=feature_profiles,
+        component_weight_means=gmm_result.get("component_weight_means"),
         bic_values=gmm_result["bic_values"],
         n_components_tested=gmm_result["n_components_tested"],
     )
 
+    # Serialize to plain dict (PEACH convention: public API returns dicts)
+    serialized = result_obj.to_serializable()
+
     # Store in adata
-    store_result(adata, "gmm", result.to_serializable())
+    store_result(adata, "gmm", serialized)
     store_result(adata, "gmm_labels", gmm_result["component_assignments"], domain="obsm")
 
-    return result
+    return serialized

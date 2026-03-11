@@ -25,6 +25,7 @@ def feature_simplex_regression(
     n_bootstrap: int = 1000,
     robust_se: bool = True,
     store_residuals: bool = True,
+    comprehensive_degree: bool = False,
     copy: bool = False,
 ) -> dict:
     """Simplex regression of features on archetype weights (Scheffe polynomials).
@@ -49,6 +50,9 @@ def feature_simplex_regression(
         If True, use HC3 heteroscedasticity-consistent SEs.
     store_residuals : bool
         If True, store residual matrix in adata.obsm['peach_residuals'].
+    comprehensive_degree : bool
+        If True, run degree d=2..K-1 fits with incremental F-tests, storing
+        results in serialized['degree_comparison'].
     copy : bool
         If True, operate on a copy of adata.
 
@@ -78,10 +82,16 @@ def feature_simplex_regression(
     # FDR correction on F-test
     _, f_pvalue_fdr, _, _ = multipletests(result1["f_pvalues"], method="fdr_bh")
 
+    # FDR on vertex t-pvalues (across genes x archetypes)
+    flat_vertex_pvals = result1["t_pvalues"].ravel()
+    _, flat_vertex_fdr, _, _ = multipletests(flat_vertex_pvals, method="fdr_bh")
+    vertex_pvalues_fdr = flat_vertex_fdr.reshape(result1["t_pvalues"].shape)
+
     # Degree 2 (if requested)
     interaction_coefficients = None
     interaction_pairs = None
     interaction_pvalues = None
+    interaction_pvalues_fdr = None
     interaction_se = None
     r_squared_degree2 = None
 
@@ -93,6 +103,11 @@ def feature_simplex_regression(
         interaction_pvalues = result2["t_pvalues"][:, K:]
         interaction_se = result2["standard_errors"][:, K:]
         r_squared_degree2 = result2["r_squared"]
+
+        # FDR on interaction t-pvalues
+        flat_int_pvals = result2["t_pvalues"][:, K:].ravel()
+        _, flat_int_fdr, _, _ = multipletests(flat_int_pvals, method="fdr_bh")
+        interaction_pvalues_fdr = flat_int_fdr.reshape(interaction_pvalues.shape)
 
     # Permutation test for model significance
     permutation_pvalue = None
@@ -137,10 +152,12 @@ def feature_simplex_regression(
         f_pvalue=result1["f_pvalues"],
         f_pvalue_fdr=f_pvalue_fdr,
         vertex_pvalues=result1["t_pvalues"],
+        vertex_pvalues_fdr=vertex_pvalues_fdr,
         vertex_se=result1["standard_errors"],
         interaction_coefficients=interaction_coefficients,
         interaction_pairs=interaction_pairs,
         interaction_pvalues=interaction_pvalues,
+        interaction_pvalues_fdr=interaction_pvalues_fdr,
         interaction_se=interaction_se,
         r_squared_degree2=r_squared_degree2,
         permutation_pvalue=permutation_pvalue,
@@ -153,6 +170,14 @@ def feature_simplex_regression(
 
     # Store serializable summary at namespaced key + generic fallback
     serialized = result.to_serializable()
+
+    # Comprehensive degree comparison (Enhancement 4)
+    if comprehensive_degree:
+        serialized["degree_comparison"] = _comprehensive_degree_comparison(
+            weights, Y, K, robust_se=robust_se,
+            r_squared_degree1=result1["r_squared"],
+        )
+
     suffix = regression_storage_suffix(feature_matrix)
     store_result(adata, f"simplex_regression_{suffix}", serialized)
     store_result(adata, "simplex_regression", serialized)
@@ -255,6 +280,110 @@ def _bootstrap_regression_cis(weights, Y, degree, n_bootstrap, K, ci_level=0.95,
     ci_lower = np.nanpercentile(boot_coefs, 100 * alpha / 2, axis=0)
     ci_upper = np.nanpercentile(boot_coefs, 100 * (1 - alpha / 2), axis=0)
     return ci_lower, ci_upper
+
+
+def _comprehensive_degree_comparison(weights, Y, K, *, robust_se, r_squared_degree1):
+    """Run degree d=2..K-1 fits with incremental F-tests.
+
+    For each degree d:
+    1. Fit regression at degree d
+    2. Compute delta_R2 vs degree d-1
+    3. Incremental F-test: F = ((SS_res_{d-1} - SS_res_d) / df_extra) / (SS_res_d / df_res)
+    4. FDR correct the incremental p-values
+
+    Returns dict mapping degree -> results dict.
+    """
+    from math import comb
+    import scipy.sparse as sp
+    from scipy import stats
+
+    n_cells = weights.shape[0]
+    n_features = Y.shape[1]
+
+    # Compute SS_tot once (handle sparse chunking)
+    chunk_size = 5000
+    if sp.issparse(Y):
+        ss_tot = np.zeros(n_features)
+        for start in range(0, n_features, chunk_size):
+            end = min(start + chunk_size, n_features)
+            Y_chunk = Y[:, start:end].toarray()
+            y_mean = Y_chunk.mean(axis=0, keepdims=True)
+            ss_tot[start:end] = np.sum((Y_chunk - y_mean) ** 2, axis=0)
+    else:
+        Y_dense = np.asarray(Y)
+        y_mean = Y_dense.mean(axis=0, keepdims=True)
+        ss_tot = np.sum((Y_dense - y_mean) ** 2, axis=0)
+
+    def _n_params(K, degree):
+        """Total parameter count for Scheffe polynomial of given degree on K-simplex."""
+        return sum(comb(K, order) for order in range(1, degree + 1))
+
+    # Previous degree info (start from degree 1)
+    prev_r2 = r_squared_degree1
+    prev_n_params = _n_params(K, 1)
+    prev_ss_res = np.where(ss_tot > 0, (1 - prev_r2) * ss_tot, 0.0)
+
+    max_degree = K - 1  # max meaningful incremental degree
+    if max_degree < 2:
+        return {}
+
+    if K > 6:
+        import warnings
+        from math import comb as _comb
+        warnings.warn(
+            f"comprehensive_degree with K={K} will fit {K-2} regressions with up to "
+            f"{sum(_comb(K, d) for d in range(1, K))} parameters each. This may be slow.",
+            RuntimeWarning,
+        )
+
+    degree_results = {}
+    for d in range(2, max_degree + 1):
+        Wd, info = scheffe_design_matrix(weights, degree=d)
+        result_d = ols_fit(Wd, Y, robust_se=robust_se, return_residuals=False)
+
+        r2_d = result_d["r_squared"]
+        n_params_d = _n_params(K, d)
+        ss_res_d = np.where(ss_tot > 0, (1 - r2_d) * ss_tot, 0.0)
+
+        delta_r2 = r2_d - prev_r2
+        df_extra = n_params_d - prev_n_params
+        df_res = max(n_cells - n_params_d, 1)
+
+        # Incremental F-test
+        incremental_f = np.zeros(n_features)
+        incremental_p = np.ones(n_features)
+        valid = (ss_tot > 0) & (df_extra > 0)
+        if np.any(valid):
+            num = (prev_ss_res[valid] - ss_res_d[valid]) / df_extra
+            denom = ss_res_d[valid] / df_res
+            with np.errstate(divide="ignore", invalid="ignore"):
+                incremental_f[valid] = np.where(denom > 0, num / denom, np.inf)
+            # Clamp negative F to 0 (can happen from numerical noise)
+            incremental_f[valid] = np.maximum(incremental_f[valid], 0.0)
+            incremental_p[valid] = stats.f.sf(incremental_f[valid], dfn=df_extra, dfd=df_res)
+
+        # FDR correct incremental p-values
+        _, incremental_p_fdr, _, _ = multipletests(incremental_p, method="fdr_bh")
+
+        # Significant features at FDR < 0.05
+        significant_features = np.sum(incremental_p_fdr < 0.05)
+
+        degree_results[f"degree_{d}"] = {
+            "r_squared": r2_d,
+            "delta_r2": delta_r2,
+            "incremental_f": incremental_f,
+            "incremental_p_fdr": incremental_p_fdr,
+            "significant_features": int(significant_features),
+            "n_params": int(n_params_d),
+            "df_extra": int(df_extra),
+        }
+
+        # Update previous for next iteration
+        prev_r2 = r2_d
+        prev_n_params = n_params_d
+        prev_ss_res = ss_res_d
+
+    return degree_results
 
 
 def archetype_driver_regression(

@@ -43,14 +43,14 @@ class TestScheffeDesignMatrix:
         _, pairs = scheffe_design_matrix(W, degree=1)
         assert pairs == []
 
-    def test_k1_degree2_no_crash(self):
-        """K=1 with degree=2 should return weights only, no crash."""
+    def test_k1_degree2_raises(self):
+        """K=1 with degree=2 should raise ValueError (degree > K)."""
+        import pytest
         from peach._core.utils.simplex_regression import scheffe_design_matrix
 
         W = np.ones((50, 1))
-        X, pairs = scheffe_design_matrix(W, degree=2)
-        assert X.shape == (50, 1)
-        assert pairs == []
+        with pytest.raises(ValueError, match="degree=2 exceeds K=1"):
+            scheffe_design_matrix(W, degree=2)
 
     def test_k2_degree2(self):
         """K=2 with degree=2 should produce 1 interaction column."""

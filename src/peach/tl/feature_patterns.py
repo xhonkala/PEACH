@@ -3,7 +3,7 @@
 import numpy as np
 from anndata import AnnData
 
-from peach._core.utils.feature_utils import store_result
+from peach._core.utils.feature_utils import resolve_regression_result, store_result
 from peach._core.utils.pattern_classification import classify_all_features
 from peach._core.types import PatternClassificationResult, SimplexRegressionResult
 
@@ -13,9 +13,9 @@ def classify_feature_patterns(
     *,
     regression_result: SimplexRegressionResult | None = None,
     r2_threshold: float = 0.05,
-    significance_threshold: float = 0.05,
-    effect_size_threshold: float | None = None,
-) -> PatternClassificationResult:
+    cv_threshold: float = 0.15,
+    exclusive_ratio: float = 2.0,
+) -> dict:
     """Classify features into biological pattern types from regression coefficients.
 
     Parameters
@@ -27,25 +27,28 @@ def classify_feature_patterns(
         If None, reads from adata.uns['peach_simplex_regression'].
     r2_threshold : float
         Minimum R^2 to be classified as non-flat (default 0.05 = 5%).
-    significance_threshold : float
-        P-value threshold for significance.
-    effect_size_threshold : float or None
-        Auto-calibrated from data if None.
+    cv_threshold : float
+        Below this coefficient of variation, the feature is classified as "flat".
+    exclusive_ratio : float
+        Minimum ratio of max(beta) to second_max(beta) for "archetype-exclusive".
 
     Returns
     -------
-    PatternClassificationResult
+    dict
+        Keys: feature_names, n_features, classifications, pattern_counts.
         Also stored in adata.uns['peach_feature_patterns'].
     """
     if regression_result is None:
-        if "peach_simplex_regression" not in adata.uns:
+        stored = resolve_regression_result(adata, prefer="genes")
+        if stored is None:
             raise ValueError(
                 "No regression results found. Run pc.tl.feature_simplex_regression() first "
                 "or provide regression_result directly."
             )
-        # Reconstruct from stored dict
-        stored = adata.uns["peach_simplex_regression"]
         regression_result = SimplexRegressionResult(**stored)
+    elif isinstance(regression_result, dict):
+        # Accept serialized dict (returned by feature_simplex_regression)
+        regression_result = SimplexRegressionResult(**regression_result)
 
     classifications = classify_all_features(
         vertex_coefficients=regression_result.vertex_coefficients,
@@ -54,8 +57,8 @@ def classify_feature_patterns(
         vertex_pvalues=regression_result.vertex_pvalues,
         interaction_pvalues=regression_result.interaction_pvalues,
         r2_threshold=r2_threshold,
-        significance_threshold=significance_threshold,
-        effect_size_threshold=effect_size_threshold,
+        cv_threshold=cv_threshold,
+        exclusive_ratio=exclusive_ratio,
     )
 
     # Count patterns
@@ -71,8 +74,9 @@ def classify_feature_patterns(
         pattern_counts=pattern_counts,
     )
 
-    store_result(adata, "feature_patterns", result.to_serializable())
-    return result
+    serialized = result.to_serializable()
+    store_result(adata, "feature_patterns", serialized)
+    return serialized
 
 
 def archetype_summary(
@@ -107,13 +111,12 @@ def archetype_summary(
         Per-archetype structured summary.
     """
     # Check for regression results
-    if "peach_simplex_regression" not in adata.uns:
+    reg = resolve_regression_result(adata, prefer="genes")
+    if reg is None:
         raise ValueError(
             "No simplex regression results found. "
             "Run pc.tl.feature_simplex_regression() first."
         )
-
-    reg = adata.uns["peach_simplex_regression"]
     vertex_coefs = reg["vertex_coefficients"]  # [n_features, K]
     feature_names = reg["feature_names"]
     K = vertex_coefs.shape[1]

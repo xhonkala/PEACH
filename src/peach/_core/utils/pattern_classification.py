@@ -8,47 +8,50 @@ def classify_single_feature(
     interaction_betas,
     r2,
     p_betas,
-    p_interactions,
+    p_interactions=None,
     r2_threshold=0.05,
-    significance_threshold=0.05,
-    effect_size_threshold=None,
+    cv_threshold=0.15,
+    exclusive_ratio=2.0,
 ):
     """Classify a single feature's regression pattern.
+
+    Patterns are checked in priority order:
+    1. flat: R² < r2_threshold OR CV(beta) < cv_threshold
+    2. archetype-exclusive: max(beta) / second_max(beta) >= exclusive_ratio
+    3. gradient: 2+ betas in top tier separated by large gap (>30% of range)
+    4. monotonic: fallback for structured but diffuse patterns
 
     Parameters
     ----------
     vertex_betas : np.ndarray [K]
         Regression coefficients for each archetype vertex.
-    interaction_betas : np.ndarray [K-choose-2] or None
-        Interaction term coefficients, or None if no interaction model.
+    interaction_betas : np.ndarray or None
+        Kept for API compatibility; not used in classification.
     r2 : float
         R-squared value from the regression.
     p_betas : np.ndarray [K]
-        P-values for each vertex coefficient.
-    p_interactions : np.ndarray [K-choose-2] or None
-        P-values for interaction terms, or None if no interaction model.
+        P-values for each vertex coefficient. Kept for API compatibility;
+        not used in classification.
+    p_interactions : np.ndarray or None
+        Kept for API compatibility; not used in classification.
     r2_threshold : float
-        Below this R^2, the feature is classified as "flat".
-    significance_threshold : float
-        P-value cutoff for statistical significance.
-    effect_size_threshold : float or None
-        Minimum beta range to consider meaningful. Auto-calibrated from
-        data if None.
+        Below this R², the feature is classified as "flat".
+    cv_threshold : float
+        Below this coefficient of variation, the feature is classified as "flat".
+    exclusive_ratio : float
+        Minimum ratio of max(beta) to second_max(beta) for "archetype-exclusive".
 
     Returns
     -------
     dict with keys: pattern, confidence, details
         pattern : str
-            One of "flat", "archetype-exclusive", "monotonic-gradient",
-            "multi-archetype-shared", "antagonistic", "ridge", "valley".
+            One of "flat", "archetype-exclusive", "gradient", "monotonic".
         confidence : float
             Confidence score in [0, 1].
         details : dict
             Additional classification metadata.
     """
-    K = len(vertex_betas)
-
-    # Guard against NaN R² (propagates from upstream numerical issues)
+    # Guard against NaN R²
     if np.isnan(r2):
         return {
             "pattern": "flat",
@@ -56,12 +59,7 @@ def classify_single_feature(
             "details": {"reason": "nan_r2"},
         }
 
-    # Auto-calibrate effect size threshold
-    if effect_size_threshold is None:
-        beta_range = np.ptp(vertex_betas)
-        effect_size_threshold = max(beta_range * 0.2, 0.1)
-
-    # Rule 1: Low R^2 -> flat
+    # Rule 1a: Low R² -> flat
     if r2 < r2_threshold:
         return {
             "pattern": "flat",
@@ -69,93 +67,51 @@ def classify_single_feature(
             "details": {"reason": "low_r2"},
         }
 
-    # Rule 2: Low effect size -> flat
-    beta_range = np.ptp(vertex_betas)
-    if beta_range < effect_size_threshold and not _has_significant_interactions(
-        interaction_betas, p_interactions, significance_threshold
-    ):
+    # Rule 1b: Low coefficient of variation -> flat
+    cv = np.std(vertex_betas) / max(abs(np.mean(vertex_betas)), 1e-10)
+    if cv < cv_threshold:
         return {
             "pattern": "flat",
-            "confidence": 0.8,
-            "details": {"reason": "low_effect_size"},
+            "confidence": 0.9,
+            "details": {"reason": "low_cv", "cv": float(cv)},
         }
 
-    # Rule 3: Significant interactions -> ridge or valley
-    if _has_significant_interactions(
-        interaction_betas, p_interactions, significance_threshold
-    ):
-        sig_mask = p_interactions < significance_threshold
-        sig_interactions = interaction_betas[sig_mask]
-        if np.mean(sig_interactions) > 0:
-            return {
-                "pattern": "ridge",
-                "confidence": 0.8,
-                "details": {"n_sig_interactions": int(sig_mask.sum())},
-            }
-        else:
-            return {
-                "pattern": "valley",
-                "confidence": 0.8,
-                "details": {"n_sig_interactions": int(sig_mask.sum())},
-            }
-
-    # Rule 4: Count significantly elevated betas
-    sig_betas = p_betas < significance_threshold
-    beta_mean = np.mean(vertex_betas)
-    elevated = sig_betas & (vertex_betas > beta_mean + effect_size_threshold * 0.5)
-    depressed = sig_betas & (vertex_betas < beta_mean - effect_size_threshold * 0.5)
-    n_elevated = np.sum(elevated)
-    n_depressed = np.sum(depressed)
-
-    # Antagonistic: significant betas on both sides
-    if n_elevated >= 1 and n_depressed >= 1 and (n_elevated + n_depressed) >= 3:
-        return {
-            "pattern": "antagonistic",
-            "confidence": 0.7,
-            "details": {
-                "n_elevated": int(n_elevated),
-                "n_depressed": int(n_depressed),
-            },
-        }
-
-    # Exclusive: exactly 1 elevated
-    if n_elevated == 1:
-        sorted_betas = np.sort(vertex_betas)[::-1]
-        ratio = sorted_betas[1] / max(sorted_betas[0], 1e-10)
-        if ratio < 0.3:
-            return {
-                "pattern": "archetype-exclusive",
-                "confidence": 0.9,
-                "details": {"dominant_archetype": int(np.argmax(vertex_betas))},
-            }
-        else:
-            return {
-                "pattern": "monotonic-gradient",
-                "confidence": 0.7,
-                "details": {"dominant_archetype": int(np.argmax(vertex_betas))},
-            }
-
-    # Shared: 2+ elevated
-    if n_elevated >= 2:
-        return {
-            "pattern": "multi-archetype-shared",
-            "confidence": 0.7,
-            "details": {"n_shared": int(n_elevated)},
-        }
-
-    # Gradient: ordered coefficients, 1 dominant
+    # Sort betas descending for subsequent rules
     sorted_betas = np.sort(vertex_betas)[::-1]
-    if sorted_betas[0] > sorted_betas[1] * 1.5:
+
+    # Rule 2: Archetype-exclusive — compare absolute magnitudes to handle negative betas
+    sorted_abs = np.sort(np.abs(vertex_betas))[::-1]
+    if sorted_abs[0] > 0 and sorted_abs[0] / max(sorted_abs[1], 1e-10) >= exclusive_ratio:
         return {
-            "pattern": "monotonic-gradient",
-            "confidence": 0.6,
+            "pattern": "archetype-exclusive",
+            "confidence": 0.9,
             "details": {"dominant_archetype": int(np.argmax(vertex_betas))},
         }
 
-    # Default
-    if beta_range > effect_size_threshold * 3:
-        return {"pattern": "antagonistic", "confidence": 0.5, "details": {}}
-    return {"pattern": "monotonic-gradient", "confidence": 0.5, "details": {}}
+    # Rule 3: Gradient — 2+ betas in top tier separated from rest by largest gap
+    if len(sorted_betas) >= 3:
+        gaps = np.diff(sorted_betas)  # negative since descending
+        largest_gap_idx = np.argmin(gaps)  # most negative = largest drop
+        gap_size = abs(gaps[largest_gap_idx])
+        beta_range = sorted_betas[0] - sorted_betas[-1]
+        n_high = largest_gap_idx + 1
+
+        if n_high >= 2 and beta_range > 0 and gap_size > beta_range * 0.3:
+            return {
+                "pattern": "gradient",
+                "confidence": 0.8,
+                "details": {
+                    "n_high": int(n_high),
+                    "dominant_archetype": int(np.argmax(vertex_betas)),
+                },
+            }
+
+    # Rule 4: Monotonic — fallback for everything else
+    return {
+        "pattern": "monotonic",
+        "confidence": 0.6,
+        "details": {"dominant_archetype": int(np.argmax(vertex_betas))},
+    }
 
 
 def classify_all_features(
@@ -165,8 +121,8 @@ def classify_all_features(
     vertex_pvalues,
     interaction_pvalues,
     r2_threshold=0.05,
-    significance_threshold=0.05,
-    effect_size_threshold=None,
+    cv_threshold=0.15,
+    exclusive_ratio=2.0,
 ):
     """Classify all features at once.
 
@@ -174,21 +130,20 @@ def classify_all_features(
     ----------
     vertex_coefficients : np.ndarray [n_features, K]
         Regression coefficients matrix, one row per feature.
-    interaction_coefficients : np.ndarray [n_features, n_interactions] or None
-        Interaction term coefficients, or None if no interaction model.
+    interaction_coefficients : np.ndarray or None
+        Kept for API compatibility; not used in classification.
     r_squared : np.ndarray [n_features]
         R-squared values, one per feature.
     vertex_pvalues : np.ndarray [n_features, K]
-        P-values for vertex coefficients.
-    interaction_pvalues : np.ndarray [n_features, n_interactions] or None
-        P-values for interaction terms, or None.
+        P-values for vertex coefficients. Kept for API compatibility.
+    interaction_pvalues : np.ndarray or None
+        Kept for API compatibility; not used in classification.
     r2_threshold : float
-        Below this R^2, the feature is classified as "flat".
-    significance_threshold : float
-        P-value cutoff for statistical significance.
-    effect_size_threshold : float or None
-        Minimum beta range to consider meaningful. Auto-calibrated per
-        feature if None.
+        Below this R², the feature is classified as "flat".
+    cv_threshold : float
+        Below this coefficient of variation, the feature is classified as "flat".
+    exclusive_ratio : float
+        Minimum ratio of max(beta) to second_max(beta) for "archetype-exclusive".
 
     Returns
     -------
@@ -215,15 +170,8 @@ def classify_all_features(
                 vertex_pvalues[i],
                 int_pvals,
                 r2_threshold=r2_threshold,
-                significance_threshold=significance_threshold,
-                effect_size_threshold=effect_size_threshold,
+                cv_threshold=cv_threshold,
+                exclusive_ratio=exclusive_ratio,
             )
         )
     return results
-
-
-def _has_significant_interactions(interaction_betas, p_interactions, threshold):
-    """Check if any interaction terms are significant."""
-    if interaction_betas is None or p_interactions is None:
-        return False
-    return np.any(p_interactions < threshold)

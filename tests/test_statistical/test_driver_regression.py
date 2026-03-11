@@ -54,8 +54,8 @@ class TestArchetypeDriverRegression:
             driver_adata, feature_matrix="pathway_scores", n_bootstrap=0
         )
         K = 3
-        assert result.main_coefficients_ilr.shape == (K - 1, 10)
-        assert result.r_squared.shape == (K - 1,)
+        assert np.asarray(result["main_coefficients_ilr"]).shape == (K - 1, 10)
+        assert np.asarray(result["r_squared"]).shape == (K - 1,)
 
     def test_back_transform_to_simplex(self, driver_adata):
         """Coefficients map back to per-archetype with shape [K, n_features]."""
@@ -65,7 +65,7 @@ class TestArchetypeDriverRegression:
             driver_adata, feature_matrix="pathway_scores", n_bootstrap=0
         )
         K = 3
-        assert result.main_coefficients.shape == (K, 10)
+        assert np.asarray(result["main_coefficients"]).shape == (K, 10)
 
     def test_max_interaction_features_guard(self, driver_adata):
         """Error raised when n_features > max_interaction_features at degree=2."""
@@ -88,8 +88,8 @@ class TestArchetypeDriverRegression:
         result = pc.tl.archetype_driver_regression(
             driver_adata, feature_matrix="pathway_scores", n_bootstrap=0
         )
-        assert result.intercepts is not None
-        assert result.intercepts.shape == (2,)  # K-1
+        assert result.get("intercepts") is not None
+        assert np.asarray(result["intercepts"]).shape == (2,)  # K-1
 
     def test_degree1_no_interactions(self, driver_adata):
         """max_degree=1 produces no interaction terms."""
@@ -101,9 +101,9 @@ class TestArchetypeDriverRegression:
             max_degree=1,
             n_bootstrap=0,
         )
-        assert result.interaction_coefficients_ilr is None
-        assert result.interaction_coefficients is None
-        assert result.interaction_pvalues is None
+        assert result.get("interaction_coefficients_ilr") is None
+        assert result.get("interaction_coefficients") is None
+        assert result.get("interaction_pvalues") is None
 
     def test_degree2_has_interactions(self, driver_adata):
         """max_degree=2 produces interaction terms with correct shape."""
@@ -115,9 +115,9 @@ class TestArchetypeDriverRegression:
         K = 3
         n_features = 10
         n_interactions = n_features * (n_features - 1) // 2  # 45
-        assert result.interaction_coefficients_ilr.shape == (K - 1, n_interactions)
-        assert result.interaction_coefficients.shape == (K, n_interactions)
-        assert result.interaction_pvalues.shape == (K - 1, n_interactions)
+        assert np.asarray(result["interaction_coefficients_ilr"]).shape == (K - 1, n_interactions)
+        assert np.asarray(result["interaction_coefficients"]).shape == (K, n_interactions)
+        assert np.asarray(result["interaction_pvalues"]).shape == (K - 1, n_interactions)
 
     def test_r_squared_positive(self, driver_adata):
         """R-squared should be positive for data with real signal."""
@@ -127,7 +127,7 @@ class TestArchetypeDriverRegression:
             driver_adata, feature_matrix="pathway_scores", n_bootstrap=0
         )
         # The signal is strong (genesets 0 and 1 drive archetypes 0 and 1)
-        assert np.all(result.r_squared > 0.0)
+        assert np.all(np.asarray(result["r_squared"]) > 0.0)
 
     def test_driving_features_have_largest_coefficients(self, driver_adata):
         """Geneset 0 should have largest effect on archetype 0."""
@@ -141,7 +141,7 @@ class TestArchetypeDriverRegression:
         )
         # main_coefficients is [K, n_features]
         # Archetype 0 should have largest absolute coefficient for feature 0
-        arch0_coefs = np.abs(result.main_coefficients[0, :])
+        arch0_coefs = np.abs(np.asarray(result["main_coefficients"])[0, :])
         assert np.argmax(arch0_coefs) == 0, (
             f"Expected feature 0 to have largest effect on archetype 0, "
             f"but argmax was {np.argmax(arch0_coefs)}"
@@ -154,9 +154,9 @@ class TestArchetypeDriverRegression:
         result = pc.tl.archetype_driver_regression(
             driver_adata, feature_matrix="pathway_scores", n_bootstrap=0
         )
-        assert result.main_pvalues.shape == (2, 10)  # [K-1, n_features]
-        assert np.all(result.main_pvalues >= 0.0)
-        assert np.all(result.main_pvalues <= 1.0)
+        assert np.asarray(result["main_pvalues"]).shape == (2, 10)  # [K-1, n_features]
+        assert np.all(np.asarray(result["main_pvalues"]) >= 0.0)
+        assert np.all(np.asarray(result["main_pvalues"]) <= 1.0)
 
     def test_copy_does_not_modify_original(self, driver_adata):
         """copy=True should not modify the original adata."""
@@ -181,15 +181,15 @@ class TestArchetypeDriverRegression:
             n_bootstrap=50,  # small for speed
         )
         K = 3
-        assert result.main_ci_lower is not None
-        assert result.main_ci_upper is not None
-        assert result.main_ci_lower.shape == (K, 10)
-        assert result.main_ci_upper.shape == (K, 10)
+        assert result.get("main_ci_lower") is not None
+        assert result.get("main_ci_upper") is not None
+        assert np.asarray(result["main_ci_lower"]).shape == (K, 10)
+        assert np.asarray(result["main_ci_upper"]).shape == (K, 10)
         # Lower should be <= upper
-        assert np.all(result.main_ci_lower <= result.main_ci_upper)
+        assert np.all(np.asarray(result["main_ci_lower"]) <= np.asarray(result["main_ci_upper"]))
 
-    def test_to_serializable(self, driver_adata):
-        """to_serializable should produce a dict with no None values."""
+    def test_returns_serialized_dict(self, driver_adata):
+        """Return value should be a serialized dict with no None values."""
         import peach as pc
 
         result = pc.tl.archetype_driver_regression(
@@ -198,10 +198,9 @@ class TestArchetypeDriverRegression:
             max_degree=1,
             n_bootstrap=0,
         )
-        d = result.to_serializable()
-        assert isinstance(d, dict)
-        assert "main_coefficients" in d
-        assert "r_squared" in d
+        assert isinstance(result, dict)
+        assert "main_coefficients" in result
+        assert "r_squared" in result
         # None fields should be excluded
-        assert "interaction_coefficients_ilr" not in d
-        assert "main_ci_lower" not in d
+        assert "interaction_coefficients_ilr" not in result
+        assert "main_ci_lower" not in result

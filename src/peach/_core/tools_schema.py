@@ -1164,9 +1164,10 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter("n_bootstrap", ParamType.INTEGER, "Bootstrap samples for CIs (0 to disable)", default=1000),
             Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 heteroscedasticity-consistent SEs", default=True),
             Parameter("store_residuals", ParamType.BOOLEAN, "Store residuals in adata.obsm", default=True),
+            Parameter("comprehensive_degree", ParamType.BOOLEAN, "Run degree 2..K-1 fits with incremental F-tests", default=False),
             Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
         ],
-        returns="SimplexRegressionResult",
+        returns="dict (serialized SimplexRegressionResult)",
         returns_description="vertex_coefficients [n_features, K], r_squared_degree1, f_pvalue, vertex_pvalues, "
         "interaction_coefficients (optional), CIs (optional)",
         requires=["cell_archetype_weights in adata.obsm"],
@@ -1228,7 +1229,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             ),
             Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
         ],
-        returns="DriverRegressionResult",
+        returns="dict (serialized DriverRegressionResult)",
         returns_description="main_coefficients_ilr [K-1, n_features], main_coefficients [K, n_features], "
         "main_pvalues, r_squared [K-1]",
         requires=["cell_archetype_weights in adata.obsm"],
@@ -1262,7 +1263,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
             Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
         ],
-        returns="GMMResult",
+        returns="dict",
         returns_description="n_components_optimal, n_components_stable, component_assignments, "
         "component_simplex_means, bic_values",
         requires=["cell_archetype_weights in adata.obsm"],

@@ -43,7 +43,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         "Tuple[DataLoader, AnnData]",
         ["dataloader: PyTorch DataLoader", "adata: with .obsm['X_pca'] ensured"],
     ),
-    "pp.load_pathway_networks": ("Dict[str, Set[str]]", ["pathway_name → gene_set"]),
+    "pp.load_pathway_networks": ("pd.DataFrame", ["columns: source, target, weight, pathway"]),
     "pp.compute_pathway_scores": ("AnnData", ["adata.obsm['pathway_scores'] added"]),
     "pp.prepare_atacseq": (
         "None",
@@ -325,20 +325,21 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
     # v0.5.0: Continuous characterization (tl)
     # =========================================================================
     "tl.feature_simplex_regression": (
-        "SimplexRegressionResult",
+        "dict (serialized SimplexRegressionResult)",
         [
             "vertex_coefficients [n_features, K]",
             "r_squared_degree1 [n_features]",
             "f_pvalue, f_pvalue_fdr [n_features]",
-            "vertex_pvalues, vertex_se [n_features, K]",
+            "vertex_pvalues, vertex_pvalues_fdr, vertex_se [n_features, K]",
             "interaction_coefficients [n_features, K-choose-2] (optional)",
-            "interaction_pvalues (optional)",
+            "interaction_pvalues, interaction_pvalues_fdr (optional)",
             "permutation_pvalue, permutation_pvalue_fdr [n_features] (optional)",
             "vertex_ci_lower, vertex_ci_upper (optional)",
+            "degree_comparison (optional, when comprehensive_degree=True)",
         ],
     ),
-    "tl.gene_simplex_regression": ("SimplexRegressionResult", ["Convenience for adata.X"]),
-    "tl.pathway_simplex_regression": ("SimplexRegressionResult", ["Convenience for pathway_scores"]),
+    "tl.gene_simplex_regression": ("dict (serialized SimplexRegressionResult)", ["Convenience for adata.X"]),
+    "tl.pathway_simplex_regression": ("dict (serialized SimplexRegressionResult)", ["Convenience for pathway_scores"]),
     "tl.classify_feature_patterns": (
         "PatternClassificationResult",
         [
@@ -347,7 +348,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "tl.archetype_driver_regression": (
-        "DriverRegressionResult",
+        "dict (serialized DriverRegressionResult)",
         [
             "main_coefficients_ilr [K-1, n_features]",
             "main_coefficients [K, n_features]",
@@ -356,7 +357,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "tl.feature_simplex_decomposition": (
-        "GMMResult",
+        "dict",
         [
             "n_components_optimal",
             "n_components_stable",
@@ -1202,13 +1203,15 @@ ADATA_KEYS = {
         "true_archetypes": "[n_archetypes, n_features] ground truth (synthetic data only)",
         "conditional_centroids": "Dict[condition_column, ConditionalCentroidResult] centroid positions",
         "trajectory_{src}_to_{tgt}": "Dict with trajectory analysis results (source, target, driver_genes, etc.)",
-        "pathway_scores_names": "List[str] pathway names for columns in obsm['pathway_scores']",
+        "pathway_scores_pathways": "List[str] pathway names for columns in obsm['pathway_scores']",
         "lsi": "Dict with 'variance_ratio' and 'components' from TruncatedSVD (pc.pp.prepare_atacseq)",
         "archetype_nhood_enrichment": "Dict with 'zscore' and 'count' arrays (pc.tl.archetype_nhood_enrichment)",
         "archetype_co_occurrence": "Dict with 'occ' and 'interval' arrays (pc.tl.archetype_co_occurrence)",
         "archetype_spatial_autocorr": "DataFrame with Moran's I / Geary's C per archetype weight",
         "archetype_interaction_boundaries": "Dict with boundary_scores, mean_weights_a/b, cross-correlations",
-        "peach_simplex_regression": "Simplex regression coefficients and statistics",
+        "peach_simplex_regression": "Simplex regression (backward compat, last writer wins)",
+        "peach_simplex_regression_genes": "Gene-level simplex regression (feature_matrix=None)",
+        "peach_simplex_regression_pathways": "Pathway-level simplex regression (feature_matrix='pathway_scores')",
         "peach_driver_regression": "Driver regression coefficients (ILR space + simplex)",
         "peach_feature_patterns": "Pattern classification results",
         "peach_gmm": "GMM decomposition results",
@@ -1257,14 +1260,17 @@ USE_GET_FOR: set[str] = {
     # v0.5.0: SimplexRegressionResult optional fields
     "interaction_coefficients",
     "interaction_pvalues",
+    "interaction_pvalues_fdr",
     "interaction_se",
     "r_squared_degree2",
+    "vertex_pvalues_fdr",
     "permutation_pvalue",
     "permutation_pvalue_fdr",
     "vertex_ci_lower",
     "vertex_ci_upper",
     "interaction_ci_lower",
     "interaction_ci_upper",
+    "degree_comparison",
     # v0.5.0: GMMResult optional fields
     "component_feature_profiles",
     # v0.5.0: FlowBetweenResult optional fields

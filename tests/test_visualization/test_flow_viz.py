@@ -21,6 +21,9 @@ from peach._core.types import (
     FlowJacobianResult,
 )
 
+# Note: flow functions now return plain dicts, not Pydantic objects.
+# Tests construct dicts directly for fixtures that don't call the real API.
+
 
 @pytest.fixture(scope="module")
 def flow_viz_data():
@@ -66,43 +69,43 @@ def alignment_data(flow_viz_data):
 
 @pytest.fixture
 def jacobian_data():
-    """Synthetic FlowJacobianResult for visualization."""
+    """Synthetic FlowJacobianResult dict for visualization."""
     rng = np.random.default_rng(42)
     dim = 5
-    return FlowJacobianResult(
-        jacobian_det=rng.standard_normal(100),
-        feature_expansion=rng.standard_normal(50),
-        mean_jacobian=rng.standard_normal((dim, dim)),
-        t=0.5,
-    )
+    return {
+        "jacobian_det": rng.standard_normal(100),
+        "feature_expansion": rng.standard_normal(50),
+        "mean_jacobian": rng.standard_normal((dim, dim)),
+        "t": 0.5,
+    }
 
 
 @pytest.fixture
 def between_result_with_correspondence():
-    """FlowBetweenResult with archetype_correspondence populated."""
+    """FlowBetweenResult dict with archetype_correspondence populated."""
     rng = np.random.default_rng(42)
     K_src, K_tgt = 4, 3
     corr_matrix = rng.random((K_src, K_tgt))
     # Normalize rows to sum to 1
     corr_matrix = corr_matrix / corr_matrix.sum(axis=1, keepdims=True)
 
-    return FlowBetweenResult(
-        condition_key="condition",
-        condition_labels=["A", "B"],
-        flows={},
-        archetype_correspondence={("A", "B"): corr_matrix},
-    )
+    return {
+        "condition_key": "condition",
+        "condition_labels": ["A", "B"],
+        "flows": {},
+        "archetype_correspondence": {("A", "B"): corr_matrix},
+    }
 
 
 @pytest.fixture
 def between_result_no_correspondence():
-    """FlowBetweenResult without archetype_correspondence."""
-    return FlowBetweenResult(
-        condition_key="condition",
-        condition_labels=["A", "B"],
-        flows={},
-        archetype_correspondence=None,
-    )
+    """FlowBetweenResult dict without archetype_correspondence."""
+    return {
+        "condition_key": "condition",
+        "condition_labels": ["A", "B"],
+        "flows": {},
+        "archetype_correspondence": None,
+    }
 
 
 # ---------- velocity_quiver ----------
@@ -126,7 +129,7 @@ class TestVelocityQuiver:
 
     def test_n_arrows_capped_by_source(self, flow_viz_data):
         adata, flow_result = flow_viz_data
-        n_source = flow_result.source_mask.sum()
+        n_source = flow_result["source_mask"].sum()
         fig = velocity_quiver(adata, flow_result, n_arrows=10000, show=False)
         assert len(fig.layout.annotations) == n_source
 
@@ -213,7 +216,7 @@ class TestJacobianHeatmap:
     def test_heatmap_dimensions(self, flow_viz_data, jacobian_data):
         adata, _ = flow_viz_data
         fig = jacobian_heatmap(adata, jacobian_data, show=False)
-        dim = jacobian_data.mean_jacobian.shape[0]
+        dim = jacobian_data["mean_jacobian"].shape[0]
         assert len(fig.data[0].x) == dim
         assert len(fig.data[0].y) == dim
 
@@ -275,7 +278,7 @@ class TestTrajectoryRibbon:
 
     def test_n_sample_capped(self, flow_viz_data):
         adata, flow_result = flow_viz_data
-        n_source = flow_result.source_mask.sum()
+        n_source = flow_result["source_mask"].sum()
         fig = trajectory_ribbon(
             adata, flow_result, n_sample=100000, n_steps=3, show=False
         )
@@ -317,14 +320,14 @@ class TestFlowMagnitude:
         fig = flow_magnitude(adata, flow_result, show=False)
         marker = fig.data[0].marker
         assert marker.color is not None
-        assert len(marker.color) == flow_result.source_mask.sum()
+        assert len(marker.color) == flow_result["source_mask"].sum()
 
     def test_color_is_magnitude(self, flow_viz_data):
         adata, flow_result = flow_viz_data
         fig = flow_magnitude(adata, flow_result, show=False)
-        source_pca = adata.obsm["X_pca"][flow_result.source_mask]
+        source_pca = adata.obsm["X_pca"][flow_result["source_mask"]]
         expected_mag = np.linalg.norm(
-            flow_result.transported - source_pca, axis=1
+            flow_result["transported"] - source_pca, axis=1
         )
         np.testing.assert_allclose(fig.data[0].marker.color, expected_mag)
 

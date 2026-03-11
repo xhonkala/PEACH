@@ -52,8 +52,8 @@ class TestFeatureSimplexDecomposition:
         result = pc.tl.feature_simplex_decomposition(
             gmm_adata, n_initializations=5, n_components_range=(2, 4)
         )
-        assert np.all(result.component_stability_scores >= 0)
-        assert np.all(result.component_stability_scores <= 1)
+        assert np.all(result["component_stability_scores"] >= 0)
+        assert np.all(result["component_stability_scores"] <= 1)
 
     def test_simplex_means_valid(self, gmm_adata):
         """Centroids sum to 1."""
@@ -63,7 +63,7 @@ class TestFeatureSimplexDecomposition:
             gmm_adata, n_initializations=3, n_components_range=(2, 4)
         )
         np.testing.assert_array_almost_equal(
-            result.component_simplex_means.sum(axis=1), 1.0
+            result["component_simplex_means"].sum(axis=1), 1.0
         )
 
     def test_feature_profiles(self, gmm_adata):
@@ -74,8 +74,8 @@ class TestFeatureSimplexDecomposition:
             gmm_adata, n_initializations=3, n_components_range=(2, 4),
             characterize_features=True
         )
-        assert result.component_feature_profiles is not None
-        assert result.component_feature_profiles.shape[1] == 30
+        assert result.get("component_feature_profiles") is not None
+        assert result["component_feature_profiles"].shape[1] == 30
 
     def test_no_feature_profiles(self, gmm_adata):
         """Feature profiles None when characterize_features=False."""
@@ -85,7 +85,7 @@ class TestFeatureSimplexDecomposition:
             gmm_adata, n_initializations=3, n_components_range=(2, 4),
             characterize_features=False
         )
-        assert result.component_feature_profiles is None
+        assert result.get("component_feature_profiles") is None
 
     def test_copy_does_not_modify_original(self, gmm_adata):
         """copy=True leaves original adata untouched."""
@@ -99,14 +99,13 @@ class TestFeatureSimplexDecomposition:
         assert "peach_gmm_labels" not in gmm_adata.obsm
 
     def test_result_type(self, gmm_adata):
-        """Returns GMMResult Pydantic model."""
+        """Returns plain dict (PEACH convention)."""
         import peach as pc
-        from peach._core.types import GMMResult
 
         result = pc.tl.feature_simplex_decomposition(
             gmm_adata, n_initializations=3, n_components_range=(2, 4)
         )
-        assert isinstance(result, GMMResult)
+        assert isinstance(result, dict)
 
     def test_bic_values_shape(self, gmm_adata):
         """BIC values match n_components_tested length."""
@@ -115,8 +114,8 @@ class TestFeatureSimplexDecomposition:
         result = pc.tl.feature_simplex_decomposition(
             gmm_adata, n_initializations=3, n_components_range=(2, 5)
         )
-        assert len(result.bic_values) == len(result.n_components_tested)
-        assert len(result.n_components_tested) == 4  # 2, 3, 4, 5
+        assert len(result["bic_values"]) == len(result["n_components_tested"])
+        assert len(result["n_components_tested"]) == 4  # 2, 3, 4, 5
 
     def test_assignments_shape(self, gmm_adata):
         """Component assignments match n_cells."""
@@ -125,7 +124,7 @@ class TestFeatureSimplexDecomposition:
         result = pc.tl.feature_simplex_decomposition(
             gmm_adata, n_initializations=3, n_components_range=(2, 4)
         )
-        assert result.component_assignments.shape == (400,)
+        assert result["component_assignments"].shape == (400,)
 
     def test_recovers_planted_clusters(self, gmm_adata):
         """GMM separates the two planted clusters (archetype 0 vs 1)."""
@@ -134,7 +133,7 @@ class TestFeatureSimplexDecomposition:
         result = pc.tl.feature_simplex_decomposition(
             gmm_adata, n_initializations=5, n_components_range=(2, 4)
         )
-        labels = result.component_assignments
+        labels = result["component_assignments"]
         # First 200 cells are cluster 0, next 200 are cluster 1
         # Labels may be permuted, so check that clusters are internally consistent
         labels_first = labels[:200]
@@ -156,6 +155,6 @@ class TestFeatureSimplexDecomposition:
         result = pc.tl.feature_simplex_decomposition(
             gmm_adata, n_initializations=5, n_components_range=(2, 5)
         )
-        assert result.n_components_optimal in (2, 3), (
-            f"BIC-optimal k={result.n_components_optimal}, expected 2 or 3"
+        assert result["n_components_optimal"] in (2, 3), (
+            f"BIC-optimal k={result['n_components_optimal']}, expected 2 or 3"
         )

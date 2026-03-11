@@ -50,35 +50,38 @@ SCATTER_MARKER_BG = dict(size=2, opacity=0.15, color=COLOR_MUTED)
 # Layout template — clean, minimal chrome
 # ---------------------------------------------------------------------------
 LAYOUT_DEFAULTS = dict(
-    font=dict(family="Arial, Helvetica, sans-serif", size=12),
+    font=dict(family="Arial, Helvetica, sans-serif", size=11, color="#333"),
     plot_bgcolor="white",
     paper_bgcolor="white",
-    margin=dict(l=60, r=30, t=40, b=50),
-    # Kill gridlines by default
+    margin=dict(l=55, r=20, t=35, b=45),
+    # Minimal axis chrome — Tufte range-frame aesthetic
     xaxis=dict(
         showgrid=False,
         zeroline=False,
-        linecolor="#333",
-        linewidth=1,
+        linecolor="#aaa",
+        linewidth=0.5,
         ticks="outside",
-        ticklen=4,
-        tickwidth=1,
-        tickcolor="#333",
+        ticklen=3,
+        tickwidth=0.5,
+        tickcolor="#aaa",
+        tickfont=dict(size=10),
     ),
     yaxis=dict(
         showgrid=False,
         zeroline=False,
-        linecolor="#333",
-        linewidth=1,
+        linecolor="#aaa",
+        linewidth=0.5,
         ticks="outside",
-        ticklen=4,
-        tickwidth=1,
-        tickcolor="#333",
+        ticklen=3,
+        tickwidth=0.5,
+        tickcolor="#aaa",
+        tickfont=dict(size=10),
     ),
-    # Legend: outside, no box
+    # Legend: no box, no background — invisible container
     legend=dict(
         bgcolor="rgba(0,0,0,0)",
         borderwidth=0,
+        font=dict(size=10),
     ),
 )
 
@@ -94,7 +97,7 @@ def apply_style(fig, *, title=None, xaxis_title=None, yaxis_title=None,
     updates = {}
     if title is not None:
         updates["title"] = dict(text=title, x=0.02, xanchor="left",
-                                font=dict(size=14))
+                                font=dict(size=12, color="#555"))
     if xaxis_title is not None:
         updates["xaxis_title"] = xaxis_title
     if yaxis_title is not None:
@@ -109,9 +112,29 @@ def apply_style(fig, *, title=None, xaxis_title=None, yaxis_title=None,
 
 
 def save_and_show(fig, *, save_path=None, show=True):
-    """Shared save/show logic."""
+    """Shared save/show logic. Infers format from file extension.
+
+    - .html → interactive HTML (use for 3D plots)
+    - .png, .pdf, .svg → static image via kaleido
+    - No extension → defaults to .png
+    """
     if save_path:
-        fig.write_html(save_path)
+        import os
+        _, ext = os.path.splitext(save_path)
+        ext = ext.lower()
+        if ext == ".html":
+            fig.write_html(save_path)
+        elif ext in (".png", ".pdf", ".svg", ".jpeg", ".jpg", ".webp"):
+            fig.write_image(save_path)
+        else:
+            if not ext:
+                save_path = save_path + ".png"
+                fig.write_image(save_path)
+            else:
+                raise ValueError(
+                    f"Unrecognized file extension '{ext}'. "
+                    f"Supported: .html, .png, .pdf, .svg, .jpeg, .jpg, .webp"
+                )
     if show:
         fig.show()
     return fig

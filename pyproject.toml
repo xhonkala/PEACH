@@ -53,6 +53,7 @@ dependencies = [
 
     # Visualization
     "plotly>=5.0.0",
+    "kaleido>=0.2.1,<1.0",  # kaleido 1.x requires plotly >=6
 
     # Statistical analysis
     "scipy>=1.10.0",

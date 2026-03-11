@@ -23,37 +23,40 @@ from scipy import stats
 def scheffe_design_matrix(W, degree=1):
     """Build Scheffe polynomial design matrix from simplex weights.
 
-    The Scheffe polynomial basis is natural for mixture/simplex data:
-    - Degree 1: X = W (linear effects, no intercept needed since sum=1)
-    - Degree 2: X = [W | w_j * w_k for all j<k] (adds pairwise interactions)
+    Degree 1: X = W (linear, no intercept since sum=1)
+    Degree 2: adds w_j * w_k for all j<k
+    Degree d: adds products of d distinct weights for all d-subsets
 
     Parameters
     ----------
-    W : np.ndarray
-        Archetype weights [n_cells, K], rows sum to 1.
-    degree : int
-        1 = linear (weights only), 2 = with pairwise interactions.
+    W : np.ndarray [n_cells, K], rows sum to 1.
+    degree : int, max polynomial degree. Must be <= K.
 
     Returns
     -------
-    X : np.ndarray
-        Design matrix [n_cells, p] where p = K for degree=1,
-        p = K + K*(K-1)/2 for degree=2.
-    pairs : list[tuple[int, int]]
-        List of (j, k) index pairs for interaction columns.
-        Empty list for degree=1.
+    X : np.ndarray [n_cells, p]
+    interaction_info : list[tuple] — index tuples for columns beyond K.
     """
+    K = W.shape[1]
+    if degree > K:
+        raise ValueError(f"degree={degree} exceeds K={K}. Max meaningful degree on a {K}-simplex is {K}.")
+    if degree < 1:
+        raise ValueError(f"degree must be >= 1, got {degree}.")
     if degree == 1:
         return W.copy(), []
 
-    K = W.shape[1]
-    pairs = list(combinations(range(K), 2))
-    if len(pairs) == 0:
-        # K=1 with degree=2: no interaction pairs possible
-        return W.copy(), []
-    interactions = np.column_stack([W[:, j] * W[:, k] for j, k in pairs])
-    X = np.column_stack([W, interactions])
-    return X, pairs
+    columns = [W]
+    interaction_info = []
+    for d in range(2, degree + 1):
+        tuples = list(combinations(range(K), d))
+        if not tuples:
+            continue
+        cols = np.column_stack([np.prod(W[:, list(t)], axis=1) for t in tuples])
+        columns.append(cols)
+        interaction_info.extend(tuples)
+
+    X = np.column_stack(columns)
+    return X, interaction_info
 
 
 def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False, return_residuals=True):

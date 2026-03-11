@@ -34,7 +34,7 @@ class TestClassifyFeaturePatterns:
         pc.tl.feature_simplex_regression(classified_adata, n_bootstrap=0)
         result = pc.tl.classify_feature_patterns(classified_adata)
         assert "peach_feature_patterns" in classified_adata.uns
-        assert len(result.classifications) == 20
+        assert len(result["classifications"]) == 20
 
     def test_gene0_classified_exclusive(self, classified_adata):
         """Gene 0 should be classified as archetype-exclusive."""
@@ -42,7 +42,7 @@ class TestClassifyFeaturePatterns:
 
         pc.tl.feature_simplex_regression(classified_adata, n_bootstrap=0)
         result = pc.tl.classify_feature_patterns(classified_adata)
-        assert result.classifications[0]["pattern"] == "archetype-exclusive"
+        assert result["classifications"][0]["pattern"] == "archetype-exclusive"
 
     def test_gene1_classified_flat(self, classified_adata):
         """Gene 1 should be classified as flat."""
@@ -50,7 +50,7 @@ class TestClassifyFeaturePatterns:
 
         pc.tl.feature_simplex_regression(classified_adata, n_bootstrap=0)
         result = pc.tl.classify_feature_patterns(classified_adata)
-        assert result.classifications[1]["pattern"] == "flat"
+        assert result["classifications"][1]["pattern"] == "flat"
 
     def test_pattern_counts(self, classified_adata):
         """Pattern counts should sum to n_features."""
@@ -58,4 +58,4 @@ class TestClassifyFeaturePatterns:
 
         pc.tl.feature_simplex_regression(classified_adata, n_bootstrap=0)
         result = pc.tl.classify_feature_patterns(classified_adata)
-        assert sum(result.pattern_counts.values()) == 20
+        assert sum(result["pattern_counts"].values()) == 20
