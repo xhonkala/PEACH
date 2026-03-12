@@ -33,6 +33,7 @@ from .regression import (
     r2_barplot,
     vertex_radar,
     regression_volcano,
+    archetype_regression_dotplot,
     pattern_summary,
 )
 
@@ -44,6 +45,7 @@ from .decomposition import (
     component_scatter,
     gmm_bic_curve,
     component_heatmap,
+    component_archetype_summary,
     component_stability,
 )
 
@@ -62,6 +64,7 @@ from .flow import (
 from .comparison import (
     mmd_heatmap,
     contrast_volcano,
+    contrast_volcano_grid,
     feature_similarity_heatmap,
 )
 
@@ -92,6 +95,7 @@ __all__ = [
     "r2_barplot",
     "vertex_radar",
     "regression_volcano",
+    "archetype_regression_dotplot",
     "pattern_summary",
     # Ternary
     "ternary_facet",
@@ -100,6 +104,7 @@ __all__ = [
     "component_scatter",
     "gmm_bic_curve",
     "component_heatmap",
+    "component_archetype_summary",
     "component_stability",
     # Flow Matching
     "velocity_quiver",
@@ -112,5 +117,6 @@ __all__ = [
     # Archetype comparison
     "mmd_heatmap",
     "contrast_volcano",
+    "contrast_volcano_grid",
     "feature_similarity_heatmap",
 ]

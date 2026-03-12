@@ -26,6 +26,7 @@ def fit_simplex_gmm(
     stability_threshold=0.7,
     random_state=42,
     ilr_epsilon=1e-3,
+    reassignment_confidence=0.0,
 ):
     """Fit GMM in ILR-transformed weight space with BIC selection and stability analysis.
 
@@ -44,6 +45,11 @@ def fit_simplex_gmm(
         component is recovered).
     random_state : int
         Random seed for reproducibility.
+    reassignment_confidence : float
+        Minimum posterior probability (from GMM predict_proba) required to
+        reassign an unstable cell to a stable component. Default 0.0 means
+        all unstable cells are reassigned (backward compatible). Higher values
+        (e.g. 0.8) leave low-confidence cells as -1 (unassigned).
 
     Returns
     -------
@@ -69,6 +75,9 @@ def fit_simplex_gmm(
         gmm_model : GaussianMixture
             Fitted GaussianMixture model (in ILR space) for the BIC-optimal
             n_components.
+        component_probabilities : np.ndarray or None [n_cells, n_stable]
+            Posterior probabilities for stable components. None if no unstable
+            cells exist.
     """
     weights = np.asarray(weights, dtype=np.float64)
     K = weights.shape[1]
@@ -134,16 +143,24 @@ def fit_simplex_gmm(
     for old_label, new_label in label_map.items():
         component_assignments[all_labels == old_label] = new_label
 
-    # Reassign unstable cells to nearest stable component (ILR distance)
+    # Handle unstable cells using predict_proba
     unstable_mask = component_assignments == -1
+    component_probabilities = None
     if np.any(unstable_mask) and n_stable > 0:
-        unstable_ilr = ilr_coords[unstable_mask]
-        stable_ilr_centroids = ilr_centroids[stable_indices]
-        dists = np.array([
-            np.linalg.norm(unstable_ilr - stable_ilr_centroids[s], axis=1)
-            for s in range(n_stable)
-        ]).T  # [n_unstable, n_stable]
-        component_assignments[unstable_mask] = np.argmin(dists, axis=1)
+        # Get posterior probabilities from full GMM (unnormalized for stable subset)
+        all_proba = best_gmm.predict_proba(ilr_coords)  # [n_cells, best_n]
+        stable_proba = all_proba[:, stable_indices]  # [n_cells, n_stable]
+        component_probabilities = stable_proba
+
+        # Reassign unstable cells where max stable probability exceeds threshold
+        unstable_proba = stable_proba[unstable_mask]
+        max_prob = unstable_proba.max(axis=1)
+        confident_mask = max_prob >= reassignment_confidence
+        confident_idx = np.where(unstable_mask)[0][confident_mask]
+        component_assignments[confident_idx] = np.argmax(
+            stable_proba[confident_idx], axis=1
+        )
+        # Cells below threshold remain -1
 
     # Nearest archetype per component
     archetype_map = np.argmax(stable_centroids, axis=1)
@@ -166,6 +183,7 @@ def fit_simplex_gmm(
         "bic_values": bic_values,
         "n_components_tested": n_range,
         "gmm_model": best_gmm,
+        "component_probabilities": component_probabilities,
     }
 
 

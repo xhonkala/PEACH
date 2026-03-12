@@ -114,6 +114,16 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False, retu
     # Solve normal equations with stability check
     WtW = W.T @ W
     cond = np.linalg.cond(WtW)
+
+    # Report effective rank (SVD-based)
+    _, s_vals, _ = np.linalg.svd(WtW)
+    effective_rank = int(np.sum(s_vals > s_vals[0] * 1e-10))
+    # Scheffe design (no intercept) has full rank p for well-sampled simplices.
+    # The sum-to-1 constraint is affine, not linear, so columns are independent.
+    # Flag if effective rank < p (indicates genuine collinearity).
+    expected_rank = p
+    extra_rank_deficient = effective_rank < expected_rank
+
     if cond > 1e12:
         warnings.warn(
             f"Design matrix is near-singular (condition number {cond:.1e}). "
@@ -130,6 +140,14 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False, retu
                 RuntimeWarning,
             )
             WtW_inv = np.linalg.pinv(WtW)
+
+    if extra_rank_deficient:
+        warnings.warn(
+            f"Design matrix has effective rank {effective_rank} but expected at "
+            f"least {expected_rank}. This indicates collinearity beyond the "
+            f"expected simplex sum-to-1 constraint.",
+            RuntimeWarning,
+        )
 
     # Compute beta: sparse-safe (W.T @ sparse_Y works in scipy)
     if is_sparse:
@@ -262,6 +280,9 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False, retu
         "t_pvalues": t_pvalues,
         "f_statistics": f_stats,
         "f_pvalues": f_pvalues,
+        "effective_rank": effective_rank,
+        "expected_rank": expected_rank,
+        "extra_rank_deficient": extra_rank_deficient,
     }
     if return_covariance:
         result_dict["covariance"] = covariance

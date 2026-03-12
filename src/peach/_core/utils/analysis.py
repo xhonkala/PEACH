@@ -691,7 +691,7 @@ def bin_cells_by_archetype(
             cell_distance = arch_distances[cell_position]
 
             # Adjust archetype numbering if central archetype exists
-            archetype_num = arch_idx + 1 if include_central_archetype else arch_idx + 1
+            archetype_num = arch_idx + 1 if include_central_archetype else arch_idx
             archetype_storage_idx = arch_idx + 1 if include_central_archetype else arch_idx
 
             assignments.append(

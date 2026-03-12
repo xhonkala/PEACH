@@ -158,3 +158,63 @@ class TestFeatureSimplexDecomposition:
         assert result["n_components_optimal"] in (2, 3), (
             f"BIC-optimal k={result['n_components_optimal']}, expected 2 or 3"
         )
+
+    def test_unstable_cells_configurable_threshold(self, gmm_adata):
+        """With reassignment_confidence=0.0 (default), all cells get assigned."""
+        import peach as pc
+
+        result = pc.tl.feature_simplex_decomposition(
+            gmm_adata, n_initializations=3, n_components_range=(2, 4),
+            reassignment_confidence=0.0,
+        )
+        labels = result["component_assignments"]
+        assert np.all(labels >= 0), "Default confidence=0.0 should reassign all unstable cells"
+
+    def test_unstable_cells_strict_threshold(self, gmm_adata):
+        """With high confidence threshold, component_probabilities is populated."""
+        import peach as pc
+
+        result = pc.tl.feature_simplex_decomposition(
+            gmm_adata, n_initializations=3, n_components_range=(2, 4),
+            reassignment_confidence=0.8,
+        )
+        # component_probabilities should be in result if any unstable cells existed
+        # (even if all were reassigned because they exceeded the threshold)
+        # The key thing is the parameter is accepted and works without error
+        assert "component_assignments" in result
+        # If probabilities were computed, check shape
+        proba = result.get("component_probabilities")
+        if proba is not None:
+            n_stable = result["n_components_stable"]
+            assert proba.shape == (400, n_stable)
+
+    def test_component_regression(self, gmm_adata):
+        """Per-component regression runs on GMM-decomposed data."""
+        import peach as pc
+
+        # First run GMM decomposition
+        pc.tl.feature_simplex_decomposition(
+            gmm_adata, n_initializations=3, n_components_range=(2, 4),
+        )
+        # Now run component regression
+        reg_result = pc.tl.component_regression(
+            gmm_adata, n_bootstrap=10, robust_se=False,
+        )
+        assert "component_regs" in reg_result
+        assert "n_components" in reg_result
+        assert reg_result["n_components"] >= 2
+        # Each component with enough cells should have a regression result
+        assert len(reg_result["component_regs"]) > 0
+        for c, reg in reg_result["component_regs"].items():
+            assert isinstance(reg, dict)
+            # SimplexRegressionResult serialized dict has these keys
+            assert "vertex_coefficients" in reg
+            assert "r_squared_degree1" in reg
+            assert "feature_names" in reg
+
+    def test_component_regression_requires_gmm(self, gmm_adata):
+        """component_regression raises if GMM not run first."""
+        import peach as pc
+
+        with pytest.raises(ValueError, match="feature_simplex_decomposition"):
+            pc.tl.component_regression(gmm_adata)

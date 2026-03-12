@@ -115,6 +115,7 @@ def archetype_feature_similarity(
         silhouette_overall=sim["silhouette_overall"],
         spearman_matrix=sim["spearman_matrix"],
         spearman_pvalue_matrix=sim["spearman_pvalue_matrix"],
+        spearman_pvalue_fdr_matrix=sim.get("spearman_pvalue_fdr_matrix"),
         n_shared_features=sim["n_shared_features"],
         is_between_fit=is_between,
         archetype_names_a=arch_names_a,

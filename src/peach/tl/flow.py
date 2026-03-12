@@ -195,6 +195,8 @@ def flow_gene_alignment(
     t: float = 0.5,
     n_top: int = 50,
     pca_loadings_key: str | None = None,
+    n_permutations: int = 0,
+    random_state: int = 42,
 ) -> dict:
     """Compute gene alignment with flow velocity.
 
@@ -234,13 +236,35 @@ def flow_gene_alignment(
     top_opposed = [gene_names[i] for i in sorted_idx[:n_top]]
     top_aligned = [gene_names[i] for i in sorted_idx[-n_top:][::-1]]
 
-    return {
+    result = {
         "alignment_scores": alignment_scores,
         "gene_names": gene_names,
         "top_aligned": top_aligned,
         "top_opposed": top_opposed,
         "t": t,
     }
+
+    if n_permutations > 0:
+        rng = np.random.default_rng(random_state)
+        null_scores = np.zeros((n_permutations, len(alignment_scores)))
+        for i in range(n_permutations):
+            perm_loadings = loadings_trimmed[rng.permutation(len(loadings_trimmed))]
+            null_scores[i] = perm_loadings @ mean_velocity
+
+        pvalues = np.array([
+            (np.sum(np.abs(null_scores[:, g]) >= np.abs(alignment_scores[g])) + 1)
+            / (n_permutations + 1)
+            for g in range(len(alignment_scores))
+        ])
+        from statsmodels.stats.multitest import multipletests
+        _, pvalues_fdr, _, _ = multipletests(pvalues, method="fdr_bh")
+
+        result["alignment_pvalues"] = pvalues
+        result["alignment_pvalues_fdr"] = pvalues_fdr
+        result["null_mean"] = null_scores.mean(axis=0)
+        result["null_std"] = null_scores.std(axis=0)
+
+    return result
 
 
 def flow_jacobian(

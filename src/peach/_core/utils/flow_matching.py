@@ -167,6 +167,17 @@ class FlowModel:
         source_t = torch.tensor(source, dtype=torch.float32, device=self.device)
         target_t = torch.tensor(target, dtype=torch.float32, device=self.device)
 
+        ratio = max(len(source_t), len(target_t)) / min(len(source_t), len(target_t))
+        if ratio > 5:
+            import warnings
+            warnings.warn(
+                f"Source/target size imbalance: {len(source_t)} vs {len(target_t)} "
+                f"(ratio {ratio:.1f}x). The smaller population will be heavily "
+                f"resampled during training, which may degrade flow quality. "
+                f"Consider subsampling the larger population.",
+                UserWarning,
+            )
+
         self.velocity_net.train()
         self._losses = []
 
@@ -280,43 +291,49 @@ class FlowModel:
         return v.detach().cpu().numpy()
 
     def jacobian(self, x, t):
-        """Compute Jacobian of velocity field dv/dx at each point.
+        """Compute Jacobian of velocity field dv/dx using vectorized autograd.
 
-        Uses ``torch.autograd`` to compute per-output-dimension gradients.
-        This is O(n_points * dim) backward passes, so it will be slow for
-        large datasets -- subsample first.
+        Uses torch.func.jacrev + vmap with functional_call for efficient
+        batched Jacobian computation. NO torch.no_grad() — autograd must
+        be active for jacrev.
 
         Parameters
         ----------
         x : np.ndarray
-            Points to evaluate at, shape ``[n_points, dim]``.
+            Points to evaluate at, shape [n_points, dim].
         t : float
             Time in [0, 1].
 
         Returns
         -------
         np.ndarray
-            Jacobian matrices, shape ``[n_points, dim, dim]``.
-            Entry ``[i, j, k]`` is ``dv_j/dx_k`` at point i.
+            Jacobian matrices, shape [n_points, dim, dim].
+            Entry [i, j, k] is dv_j/dx_k at point i.
         """
+        from torch.func import jacrev, vmap, functional_call
+
         self.velocity_net.eval()
         x_t = torch.tensor(x, dtype=torch.float32, device=self.device)
-        t_scalar = t
+        t_scalar = torch.tensor(t, dtype=torch.float32, device=self.device)
 
-        jacobians = []
-        for i in range(len(x_t)):
-            xi = x_t[i:i+1].clone().detach().requires_grad_(True)
-            ti = torch.full((1, 1), t_scalar, device=self.device)
-            v = self.velocity_net(xi, ti)  # [1, dim]
-            jac = torch.zeros(self.dim, self.dim, device=self.device)
-            for d in range(self.dim):
-                if xi.grad is not None:
-                    xi.grad.zero_()
-                v[0, d].backward(retain_graph=True)
-                jac[d] = xi.grad[0]
-            jacobians.append(jac.detach().cpu().numpy())
+        # Extract parameters for functional_call (makes Module stateless for vmap)
+        params = dict(self.velocity_net.named_parameters())
+        buffers = dict(self.velocity_net.named_buffers())
 
-        return np.stack(jacobians, axis=0)
+        def vel_fn(params_dict, x_single):
+            """Evaluate velocity for a single point (stateless)."""
+            # x_single: [dim] -> need [1, dim] for VelocityNetwork.forward
+            x_2d = x_single.unsqueeze(0)
+            t_2d = t_scalar.reshape(1, 1)
+            out = functional_call(self.velocity_net, (params_dict, buffers), (x_2d, t_2d))
+            return out.squeeze(0)  # [dim]
+
+        # jacrev differentiates vel_fn w.r.t. x_single (argnums=1)
+        # vmap batches over x dimension (params shared via in_dims=(None, 0))
+        batched_jac = vmap(jacrev(vel_fn, argnums=1), in_dims=(None, 0))
+        jacs = batched_jac(params, x_t)  # [n_points, dim, dim]
+
+        return jacs.detach().cpu().numpy()
 
 
 def compute_mmd(X, Y, bandwidth=None, max_samples=5000):

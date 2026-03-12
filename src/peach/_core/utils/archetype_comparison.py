@@ -8,6 +8,30 @@ from anndata import AnnData
 from .feature_utils import get_archetype_weights, resolve_regression_result
 
 
+def _get_assignments_and_k(adata, weights):
+    """Get integer assignments and K from stored labels or argmax fallback.
+
+    Uses stored labels only when their count matches the weight matrix
+    dimension. Otherwise falls back to argmax to avoid shape mismatches
+    (e.g., when central archetype inflates the label count beyond K).
+
+    Returns (assign, K) where assign is 0-indexed integer array and K is
+    the number of groups.
+    """
+    K_weights = weights.shape[1]
+    if "archetypes" in adata.obs.columns:
+        raw_labels = adata.obs["archetypes"].astype(str).values
+        unique_labels = sorted(set(raw_labels) - {"no_archetype", "nan"})
+        if len(unique_labels) == K_weights:
+            label_to_idx = {l: i for i, l in enumerate(unique_labels)}
+            assign = np.array([label_to_idx.get(str(l), -1) for l in raw_labels])
+            return assign, K_weights
+
+    # Fallback: argmax of weights (always consistent with weight matrix)
+    assign = np.argmax(weights, axis=1)
+    return assign, K_weights
+
+
 def compute_archetype_mmd(
     adata: AnnData,
     adata_b: AnnData | None = None,
@@ -42,19 +66,19 @@ def compute_archetype_mmd(
     rng = np.random.default_rng(seed)
     weights_a = get_archetype_weights(adata)
     pca_a = adata.obsm[pca_key]
-    K_a = weights_a.shape[1]
 
     if adata_b is not None:
         weights_b = get_archetype_weights(adata_b)
         pca_b = adata_b.obsm[pca_key]
-        K_b = weights_b.shape[1]
     else:
         weights_b = weights_a
         pca_b = pca_a
-        K_b = K_a
 
-    assign_a = np.argmax(weights_a, axis=1)
-    assign_b = np.argmax(weights_b, axis=1)
+    assign_a, K_a = _get_assignments_and_k(adata, weights_a)
+    if adata_b is not None:
+        assign_b, K_b = _get_assignments_and_k(adata_b, weights_b)
+    else:
+        assign_b, K_b = assign_a, K_a
 
     mmd_matrix = np.zeros((K_a, K_b))
     pvalue_matrix = np.ones((K_a, K_b))
@@ -157,9 +181,15 @@ def compute_feature_similarity(
             spearman_matrix[i, j] = rho
             spearman_pvalue_matrix[i, j] = pval
 
+    # Global FDR correction across all K_a x K_b Spearman tests
+    from statsmodels.stats.multitest import multipletests as _mt_spearman
+    all_spearman_pvals = spearman_pvalue_matrix.ravel()
+    _, spearman_fdr_flat, _, _ = _mt_spearman(all_spearman_pvals, method="fdr_bh")
+    spearman_pvalue_fdr_matrix = spearman_fdr_flat.reshape(spearman_pvalue_matrix.shape)
+
     # Silhouette on PCA space
     weights_a = get_archetype_weights(adata)
-    labels = np.argmax(weights_a, axis=1)
+    labels, _ = _get_assignments_and_k(adata, weights_a)
     pca = adata.obsm[pca_key]
 
     n = len(labels)
@@ -189,6 +219,7 @@ def compute_feature_similarity(
         "silhouette_overall": sil_overall,
         "spearman_matrix": spearman_matrix,
         "spearman_pvalue_matrix": spearman_pvalue_matrix,
+        "spearman_pvalue_fdr_matrix": spearman_pvalue_fdr_matrix,
         "n_shared_features": n_shared,
     }
 
@@ -237,6 +268,10 @@ def compute_wald_contrasts(
     pvalues = {}
     pvalues_fdr = {}
 
+    # First pass: compute per-pair statistics, collect raw p-values
+    all_pvals = []
+    pair_slices = {}
+    offset = 0
     for j, k in pairs:
         contrast = np.zeros(K)
         contrast[j] = 1.0
@@ -250,13 +285,27 @@ def compute_wald_contrasts(
 
         z = np.where(d_se > 0, d_beta / d_se, 0.0)
         pval = 2 * stats.norm.sf(np.abs(z))
-        _, pval_fdr, _, _ = multipletests(pval, method="fdr_bh")
 
         delta_beta[(j, k)] = d_beta
         delta_se[(j, k)] = d_se
         z_scores[(j, k)] = z
         pvalues[(j, k)] = pval
-        pvalues_fdr[(j, k)] = pval_fdr
+
+        all_pvals.append(pval)
+        pair_slices[(j, k)] = slice(offset, offset + n_features)
+        offset += n_features
+
+    # Global FDR correction across ALL pairs (not per-pair)
+    all_pvals_flat = np.concatenate(all_pvals)
+    # Filter out trivial tests (SE=0 → p=1) to avoid diluting FDR
+    testable = all_pvals_flat < 1.0
+    all_fdr = np.ones_like(all_pvals_flat)
+    if testable.any():
+        _, fdr_vals, _, _ = multipletests(all_pvals_flat[testable], method="fdr_bh")
+        all_fdr[testable] = fdr_vals
+
+    for j, k in pairs:
+        pvalues_fdr[(j, k)] = all_fdr[pair_slices[(j, k)]]
 
     return {
         "pairs": pairs,

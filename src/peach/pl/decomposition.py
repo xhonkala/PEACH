@@ -217,6 +217,93 @@ def component_heatmap(
     return save_and_show(fig, save_path=save_path, show=show)
 
 
+def component_archetype_summary(
+    adata: AnnData,
+    *,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """2x2 panel: component sizes, weight profiles, archetype distances, entropy.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have GMM results in ``uns['peach_gmm']`` and archetype weights
+        in ``obsm['cell_archetype_weights']``.
+    save_path : str or None
+    show : bool
+
+    Returns
+    -------
+    go.Figure
+    """
+    from plotly.subplots import make_subplots
+    from scipy.stats import entropy as sp_entropy
+
+    gmm = _get_gmm_data(adata)
+    assignments = np.asarray(gmm["component_assignments"])
+    n_stable = int(gmm["n_components_stable"])
+    simplex_means = np.asarray(gmm["component_simplex_means"])  # [n_comp, K]
+
+    weights = adata.obsm.get("cell_archetype_weights")
+    if weights is None:
+        raise ValueError("No archetype weights in adata.obsm.")
+    weights = np.asarray(weights)
+    K = weights.shape[1]
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=["Component sizes", "Weight profiles",
+                        "Archetype proximity", "Weight entropy"],
+        horizontal_spacing=0.12, vertical_spacing=0.14,
+    )
+
+    comp_labels = [f"C{i}" for i in range(n_stable)]
+    arch_labels = [f"A{k}" for k in range(K)]
+
+    # Panel 1: Component sizes (bar)
+    sizes = [int(np.sum(assignments == c)) for c in range(n_stable)]
+    colors_1 = [CATEGORICAL_PALETTE[i % len(CATEGORICAL_PALETTE)] for i in range(n_stable)]
+    fig.add_trace(go.Bar(x=comp_labels, y=sizes, marker_color=colors_1,
+                         showlegend=False), row=1, col=1)
+
+    # Panel 2: Weight profiles (heatmap of simplex means)
+    fig.add_trace(go.Heatmap(
+        z=simplex_means[:n_stable],
+        x=arch_labels, y=comp_labels,
+        colorscale=SEQUENTIAL_COLORSCALE,
+        showscale=False,
+    ), row=1, col=2)
+
+    # Panel 3: Mean distance to nearest archetype per component
+    max_w = weights.max(axis=1)  # proximity = max weight
+    mean_prox = [float(max_w[assignments == c].mean()) if np.any(assignments == c) else 0
+                 for c in range(n_stable)]
+    fig.add_trace(go.Bar(x=comp_labels, y=mean_prox, marker_color=colors_1,
+                         showlegend=False), row=2, col=1)
+
+    # Panel 4: Weight entropy distribution per component (box)
+    eps = 1e-10
+    cell_entropy = sp_entropy(weights + eps, axis=1)
+    for c in range(n_stable):
+        mask = assignments == c
+        if not np.any(mask):
+            continue
+        fig.add_trace(go.Box(
+            y=cell_entropy[mask], name=f"C{c}",
+            marker_color=CATEGORICAL_PALETTE[c % len(CATEGORICAL_PALETTE)],
+            showlegend=False, boxmean=True,
+        ), row=2, col=2)
+
+    apply_style(fig, title="GMM Component Summary")
+    fig.update_layout(height=600, width=800)
+    fig.update_yaxes(title_text="Cells", row=1, col=1)
+    fig.update_yaxes(title_text="Max weight", row=2, col=1)
+    fig.update_yaxes(title_text="Entropy", row=2, col=2)
+
+    return save_and_show(fig, save_path=save_path, show=show)
+
+
 def component_stability(
     adata: AnnData,
     *,

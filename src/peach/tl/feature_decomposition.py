@@ -22,6 +22,7 @@ def feature_simplex_decomposition(
     covariance_type: str = "full",
     n_initializations: int = 20,
     stability_threshold: float = 0.7,
+    reassignment_confidence: float = 0.0,
     characterize_features: bool = True,
     ilr_epsilon: float = 1e-3,
     random_state: int = 42,
@@ -55,6 +56,10 @@ def feature_simplex_decomposition(
     stability_threshold : float
         Minimum stability score to retain a component (fraction of runs where
         component is recovered).
+    reassignment_confidence : float
+        Minimum posterior probability required to reassign an unstable cell
+        to a stable component. Default 0.0 means all unstable cells are
+        reassigned (backward compatible).
     characterize_features : bool
         If True, compute per-component mean feature profiles.
     random_state : int
@@ -81,6 +86,7 @@ def feature_simplex_decomposition(
         stability_threshold=stability_threshold,
         random_state=random_state,
         ilr_epsilon=ilr_epsilon,
+        reassignment_confidence=reassignment_confidence,
     )
 
     # Component characterization
@@ -102,6 +108,7 @@ def feature_simplex_decomposition(
         component_stability_scores=gmm_result["component_stability_scores"],
         component_feature_profiles=feature_profiles,
         component_weight_means=gmm_result.get("component_weight_means"),
+        component_probabilities=gmm_result.get("component_probabilities"),
         bic_values=gmm_result["bic_values"],
         n_components_tested=gmm_result["n_components_tested"],
     )
@@ -114,3 +121,60 @@ def feature_simplex_decomposition(
     store_result(adata, "gmm_labels", gmm_result["component_assignments"], domain="obsm")
 
     return serialized
+
+
+def component_regression(
+    adata: AnnData,
+    *,
+    feature_type: str = "genes",
+    n_bootstrap: int = 100,
+    robust_se: bool = True,
+) -> dict:
+    """Run simplex regression separately per GMM component.
+
+    Fits an independent simplex regression within each stable GMM component,
+    enabling detection of component-specific feature drivers that may be
+    masked in the global regression.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have archetype weights in obsm['cell_archetype_weights'] and
+        GMM results in uns['peach_gmm'] (from feature_simplex_decomposition).
+    feature_type : str
+        'genes' uses adata.X, or name of an obsm key for other feature types.
+    n_bootstrap : int
+        Number of bootstrap replicates for confidence intervals.
+    robust_se : bool
+        If True, use HC3 heteroscedasticity-consistent standard errors.
+
+    Returns
+    -------
+    dict with keys:
+        component_regs : dict[int, dict]
+            Per-component simplex regression results. Keys are component
+            indices (0..n_stable-1), values are regression result dicts.
+        n_components : int
+            Number of stable GMM components.
+    """
+    from peach.tl.feature_regression import feature_simplex_regression
+
+    gmm = adata.uns.get("peach_gmm")
+    if gmm is None:
+        raise ValueError("Run pc.tl.feature_simplex_decomposition() first.")
+
+    assignments = np.asarray(gmm["component_assignments"])
+    n_stable = gmm["n_components_stable"]
+
+    component_regs = {}
+    for c in range(n_stable):
+        mask = assignments == c
+        if mask.sum() < 20:
+            continue
+        adata_sub = adata[mask].copy()
+        reg = feature_simplex_regression(
+            adata_sub, n_bootstrap=n_bootstrap, robust_se=robust_se,
+        )
+        component_regs[c] = reg
+
+    return {"component_regs": component_regs, "n_components": n_stable}

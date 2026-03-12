@@ -1171,7 +1171,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         ],
         returns="dict (serialized SimplexRegressionResult)",
         returns_description="vertex_coefficients [n_features, K], r_squared_degree1, f_pvalue, vertex_pvalues, "
-        "interaction_coefficients (optional), CIs (optional)",
+        "interaction_coefficients (optional), CIs (optional), effective_rank, expected_rank, extra_rank_deficient",
         requires=["cell_archetype_weights in adata.obsm"],
         modifies_adata=[
             "uns['peach_simplex_regression']",
@@ -1227,7 +1227,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         ],
         returns="dict (serialized DriverRegressionResult)",
         returns_description="main_coefficients_ilr [K-1, n_features], main_coefficients [K, n_features], "
-        "main_pvalues, r_squared [K-1]",
+        "main_pvalues, main_pvalues_fdr [K, n_features], r_squared [K-1]",
         requires=["cell_archetype_weights in adata.obsm"],
         modifies_adata=["uns['peach_driver_regression']"],
     ),
@@ -1257,12 +1257,18 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter("stability_threshold", ParamType.FLOAT, "Min stability score to retain", default=0.7),
             Parameter("ilr_epsilon", ParamType.FLOAT, "ILR zero smoothing constant", default=0.001),
             Parameter("characterize_features", ParamType.BOOLEAN, "Compute per-component feature profiles", default=True),
+            Parameter(
+                "reassignment_confidence",
+                ParamType.FLOAT,
+                "Min posterior probability to reassign unstable cells. 0.0 = always reassign, 1.0 = never",
+                default=0.0,
+            ),
             Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
             Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
         ],
         returns="dict",
         returns_description="n_components_optimal, n_components_stable, component_assignments, "
-        "component_simplex_means, bic_values",
+        "component_simplex_means, component_probabilities, bic_values",
         requires=["cell_archetype_weights in adata.obsm"],
         modifies_adata=["uns['peach_gmm']", "obsm['peach_gmm_labels']"],
     ),
@@ -1312,6 +1318,107 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         returns_description="Per-archetype summary with top_enriched, top_depleted, interactions, pattern_counts, "
         "driver_genesets (optional), gmm_components (optional)",
         requires=["peach_simplex_regression in adata.uns"],
+        modifies_adata=[],
+    ),
+    "tl.archetype_mmd": ToolSchema(
+        name="tl.archetype_mmd",
+        description="K x K MMD similarity matrix between archetype cell populations. "
+        "Uses hard assignments (argmax of weights) and permutation-based p-values.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
+            Parameter(
+                "adata_b_key",
+                ParamType.ADATA_REF,
+                "Second AnnData for between-fit comparison. None for within-fit.",
+                required=False,
+                default=None,
+            ),
+            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
+            Parameter("n_permutations", ParamType.INTEGER, "Permutations for p-value computation", default=1000),
+            Parameter("seed", ParamType.INTEGER, "Random seed", default=42),
+            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
+        ],
+        returns="dict (serialized ArchetypeMMDResult)",
+        returns_description="mmd_matrix [K, K], pvalue_matrix [K, K], n_permutations, is_between_fit, "
+        "archetype_names_a, archetype_names_b",
+        requires=["cell_archetype_weights in adata.obsm", "X_pca in adata.obsm"],
+        modifies_adata=["uns['peach_archetype_mmd']"],
+    ),
+    "tl.archetype_feature_similarity": ToolSchema(
+        name="tl.archetype_feature_similarity",
+        description="Feature-level archetype similarity: silhouette scores + Spearman correlation "
+        "on regression coefficient vectors. Requires simplex regression results.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
+            Parameter(
+                "adata_b_key",
+                ParamType.ADATA_REF,
+                "Second AnnData for between-fit Spearman on shared features",
+                required=False,
+                default=None,
+            ),
+            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
+            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
+        ],
+        returns="dict (serialized ArchetypeFeatureSimilarityResult)",
+        returns_description="silhouette_per_archetype [K], silhouette_overall, spearman_matrix [K, K], "
+        "spearman_pvalue_matrix [K, K], spearman_pvalue_fdr_matrix [K, K], n_shared_features",
+        requires=["peach_simplex_regression in adata.uns", "cell_archetype_weights in adata.obsm"],
+        modifies_adata=["uns['peach_archetype_feature_similarity']"],
+    ),
+    "tl.archetype_contrasts": ToolSchema(
+        name="tl.archetype_contrasts",
+        description="Pairwise Wald contrasts between archetype regression coefficients. "
+        "Tests H0: beta_j = beta_k for every feature with global BH FDR correction.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights and regression results"),
+            Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 heteroscedasticity-consistent covariance", default=True),
+            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
+        ],
+        returns="dict (serialized ArchetypeContrastsResult)",
+        returns_description="pairs [(j,k)], delta_beta {pair: [n_features]}, delta_se, z_scores, "
+        "pvalues, pvalues_fdr (global BH), feature_names, n_features, n_archetypes",
+        requires=["cell_archetype_weights in adata.obsm", "peach_simplex_regression in adata.uns"],
+        modifies_adata=["uns['peach_archetype_contrasts']"],
+    ),
+    "tl.component_regression": ToolSchema(
+        name="tl.component_regression",
+        description="Run simplex regression independently per GMM component. "
+        "Detects component-specific feature drivers masked in the global regression.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights and GMM results"),
+            Parameter("feature_type", ParamType.STRING, "'genes' for adata.X, or obsm key", default="genes"),
+            Parameter("n_bootstrap", ParamType.INTEGER, "Bootstrap replicates for CIs", default=100),
+            Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 SEs", default=True),
+        ],
+        returns="dict",
+        returns_description="component_regs: dict[int, regression_result], n_components: int",
+        requires=["cell_archetype_weights in adata.obsm", "peach_gmm in adata.uns"],
+        modifies_adata=[],
+    ),
+    "tl.flow_gene_alignment": ToolSchema(
+        name="tl.flow_gene_alignment",
+        description="Compute gene alignment with flow velocity. Projects mean transport "
+        "direction onto PCA loadings to identify genes aligned/opposed to the flow.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA loadings"),
+            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
+            Parameter("t", ParamType.FLOAT, "Time point to evaluate velocity", default=0.5),
+            Parameter("n_top", ParamType.INTEGER, "Number of top aligned/opposed genes to report", default=50),
+            Parameter(
+                "pca_loadings_key",
+                ParamType.STRING,
+                "Key in adata.varm for PCA loadings",
+                required=False,
+                default=None,
+            ),
+            Parameter("n_permutations", ParamType.INTEGER, "Permutations for significance. 0 to skip", default=0),
+            Parameter("random_state", ParamType.INTEGER, "Random seed for permutations", default=42),
+        ],
+        returns="dict",
+        returns_description="alignment_scores [n_genes], gene_names, top_aligned, top_opposed, t, "
+        "alignment_pvalues (optional), alignment_pvalues_fdr (optional)",
+        requires=["PCs in adata.varm", "FlowWithinResult"],
         modifies_adata=[],
     ),
     # =========================================================================
@@ -1402,6 +1509,89 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         returns="go.Figure",
         returns_description="2D quiver plot with arrows from source to transported positions",
         requires=["X_pca in adata.obsm", "FlowWithinResult"],
+        modifies_adata=[],
+    ),
+    "pl.mmd_heatmap": ToolSchema(
+        name="pl.mmd_heatmap",
+        description="Heatmap of K x K MMD matrix between archetypes.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with MMD results"),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="Heatmap of MMD values between archetype populations",
+        requires=["peach_archetype_mmd in adata.uns"],
+        modifies_adata=[],
+    ),
+    "pl.contrast_volcano": ToolSchema(
+        name="pl.contrast_volcano",
+        description="Volcano plot for one archetype pair: delta-beta vs -log10(FDR q-value). "
+        "Includes 95% CI error bars from Wald SE.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with contrast results"),
+            Parameter("pair", ParamType.ARRAY, "Archetype pair (j, k) as [j, k]"),
+            Parameter("fdr_threshold", ParamType.FLOAT, "FDR threshold for significance coloring", default=0.05),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="Volcano plot with delta-beta on x-axis, -log10(q) on y-axis, error bars for 95% CI",
+        requires=["peach_archetype_contrasts in adata.uns"],
+        modifies_adata=[],
+    ),
+    "pl.contrast_volcano_grid": ToolSchema(
+        name="pl.contrast_volcano_grid",
+        description="Small-multiple grid of volcano plots for all pairwise Wald contrasts.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with contrast results"),
+            Parameter("fdr_threshold", ParamType.FLOAT, "FDR threshold for significance coloring", default=0.05),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="Grid of volcano subplots, one per archetype pair",
+        requires=["peach_archetype_contrasts in adata.uns"],
+        modifies_adata=[],
+    ),
+    "pl.feature_similarity_heatmap": ToolSchema(
+        name="pl.feature_similarity_heatmap",
+        description="Heatmap of Spearman correlation between archetype beta vectors.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with feature similarity results"),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="Diverging heatmap of Spearman rho between archetype coefficient vectors",
+        requires=["peach_archetype_feature_similarity in adata.uns"],
+        modifies_adata=[],
+    ),
+    "pl.archetype_regression_dotplot": ToolSchema(
+        name="pl.archetype_regression_dotplot",
+        description="Dotplot of top genes per archetype: dot size = |β|, dot color = -log10(p).",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
+            Parameter("top_n", ParamType.INTEGER, "Number of top features per archetype", default=10),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="Dotplot with genes (rows) x archetypes (cols), size=|β|, color=-log10(p)",
+        requires=["peach_simplex_regression in adata.uns"],
+        modifies_adata=[],
+    ),
+    "pl.component_archetype_summary": ToolSchema(
+        name="pl.component_archetype_summary",
+        description="2x2 panel: component sizes, weight profiles, archetype proximity, entropy.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with GMM results"),
+            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        ],
+        returns="go.Figure",
+        returns_description="2x2 subplot: bar sizes, weight heatmap, proximity bars, entropy boxes",
+        requires=["peach_gmm in adata.uns", "cell_archetype_weights in adata.obsm"],
         modifies_adata=[],
     ),
     # =========================================================================

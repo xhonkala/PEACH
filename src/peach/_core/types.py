@@ -3451,7 +3451,9 @@ class DriverRegressionResult(BaseModel):
 
     # Significance (in ILR space)
     main_pvalues: np.ndarray  # [K-1, n_features]
+    main_pvalues_fdr: np.ndarray | None = None  # [K-1, n_features] BH-corrected
     interaction_pvalues: np.ndarray | None = None
+    interaction_pvalues_fdr: np.ndarray | None = None  # BH-corrected
 
     # Bootstrap CIs (back-transformed)
     main_ci_lower: np.ndarray | None = None
@@ -3507,6 +3509,7 @@ class ArchetypeFeatureSimilarityResult(BaseModel):
     silhouette_overall: float
     spearman_matrix: np.ndarray            # [K, K] or [K_A, K_B]
     spearman_pvalue_matrix: np.ndarray     # [K, K] or [K_A, K_B]
+    spearman_pvalue_fdr_matrix: np.ndarray | None = None  # [K, K] BH-corrected
     n_shared_features: int
     is_between_fit: bool = False
     archetype_names_a: list[str]
@@ -3653,6 +3656,7 @@ class GMMResult(BaseModel):
     component_stability_scores: np.ndarray  # [n_stable]
     component_feature_profiles: np.ndarray | None = None  # [n_stable, n_features]
     component_weight_means: np.ndarray | None = None  # [n_stable, K] arithmetic mean of weights
+    component_probabilities: np.ndarray | None = None  # [n_cells, n_stable] posterior probs
     bic_values: np.ndarray  # [n_tested]
     n_components_tested: np.ndarray  # [n_tested]
 

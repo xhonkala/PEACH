@@ -292,6 +292,86 @@ def regression_volcano(
     return save_and_show(fig, save_path=save_path, show=show)
 
 
+def archetype_regression_dotplot(
+    adata: AnnData,
+    *,
+    top_n: int = 10,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """Dotplot of top genes per archetype from regression coefficients.
+
+    Rows: top genes per archetype (by |beta|, union across archetypes).
+    Columns: archetypes.
+    Dot size: |beta coefficient|.
+    Dot color: -log10(vertex p-value).
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have regression results in ``uns['peach_simplex_regression']``.
+    top_n : int
+        Number of top features per archetype to include.
+    save_path : str or None
+    show : bool
+
+    Returns
+    -------
+    go.Figure
+    """
+    reg = _get_regression_data(adata)
+    coefs = np.asarray(reg["vertex_coefficients"])  # [n_features, K]
+    names = list(reg["feature_names"])
+    pvals = np.asarray(reg.get("vertex_pvalues", np.ones_like(coefs)))
+
+    K = coefs.shape[1]
+
+    # Collect union of top_n genes per archetype (by |beta|)
+    selected = set()
+    for k in range(K):
+        top_idx = np.argsort(np.abs(coefs[:, k]))[-top_n:]
+        selected.update(top_idx)
+    selected = sorted(selected, key=lambda i: -np.max(np.abs(coefs[i])))
+
+    gene_labels = [names[i] for i in selected]
+    arch_labels = [f"A{k}" for k in range(K)]
+
+    # Build dot arrays
+    x_vals, y_vals, sizes, colors, hover = [], [], [], [], []
+    abs_coefs = np.abs(coefs[selected])
+    max_abs = abs_coefs.max() if abs_coefs.max() > 0 else 1.0
+
+    for gi, gene_idx in enumerate(selected):
+        for k in range(K):
+            x_vals.append(arch_labels[k])
+            y_vals.append(gene_labels[gi])
+            beta = coefs[gene_idx, k]
+            pval = max(pvals[gene_idx, k], 1e-300)
+            sizes.append(np.abs(beta) / max_abs * 20 + 2)
+            colors.append(-np.log10(pval))
+            hover.append(f"{names[gene_idx]}<br>β={beta:.3f}<br>p={pval:.2e}")
+
+    fig = go.Figure(data=go.Scatter(
+        x=x_vals,
+        y=y_vals,
+        mode="markers",
+        marker=dict(
+            size=sizes,
+            color=colors,
+            colorscale=SEQUENTIAL_COLORSCALE,
+            colorbar=dict(title="-log₁₀(p)", thickness=12, len=0.6),
+            line=dict(width=0.5, color="#999"),
+        ),
+        text=hover,
+        hovertemplate="%{text}<extra></extra>",
+    ))
+    n_genes = len(gene_labels)
+    apply_style(fig, title=f"Regression dotplot — top {top_n} per archetype",
+                height=max(400, n_genes * 18 + 80))
+
+    return save_and_show(fig, save_path=save_path, show=show)
+
+
 def pattern_summary(
     adata: AnnData,
     *,

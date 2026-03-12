@@ -568,6 +568,25 @@ def archetype_driver_regression(
             max_degree=1,  # CIs on main effects only
         )
 
+    # Global FDR across all ILR components and features
+    all_main_pvals = main_pvalues.ravel()
+    nonzero_mask = all_main_pvals > 0
+    main_pvalues_fdr = np.ones_like(all_main_pvals)
+    if nonzero_mask.any():
+        _, fdr_vals, _, _ = multipletests(all_main_pvals[nonzero_mask], method="fdr_bh")
+        main_pvalues_fdr[nonzero_mask] = fdr_vals
+    main_pvalues_fdr = main_pvalues_fdr.reshape(main_pvalues.shape)
+
+    interaction_pvalues_fdr = None
+    if interaction_pvalues is not None:
+        all_int_pvals = interaction_pvalues.ravel()
+        nonzero_int = all_int_pvals > 0
+        int_fdr = np.ones_like(all_int_pvals)
+        if nonzero_int.any():
+            _, fdr_vals, _, _ = multipletests(all_int_pvals[nonzero_int], method="fdr_bh")
+            int_fdr[nonzero_int] = fdr_vals
+        interaction_pvalues_fdr = int_fdr.reshape(interaction_pvalues.shape)
+
     result = DriverRegressionResult(
         feature_names=feat_names,
         n_cells=n_cells,
@@ -578,7 +597,9 @@ def archetype_driver_regression(
         main_coefficients=main_coefs_simplex,
         interaction_coefficients=interaction_coefs_simplex,
         main_pvalues=main_pvalues,
+        main_pvalues_fdr=main_pvalues_fdr,
         interaction_pvalues=interaction_pvalues,
+        interaction_pvalues_fdr=interaction_pvalues_fdr,
         main_ci_lower=main_ci_lower,
         main_ci_upper=main_ci_upper,
         r_squared=r_squared,

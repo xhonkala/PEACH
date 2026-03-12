@@ -52,7 +52,7 @@ from .feature_regression import (
 from .feature_patterns import archetype_summary, classify_feature_patterns
 
 # v0.5.0: Simplex density decomposition
-from .feature_decomposition import feature_simplex_decomposition
+from .feature_decomposition import feature_simplex_decomposition, component_regression
 
 # v0.5.0: Flow matching
 from .flow import (
@@ -108,6 +108,7 @@ __all__ = [
     "archetype_summary",
     # v0.5.0: Simplex density decomposition
     "feature_simplex_decomposition",
+    "component_regression",
     # v0.5.0: Flow matching
     "flow_within",
     "flow_between",

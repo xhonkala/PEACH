@@ -592,17 +592,18 @@ for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
     pc.pl.mmd_heatmap(ad_obj, show=False,
                       save_path=os.path.join(OUT_DIR, f"mmd_{name}.png"))
 
-    # Feature similarity
+    # Feature similarity (now includes FDR-corrected Spearman)
     sim = pc.tl.archetype_feature_similarity(ad_obj)
     print(f"  {name} silhouette: {sim['silhouette_overall']:.3f}")
+    assert "spearman_pvalue_fdr_matrix" in sim, "Missing Spearman FDR"
     pc.pl.feature_similarity_heatmap(
         ad_obj, show=False,
         save_path=os.path.join(OUT_DIR, f"feat_sim_{name}.png"))
 
-    # Wald contrast volcano (first pair)
-    pc.pl.contrast_volcano(
-        ad_obj, pair=(0, 1), show=False,
-        save_path=os.path.join(OUT_DIR, f"volcano_{name}_0v1.png"))
+    # Wald contrast volcano grid (all pairs, small multiples)
+    pc.pl.contrast_volcano_grid(
+        ad_obj, show=False,
+        save_path=os.path.join(OUT_DIR, f"volcano_grid_{name}.png"))
 
 # Between-fit
 mmd_between = pc.tl.archetype_mmd(adata_cmp, adata_mono, n_permutations=100)
@@ -1023,11 +1024,17 @@ adata_for_alignment.obsm["X_pca"] = adata_combined.obsm["X_pca"]
 if pca_loadings is not None:
     adata_for_alignment.varm["PCs"] = pca_loadings
 
-alignment = pc.tl.flow_gene_alignment(adata_for_alignment, flow_result, n_top=50)
+alignment = pc.tl.flow_gene_alignment(
+    adata_for_alignment, flow_result, n_top=50,
+    n_permutations=50, random_state=42,
+)
 scores_align = alignment["alignment_scores"]
 
 print(f"  Genes scored: {len(scores_align)}")
 print(f"  Score range: [{scores_align.min():.4f}, {scores_align.max():.4f}]")
+if "alignment_pvalues_fdr" in alignment:
+    n_sig = np.sum(np.asarray(alignment["alignment_pvalues_fdr"]) < 0.05)
+    print(f"  Significant genes (FDR < 0.05): {n_sig}/{len(scores_align)}")
 
 print(f"\n  TOP 10 FLOW-ALIGNED:")
 for gene in alignment["top_aligned"][:10]:

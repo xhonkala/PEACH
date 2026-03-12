@@ -125,6 +125,21 @@ class TestArchetypeFeatureSimilarity:
         assert -1.0 <= result["silhouette_overall"] <= 1.0
 
 
+    def test_spearman_fdr_present(self, comparison_adata):
+        """Spearman p-values should include FDR-corrected version."""
+        from peach._core.utils.archetype_comparison import compute_feature_similarity
+        import peach as pc
+        pc.tl.feature_simplex_regression(comparison_adata, n_bootstrap=0)
+        result = compute_feature_similarity(comparison_adata)
+        assert "spearman_pvalue_fdr_matrix" in result
+        K = 4
+        assert result["spearman_pvalue_fdr_matrix"].shape == (K, K)
+        # FDR should be >= raw for all entries
+        assert np.all(
+            result["spearman_pvalue_fdr_matrix"] >= result["spearman_pvalue_matrix"] - 1e-10
+        )
+
+
 class TestArchetypeContrasts:
     def test_all_pairs(self, comparison_adata):
         from peach._core.utils.archetype_comparison import compute_wald_contrasts
@@ -146,6 +161,30 @@ class TestArchetypeContrasts:
         sig_01 = np.sum(result["pvalues_fdr"][(0, 1)] < 0.05)
         sig_02 = np.sum(result["pvalues_fdr"][(0, 2)] < 0.05)
         assert sig_01 < sig_02
+
+
+    def test_wald_fdr_is_global_not_per_pair(self, comparison_adata):
+        """FDR correction across ALL pairs should differ from per-pair FDR."""
+        from peach._core.utils.archetype_comparison import compute_wald_contrasts
+        from statsmodels.stats.multitest import multipletests as mt
+        import peach as pc
+        pc.tl.feature_simplex_regression(comparison_adata, n_bootstrap=0)
+        result = compute_wald_contrasts(comparison_adata)
+
+        # Compute what per-pair FDR would give (the old buggy behavior)
+        per_pair_fdr = {}
+        for pair in result["pairs"]:
+            raw = result["pvalues"][pair]
+            _, fdr_pp, _, _ = mt(raw, method="fdr_bh")
+            per_pair_fdr[pair] = fdr_pp
+
+        # Global FDR should differ from per-pair for at least one non-trivial pair
+        any_differ = False
+        for pair in result["pairs"]:
+            if not np.allclose(result["pvalues"][pair], 1.0):
+                if not np.allclose(result["pvalues_fdr"][pair], per_pair_fdr[pair], atol=1e-10):
+                    any_differ = True
+        assert any_differ, "Global FDR appears identical to per-pair FDR"
 
 
 class TestPublicAPI:

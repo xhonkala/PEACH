@@ -151,6 +151,35 @@ class TestPathwaySimplexRegression:
         assert len(result["r_squared_degree1"]) == n_pathways
 
 
+class TestRankInfo:
+    def test_ols_fit_returns_rank_info(self):
+        """ols_fit should report effective rank and expected rank."""
+        from peach._core.utils.simplex_regression import ols_fit, scheffe_design_matrix
+        rng = np.random.default_rng(42)
+        # Normal simplex data: Scheffe (no intercept) has full rank K
+        W = rng.dirichlet([1, 1, 1, 1], size=200)
+        X, _ = scheffe_design_matrix(W, degree=1)
+        Y = rng.standard_normal((200, 10))
+        result = ols_fit(X, Y, robust_se=True)
+        assert "effective_rank" in result
+        assert result["effective_rank"] == 4  # full rank K
+        assert "expected_rank" in result
+        assert result["expected_rank"] == 4
+        assert result["extra_rank_deficient"] is False
+
+    def test_ols_fit_detects_extra_deficiency(self):
+        """When columns are collinear beyond sum-to-1, flag extra deficiency."""
+        from peach._core.utils.simplex_regression import ols_fit
+        rng = np.random.default_rng(42)
+        W = rng.dirichlet([1, 1, 1], size=200)
+        # Add a column that's a linear combo of existing columns
+        W_degen = np.column_stack([W, W[:, 0] + W[:, 1]])
+        Y = rng.standard_normal((200, 10))
+        result = ols_fit(W_degen, Y, robust_se=True)
+        assert result["extra_rank_deficient"] is True
+        assert result["effective_rank"] < W_degen.shape[1]
+
+
 class TestK2EdgeCase:
     def test_k2_regression(self):
         """Simplex regression works with K=2 archetypes."""

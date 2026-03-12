@@ -89,6 +89,16 @@ def contrast_volcano(
     neg_log_p = -np.log10(np.maximum(pvals, 1e-300))
     colors = [COLOR_NEGATIVE if p < fdr_threshold else COLOR_PRIMARY for p in pvals]
 
+    # Error bars from delta_se (95% CI) if available
+    se = np.asarray(contrast_data["delta_se"][pair_key]) if "delta_se" in contrast_data else None
+    error_x_kwargs = {}
+    if se is not None:
+        error_x_kwargs = dict(
+            error_x=dict(type="data", array=1.96 * se, visible=True,
+                         width=0, thickness=0.5, color="rgba(0,0,0,0.15)"),
+            customdata=se,
+        )
+
     fig = go.Figure(data=go.Scatter(
         x=delta,
         y=neg_log_p,
@@ -96,6 +106,7 @@ def contrast_volcano(
         text=names,
         hovertemplate="%{text}<br>\u0394\u03b2=%{x:.3f}<br>-log10(q)=%{y:.1f}<extra></extra>",
         marker=dict(size=5, opacity=0.6, color=colors),
+        **error_x_kwargs,
     ))
 
     fig.add_hline(y=-np.log10(fdr_threshold), line_dash="dot",
@@ -105,6 +116,76 @@ def contrast_volcano(
     apply_style(fig, title=f"Contrast: A{j} vs A{k}",
                 xaxis_title=f"\u03b2_{j} \u2212 \u03b2_{k}",
                 yaxis_title="-log\u2081\u2080(FDR q)")
+    return save_and_show(fig, save_path=save_path, show=show)
+
+
+def contrast_volcano_grid(
+    adata: AnnData,
+    *,
+    fdr_threshold: float = 0.05,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """Small-multiple grid of volcano plots for all pairwise Wald contrasts.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must have contrast results in uns['peach_archetype_contrasts'].
+    fdr_threshold : float
+    save_path : str or None
+    show : bool
+
+    Returns
+    -------
+    go.Figure
+    """
+    from plotly.subplots import make_subplots
+    import math
+
+    contrast_data = adata.uns.get("peach_archetype_contrasts")
+    if contrast_data is None:
+        raise ValueError("No contrast results. Run pc.tl.archetype_contrasts() first.")
+
+    pairs = [tuple(p) if isinstance(p, list) else p for p in contrast_data["pairs"]]
+    n_pairs = len(pairs)
+    n_cols = min(3, n_pairs)
+    n_rows = math.ceil(n_pairs / n_cols)
+
+    fig = make_subplots(
+        rows=n_rows, cols=n_cols,
+        subplot_titles=[f"A{j} vs A{k}" for j, k in pairs],
+        shared_xaxes=True, shared_yaxes=True,
+        horizontal_spacing=0.04, vertical_spacing=0.08,
+    )
+
+    names = list(contrast_data["feature_names"])
+
+    for idx, pair in enumerate(pairs):
+        row = idx // n_cols + 1
+        col = idx % n_cols + 1
+        pair_key = str(pair) if str(pair) in contrast_data["delta_beta"] else str(tuple(pair))
+
+        delta = np.asarray(contrast_data["delta_beta"][pair_key])
+        pvals = np.asarray(contrast_data["pvalues_fdr"][pair_key])
+        neg_log_p = -np.log10(np.maximum(pvals, 1e-300))
+        colors = [COLOR_NEGATIVE if p < fdr_threshold else COLOR_PRIMARY for p in pvals]
+
+        fig.add_trace(
+            go.Scatter(
+                x=delta, y=neg_log_p,
+                mode="markers", text=names,
+                marker=dict(size=4, opacity=0.5, color=colors),
+                showlegend=False,
+                hovertemplate="%{text}<br>Δβ=%{x:.3f}<br>-log10(q)=%{y:.1f}<extra></extra>",
+            ),
+            row=row, col=col,
+        )
+        fig.add_hline(y=-np.log10(fdr_threshold), line_dash="dot",
+                      line_color="#999", line_width=0.5, row=row, col=col)
+
+    apply_style(fig, title="Pairwise Wald Contrasts")
+    fig.update_layout(height=250 * n_rows, width=300 * n_cols)
     return save_and_show(fig, save_path=save_path, show=show)
 
 

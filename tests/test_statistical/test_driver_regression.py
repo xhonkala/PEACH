@@ -188,6 +188,34 @@ class TestArchetypeDriverRegression:
         # Lower should be <= upper
         assert np.all(np.asarray(result["main_ci_lower"]) <= np.asarray(result["main_ci_upper"]))
 
+    def test_fdr_correction_present(self, driver_adata):
+        """Driver regression must return FDR-corrected p-values."""
+        import peach as pc
+
+        result = pc.tl.archetype_driver_regression(
+            driver_adata, feature_matrix="pathway_scores", n_bootstrap=0
+        )
+        assert "main_pvalues_fdr" in result
+        main_fdr = np.asarray(result["main_pvalues_fdr"])
+        main_raw = np.asarray(result["main_pvalues"])
+        assert main_fdr.shape == main_raw.shape
+        # FDR should be >= raw p-values (BH correction is more conservative)
+        assert np.all(main_fdr >= main_raw - 1e-10)
+        # FDR should differ from raw for non-trivial p-values
+        assert not np.array_equal(main_fdr, main_raw)
+
+    def test_fdr_correction_degree2(self, driver_adata):
+        """FDR also applies to interaction p-values at degree=2."""
+        import peach as pc
+
+        result = pc.tl.archetype_driver_regression(
+            driver_adata, feature_matrix="pathway_scores", max_degree=2, n_bootstrap=0
+        )
+        assert "interaction_pvalues_fdr" in result
+        int_fdr = np.asarray(result["interaction_pvalues_fdr"])
+        int_raw = np.asarray(result["interaction_pvalues"])
+        assert int_fdr.shape == int_raw.shape
+
     def test_returns_serialized_dict(self, driver_adata):
         """Return value should be a serialized dict with no None values."""
         import peach as pc

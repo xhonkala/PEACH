@@ -353,6 +353,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "main_coefficients_ilr [K-1, n_features]",
             "main_coefficients [K, n_features]",
             "main_pvalues [K-1, n_features]",
+            "main_pvalues_fdr [K-1, n_features] (BH-corrected)",
             "r_squared [K-1]",
         ],
     ),
@@ -365,7 +366,15 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "component_simplex_means [n_stable, K]",
             "component_stability_scores [n_stable]",
             "component_weight_means [n_stable, K] (optional)",
+            "component_probabilities [n_cells, n_stable] (optional)",
             "bic_values [n_tested]",
+        ],
+    ),
+    "tl.component_regression": (
+        "dict",
+        [
+            "component_regs {int: SimplexRegressionResult}",
+            "n_components",
         ],
     ),
     "tl.archetype_summary": (
@@ -398,6 +407,8 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         [
             "alignment_scores [n_genes]",
             "top_aligned, top_opposed [n_top]",
+            "alignment_pvalues [n_genes] (if n_permutations > 0)",
+            "alignment_pvalues_fdr [n_genes] (if n_permutations > 0)",
         ],
     ),
     "tl.flow_jacobian": (
@@ -424,6 +435,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "silhouette_per_archetype: [K]",
             "silhouette_overall: float",
             "spearman_matrix: [K, K] rank correlation",
+            "spearman_pvalue_fdr_matrix: [K, K] BH-corrected",
             "stored in adata.uns['peach_archetype_feature_similarity']",
         ],
     ),
@@ -908,6 +920,8 @@ FUNCTION_PARAMS = {
         "t": ("float", 0.5),
         "n_top": ("int", 50),
         "pca_loadings_key": ("str|None", None),
+        "n_permutations": ("int", 0),
+        "random_state": ("int", 42),
     },
     "tl.flow_jacobian": {
         "adata": ("AnnData", REQUIRED),
