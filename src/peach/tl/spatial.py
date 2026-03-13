@@ -360,7 +360,7 @@ def archetype_spatial_autocorr(
         if result_key in adata.uns:
             result_df = adata.uns[result_key].loc[arch_cols].copy()
             # Rename index from _arch_weight_0 to archetype_0
-            result_df.index = [f"archetype_{i}" for i in range(n_arch)]
+            result_df.index = [f"archetype_{i+1}" for i in range(n_arch)]
             adata.uns["archetype_spatial_autocorr"] = result_df
 
             stat_col = "I" if mode == "moran" else "C"
@@ -545,7 +545,7 @@ def archetype_interaction_boundaries(
         for k in range(n_arch):
             r, p = spearmanr(mean_w_a[both_present, k], mean_w_b[both_present, k])
             cross_corr_data.append({
-                "archetype": f"archetype_{k}",
+                "archetype": f"archetype_{k+1}",
                 "spearman_r": r,
                 "pvalue": p,
                 "n_cells": int(n_both),

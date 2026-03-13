@@ -54,12 +54,12 @@ def archetype_mmd(
         n_permutations=n_permutations, seed=seed,
     )
 
-    arch_names_a = [f"archetype_{i}" for i in range(K_a)]
+    arch_names_a = [f"archetype_{i+1}" for i in range(K_a)]
     arch_names_b = None
     is_between = adata_b is not None
     if is_between:
         K_b = get_archetype_weights(adata_b).shape[1]
-        arch_names_b = [f"archetype_{i}" for i in range(K_b)]
+        arch_names_b = [f"archetype_{i+1}" for i in range(K_b)]
 
     result = ArchetypeMMDResult(
         mmd_matrix=mmd_matrix,
@@ -103,12 +103,12 @@ def archetype_feature_similarity(
     K_a = get_archetype_weights(adata).shape[1]
     sim = compute_feature_similarity(adata, adata_b, pca_key=pca_key)
 
-    arch_names_a = [f"archetype_{i}" for i in range(K_a)]
+    arch_names_a = [f"archetype_{i+1}" for i in range(K_a)]
     is_between = adata_b is not None
     arch_names_b = None
     if is_between:
         K_b = get_archetype_weights(adata_b).shape[1]
-        arch_names_b = [f"archetype_{i}" for i in range(K_b)]
+        arch_names_b = [f"archetype_{i+1}" for i in range(K_b)]
 
     result = ArchetypeFeatureSimilarityResult(
         silhouette_per_archetype=sim["silhouette_per_archetype"],

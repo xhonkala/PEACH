@@ -82,11 +82,19 @@ def resolve_features(
     elif isinstance(feature_matrix, str):
         mat = adata.obsm[feature_matrix]  # KeyError if missing
         n_feats = mat.shape[1]
-        names = (
-            list(feature_names)
-            if feature_names is not None
-            else [f"feature_{i}" for i in range(n_feats)]
-        )
+        # Try to auto-detect feature names from adata.uns
+        names = None
+        if feature_names is not None:
+            names = list(feature_names)
+        else:
+            # Check common naming conventions in adata.uns
+            for suffix in ["_pathways", "_names", "_features"]:
+                uns_key = f"{feature_matrix}{suffix}"
+                if uns_key in adata.uns:
+                    names = list(adata.uns[uns_key])
+                    break
+            if names is None:
+                names = [f"feature_{i}" for i in range(n_feats)]
     else:
         mat = np.asarray(feature_matrix) if not sp.issparse(feature_matrix) else feature_matrix
         if mat.shape[0] != n_cells:

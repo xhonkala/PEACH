@@ -236,7 +236,7 @@ class ArchetypeDistancesResult(BaseModel):
     """Result structure for compute_archetype_distances()."""
 
     # DataFrame stored in adata.obs (columns documented)
-    distance_columns: list[str]  # ['archetype_0_distance', ...]
+    distance_columns: list[str]  # ['archetype_1_distance', ...] (1-indexed)
     nearest_archetype_column: str = "nearest_archetype"
     nearest_distance_column: str = "nearest_archetype_distance"
 

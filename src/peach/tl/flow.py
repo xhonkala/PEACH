@@ -299,7 +299,9 @@ def flow_jacobian(
     jac = flow_model.jacobian(evaluation_points, t)  # [n_points, dim, dim]
 
     # Jacobian determinant (local volume change)
-    jac_det = np.array([np.linalg.det(j) for j in jac])
+    # Use slogdet to avoid underflow in high-dimensional spaces
+    signs, logdets = np.linalg.slogdet(jac)
+    jac_det = signs * np.exp(np.clip(logdets, -500, 500))  # Clipped exp for safety
 
     # Mean Jacobian
     if aggregate == "mean":
@@ -324,12 +326,16 @@ def flow_jacobian(
     else:
         feature_expansion = np.zeros(0)
 
-    return {
+    result = {
         "jacobian_det": jac_det,
+        "jac_logdet": logdets,
+        "jac_det_sign": signs,
         "feature_expansion": feature_expansion,
         "mean_jacobian": mean_jac,
         "t": t,
     }
+
+    return result
 
 
 def flow_significance(
@@ -443,3 +449,300 @@ def _build_mask(adata, filters):
         )
 
     return mask
+
+
+# ---------------------------------------------------------------------------
+# Feature graph functions (Jacobian-based directed gene interaction graphs)
+# ---------------------------------------------------------------------------
+
+
+def flow_feature_graph(
+    adata: AnnData,
+    flow_result: dict,
+    flow_model,
+    *,
+    n_top_genes: int = 200,
+    n_timepoints: int = 20,
+    n_eval_points: int = 300,
+    edge_threshold: float | None = None,
+    random_state: int = 42,
+) -> dict:
+    """Static feature coupling graph collapsed over time.
+
+    Computes a directed gene interaction graph from the Jacobian of a trained
+    flow model. For each timepoint, the mean Jacobian is projected from PCA
+    space into gene space via the PCA loadings triple product
+    ``L_sub @ J_mean(t) @ L_sub.T``. The per-timepoint gene-space matrices
+    are averaged to produce a single directed adjacency matrix where entry
+    ``G[i, j]`` quantifies how much gene j's direction drives gene i's
+    expansion through the flow.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must contain ``adata.varm['PCs']`` (PCA loadings).
+    flow_result : dict
+        Output of :func:`flow_within` (must include ``source_mask``,
+        ``pca_key``).
+    flow_model : FlowModel
+        Trained flow model with ``.jacobian(points, t)`` method.
+    n_top_genes : int
+        Number of top genes (by alignment score magnitude) to retain.
+    n_timepoints : int
+        Number of evenly spaced timepoints in [0, 1] for Jacobian evaluation.
+    n_eval_points : int
+        Number of source cells to subsample for Jacobian computation.
+    edge_threshold : float or None
+        Absolute threshold for sparsifying the adjacency matrix. If None,
+        the top 5% of ``|G_total|`` entries are kept.
+    random_state : int
+        Seed for reproducible subsampling.
+
+    Returns
+    -------
+    dict
+        Keys: ``adjacency_matrix``, ``gene_names``, ``gene_indices``,
+        ``out_centrality``, ``in_centrality``, ``flow_centrality``,
+        ``top_hub_genes``, ``n_timepoints``, ``n_top_genes``,
+        ``edge_threshold``, ``per_timepoint_jacobians``.
+    """
+    rng = np.random.default_rng(random_state)
+
+    # --- PCA loadings and gene names ---
+    if "PCs" not in adata.varm:
+        raise ValueError("adata.varm['PCs'] not found.")
+    loadings = adata.varm["PCs"]  # [n_genes, n_pcs]
+    gene_names = np.array(adata.var_names)
+
+    # --- Pre-filter to top genes by alignment score ---
+    alignment = flow_gene_alignment(adata, flow_result)
+    scores = np.abs(alignment["alignment_scores"])
+    n_top = min(n_top_genes, len(scores))
+    top_idx = np.argsort(scores)[-n_top:][::-1]  # descending by |score|
+    top_idx = np.sort(top_idx)  # restore original ordering for consistency
+
+    gene_names_sub = gene_names[top_idx]
+    pca_key = flow_result["pca_key"]
+    n_pcs = adata.obsm[pca_key].shape[1]
+    L_sub = loadings[top_idx, :n_pcs]  # [n_top, n_pcs]
+
+    # --- Subsample source cells for evaluation ---
+    source_pca = adata.obsm[pca_key][flow_result["source_mask"]]
+    n_source = len(source_pca)
+    n_eval = min(n_eval_points, n_source)
+    eval_idx = rng.choice(n_source, size=n_eval, replace=False)
+    eval_points = source_pca[eval_idx]
+
+    # --- Transport evaluation points along the flow trajectory ---
+    # n_steps = n_timepoints - 1 so that trajectory has exactly n_timepoints
+    # frames matching np.linspace(0, 1, n_timepoints).
+    trajectory = flow_model.transport(
+        eval_points, n_steps=n_timepoints - 1, return_trajectory=True
+    )  # [n_timepoints, n_eval, dim]
+
+    # --- Compute per-timepoint mean Jacobians and gene-space projections ---
+    timepoints = np.linspace(0.0, 1.0, n_timepoints)
+    per_tp_jacobians = np.zeros((n_timepoints, n_pcs, n_pcs))
+    G_per_tp = np.zeros((n_timepoints, n_top, n_top))
+
+    print(f"Computing Jacobians at {n_timepoints} timepoints "
+          f"({n_eval} evaluation points, {n_top} genes)...")
+
+    for ti, t_val in enumerate(timepoints):
+        # Evaluate Jacobian at transported positions for this timepoint
+        traj_positions = trajectory[ti]  # [n_eval, dim] — positions at time t
+        jac = flow_model.jacobian(traj_positions, float(t_val))  # [n_eval, dim, dim]
+        J_mean = jac.mean(axis=0)  # [dim, dim]
+        per_tp_jacobians[ti] = J_mean
+
+        # Project to gene space: G(t) = L_sub @ J_mean @ L_sub.T
+        G_per_tp[ti] = L_sub @ J_mean @ L_sub.T
+
+        print(f"  timepoint {ti + 1}/{n_timepoints} (t={t_val:.3f}) done")
+
+    # --- Integrate over time ---
+    G_total = G_per_tp.mean(axis=0)  # [n_top, n_top]
+
+    # --- Sparsify ---
+    abs_G = np.abs(G_total)
+    if edge_threshold is None:
+        # Top 5% of entries
+        threshold = np.percentile(abs_G, 95)
+    else:
+        threshold = edge_threshold
+
+    G_sparse = np.where(abs_G >= threshold, G_total, 0.0)
+
+    # --- Centrality measures ---
+    out_centrality = abs_G.sum(axis=1)      # row sum: gene i drives others
+    in_centrality = abs_G.sum(axis=0)       # col sum: gene j is driven
+    flow_centrality = out_centrality * in_centrality
+
+    # Top hub genes
+    hub_idx = np.argsort(flow_centrality)[-20:][::-1]
+    top_hub_genes = list(gene_names_sub[hub_idx])
+
+    print(f"Feature graph complete. Top 5 hub genes: {top_hub_genes[:5]}")
+
+    return {
+        "adjacency_matrix": G_sparse,
+        "gene_names": list(gene_names_sub),
+        "gene_indices": top_idx,
+        "out_centrality": out_centrality,
+        "in_centrality": in_centrality,
+        "flow_centrality": flow_centrality,
+        "top_hub_genes": top_hub_genes,
+        "n_timepoints": n_timepoints,
+        "n_top_genes": n_top,
+        "edge_threshold": float(threshold),
+        "per_timepoint_jacobians": per_tp_jacobians,
+    }
+
+
+def flow_temporal_feature_graph(
+    adata: AnnData,
+    flow_result: dict,
+    flow_model,
+    *,
+    n_top_genes: int = 200,
+    n_timepoints: int = 20,
+    n_eval_points: int = 300,
+    random_state: int = 42,
+) -> dict:
+    """Temporal feature graph with spatiotemporal nodes.
+
+    Like :func:`flow_feature_graph`, but retains the full temporal structure
+    rather than collapsing over time. Each node is a ``(gene, timepoint)``
+    pair, with temporal backbone edges (gene self-expansion across consecutive
+    timepoints) and cross-feature edges (inter-gene coupling at each
+    timepoint).
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must contain ``adata.varm['PCs']`` (PCA loadings).
+    flow_result : dict
+        Output of :func:`flow_within`.
+    flow_model : FlowModel
+        Trained flow model.
+    n_top_genes : int
+        Number of top genes (by alignment score magnitude) to retain.
+    n_timepoints : int
+        Number of evenly spaced timepoints in [0, 1].
+    n_eval_points : int
+        Number of source cells to subsample for Jacobian computation.
+    random_state : int
+        Seed for reproducible subsampling.
+
+    Returns
+    -------
+    dict
+        Keys: ``cross_matrices``, ``self_expansion``, ``gene_names``,
+        ``timepoints``, ``temporal_centrality``, ``temporal_profile``,
+        ``top_early_genes``, ``top_late_genes``, ``top_bridge_genes``,
+        ``n_timepoints``, ``n_top_genes``.
+    """
+    rng = np.random.default_rng(random_state)
+
+    # --- PCA loadings and gene names ---
+    if "PCs" not in adata.varm:
+        raise ValueError("adata.varm['PCs'] not found.")
+    loadings = adata.varm["PCs"]
+    gene_names = np.array(adata.var_names)
+
+    # --- Pre-filter to top genes by alignment score ---
+    alignment = flow_gene_alignment(adata, flow_result)
+    scores = np.abs(alignment["alignment_scores"])
+    n_top = min(n_top_genes, len(scores))
+    top_idx = np.argsort(scores)[-n_top:][::-1]
+    top_idx = np.sort(top_idx)
+
+    gene_names_sub = gene_names[top_idx]
+    pca_key = flow_result["pca_key"]
+    n_pcs = adata.obsm[pca_key].shape[1]
+    L_sub = loadings[top_idx, :n_pcs]  # [n_top, n_pcs]
+
+    # --- Subsample source cells ---
+    source_pca = adata.obsm[pca_key][flow_result["source_mask"]]
+    n_source = len(source_pca)
+    n_eval = min(n_eval_points, n_source)
+    eval_idx = rng.choice(n_source, size=n_eval, replace=False)
+    eval_points = source_pca[eval_idx]
+
+    # --- Transport evaluation points along the flow trajectory ---
+    # n_steps = n_timepoints - 1 so that trajectory has exactly n_timepoints
+    # frames matching np.linspace(0, 1, n_timepoints).
+    trajectory = flow_model.transport(
+        eval_points, n_steps=n_timepoints - 1, return_trajectory=True
+    )  # [n_timepoints, n_eval, dim]
+
+    # --- Per-timepoint cross-term matrices and self-expansion ---
+    timepoints = np.linspace(0.0, 1.0, n_timepoints)
+    cross_matrices = np.zeros((n_timepoints, n_top, n_top))
+    self_expansion = np.zeros((n_timepoints, n_top))
+
+    print(f"Computing temporal feature graph at {n_timepoints} timepoints "
+          f"({n_eval} evaluation points, {n_top} genes)...")
+
+    for ti, t_val in enumerate(timepoints):
+        # Evaluate Jacobian at transported positions for this timepoint
+        traj_positions = trajectory[ti]  # [n_eval, dim] — positions at time t
+        jac = flow_model.jacobian(traj_positions, float(t_val))  # [n_eval, dim, dim]
+        J_mean = jac.mean(axis=0)  # [dim, dim]
+
+        # Gene-space projection
+        G_t = L_sub @ J_mean @ L_sub.T  # [n_top, n_top]
+        cross_matrices[ti] = G_t
+        self_expansion[ti] = np.diag(G_t)
+
+        print(f"  timepoint {ti + 1}/{n_timepoints} (t={t_val:.3f}) done")
+
+    # --- Temporal importance profile ---
+    # Per-gene importance at each timepoint: |self-expansion| + mean |cross-terms|
+    abs_cross = np.abs(cross_matrices)
+    # For each gene g at timepoint t:
+    #   backbone weight = |self_expansion[t, g]|
+    #   cross weight = mean(|G_t[g, :]|) + mean(|G_t[:, g]|)  (outgoing + incoming)
+    backbone_weight = np.abs(self_expansion)  # [n_timepoints, n_top]
+    cross_out = abs_cross.sum(axis=2)  # [n_timepoints, n_top] — row sums
+    cross_in = abs_cross.sum(axis=1)   # [n_timepoints, n_top] — col sums
+    temporal_profile = backbone_weight + cross_out + cross_in  # [n_timepoints, n_top]
+
+    # Overall temporal centrality: sum across all timepoints
+    temporal_centrality = temporal_profile.sum(axis=0)  # [n_top]
+
+    # --- Phase-specific top genes ---
+    early_mask = timepoints < 0.3
+    late_mask = timepoints > 0.7
+    bridge_mask = (timepoints >= 0.3) & (timepoints <= 0.7)
+
+    def _top_genes_for_phase(phase_mask, k=10):
+        if not phase_mask.any():
+            return []
+        phase_importance = temporal_profile[phase_mask].sum(axis=0)
+        n_return = min(k, n_top)
+        idx = np.argsort(phase_importance)[-n_return:][::-1]
+        return list(gene_names_sub[idx])
+
+    top_early = _top_genes_for_phase(early_mask)
+    top_late = _top_genes_for_phase(late_mask)
+    top_bridge = _top_genes_for_phase(bridge_mask)
+
+    print(f"Temporal feature graph complete.")
+    print(f"  Top early genes:  {top_early[:5]}")
+    print(f"  Top bridge genes: {top_bridge[:5]}")
+    print(f"  Top late genes:   {top_late[:5]}")
+
+    return {
+        "cross_matrices": cross_matrices,
+        "self_expansion": self_expansion,
+        "gene_names": list(gene_names_sub),
+        "timepoints": timepoints,
+        "temporal_centrality": temporal_centrality,
+        "temporal_profile": temporal_profile,
+        "top_early_genes": top_early,
+        "top_late_genes": top_late,
+        "top_bridge_genes": top_bridge,
+        "n_timepoints": n_timepoints,
+        "n_top_genes": n_top,
+    }

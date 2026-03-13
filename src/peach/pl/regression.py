@@ -8,8 +8,10 @@ from peach._core.utils.feature_utils import resolve_regression_result
 
 from ._style import (
     CATEGORICAL_PALETTE,
+    COLOR_MUTED,
     COLOR_PRIMARY,
     DIVERGING_COLORSCALE,
+    SEQUENTIAL_COLORSCALE,
     apply_style,
     save_and_show,
 )
@@ -29,6 +31,13 @@ def _get_regression_data(adata, feature_type="genes"):
     return result
 
 
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """Convert a hex color string to an rgba() CSS string."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def coefficient_heatmap(
     adata: AnnData,
     *,
@@ -36,14 +45,14 @@ def coefficient_heatmap(
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """Heatmap of vertex coefficients (β_k) for top features by R².
+    """Heatmap of vertex coefficients (beta_k) for top features by R-squared.
 
     Parameters
     ----------
     adata : AnnData
         Must have regression results in ``uns['peach_simplex_regression']``.
     top_n : int
-        Number of top features to display, ranked by R².
+        Number of top features to display, ranked by R-squared.
     save_path : str or None
         If provided, save figure as HTML to this path.
     show : bool
@@ -63,7 +72,7 @@ def coefficient_heatmap(
     top_names = [names[i] for i in top_idx]
 
     K = coefs.shape[1]
-    arch_names = [f"Archetype {k}" for k in range(K)]
+    arch_names = [f"Archetype {k+1}" for k in range(K)]
 
     fig = go.Figure(data=go.Heatmap(
         z=top_coefs,
@@ -71,10 +80,10 @@ def coefficient_heatmap(
         y=top_names,
         colorscale=DIVERGING_COLORSCALE,
         zmid=0,
-        colorbar=dict(title="β", thickness=12, len=0.6),
+        colorbar=dict(title="beta", thickness=12, len=0.6),
     ))
     n_shown = min(top_n, len(top_names))
-    apply_style(fig, title=f"Vertex coefficients — top {n_shown} by R²",
+    apply_style(fig, title=f"Vertex coefficients -- top {n_shown} by R-squared",
                 height=max(400, n_shown * 18))
 
     return save_and_show(fig, save_path=save_path, show=show)
@@ -87,14 +96,14 @@ def interaction_heatmap(
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """Heatmap of interaction coefficients (β_{jk}) for top features.
+    """Heatmap of interaction coefficients (beta_{jk}) for top features.
 
     Parameters
     ----------
     adata : AnnData
         Must have degree-2 regression results in ``uns['peach_simplex_regression']``.
     top_n : int
-        Number of top features to display, ranked by R².
+        Number of top features to display, ranked by R-squared.
     save_path : str or None
         If provided, save figure as HTML to this path.
     show : bool
@@ -125,10 +134,10 @@ def interaction_heatmap(
         y=top_names,
         colorscale=DIVERGING_COLORSCALE,
         zmid=0,
-        colorbar=dict(title="β_int", thickness=12, len=0.6),
+        colorbar=dict(title="beta_int", thickness=12, len=0.6),
     ))
     n_shown = min(top_n, len(top_names))
-    apply_style(fig, title=f"Interaction coefficients — top {n_shown} by R²",
+    apply_style(fig, title=f"Interaction coefficients -- top {n_shown} by R-squared",
                 height=max(400, n_shown * 18))
 
     return save_and_show(fig, save_path=save_path, show=show)
@@ -138,10 +147,18 @@ def r2_barplot(
     adata: AnnData,
     *,
     top_n: int = 50,
+    per_archetype: bool = True,
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """Horizontal bar plot of features ranked by R².
+    """Horizontal bar plot of features ranked by R-squared, with per-archetype
+    coefficient magnitude breakdown.
+
+    When ``per_archetype=True`` (default), each feature shows grouped bars --
+    one bar per archetype colored by archetype color, sized by the absolute
+    vertex coefficient for that archetype. A thin overlay bar shows the global
+    R-squared for reference. When ``per_archetype=False``, falls back to the
+    original single-bar global R-squared display.
 
     Parameters
     ----------
@@ -149,6 +166,10 @@ def r2_barplot(
         Must have regression results in ``uns['peach_simplex_regression']``.
     top_n : int
         Number of top features to display.
+    per_archetype : bool
+        If True (default), show grouped bars with per-archetype coefficient
+        magnitudes alongside global R-squared. If False, show only global
+        R-squared bars.
     save_path : str or None
         If provided, save figure as HTML to this path.
     show : bool
@@ -161,22 +182,99 @@ def r2_barplot(
     reg = _get_regression_data(adata)
     r2 = np.asarray(reg["r_squared_degree1"])
     names = list(reg["feature_names"])
+    coefs = np.asarray(reg["vertex_coefficients"])  # [n_features, K]
 
     top_idx = np.argsort(r2)[-top_n:][::-1]
     top_r2 = r2[top_idx]
     top_names = [names[i] for i in top_idx]
-
-    # Reverse so highest is at top of horizontal bar chart
-    fig = go.Figure(data=go.Bar(
-        x=top_r2[::-1],
-        y=top_names[::-1],
-        orientation="h",
-        marker_color=COLOR_PRIMARY,
-    ))
     n_shown = min(top_n, len(top_names))
-    apply_style(fig, title=f"Top {n_shown} features by R²",
-                xaxis_title="R²",
-                height=max(400, n_shown * 18))
+
+    if not per_archetype:
+        # Original single-bar display
+        fig = go.Figure(data=go.Bar(
+            x=top_r2[::-1],
+            y=top_names[::-1],
+            orientation="h",
+            marker_color=COLOR_PRIMARY,
+        ))
+        apply_style(fig, title=f"Top {n_shown} features by R-squared",
+                    xaxis_title="R-squared",
+                    height=max(400, n_shown * 18))
+        return save_and_show(fig, save_path=save_path, show=show)
+
+    # Per-archetype grouped bars: show |beta_k| for each archetype
+    K = coefs.shape[1]
+    top_coefs = coefs[top_idx]  # [n_shown, K]
+    arch_labels = [f"A{k+1}" for k in range(K)]
+
+    # Reverse for plotly horizontal bar (highest at top)
+    display_names = top_names[::-1]
+    display_coefs = top_coefs[::-1]
+    display_r2 = top_r2[::-1]
+
+    fig = go.Figure()
+
+    # Add per-archetype bars (grouped, colored by archetype)
+    for k in range(K):
+        color = CATEGORICAL_PALETTE[k % len(CATEGORICAL_PALETTE)]
+        fig.add_trace(go.Bar(
+            x=np.abs(display_coefs[:, k]),
+            y=display_names,
+            orientation="h",
+            name=arch_labels[k],
+            marker_color=color,
+            legendgroup=arch_labels[k],
+            hovertemplate=(
+                "%{y}<br>"
+                + arch_labels[k]
+                + " |beta|=%{x:.3f}<extra></extra>"
+            ),
+        ))
+
+    # Overlay global R-squared as scatter markers on a secondary x-axis
+    fig.add_trace(go.Scatter(
+        x=display_r2,
+        y=display_names,
+        mode="markers",
+        name="R-squared (global)",
+        marker=dict(
+            symbol="diamond",
+            size=7,
+            color="#333",
+            line=dict(width=1, color="white"),
+        ),
+        xaxis="x2",
+        hovertemplate="%{y}<br>R-squared=%{x:.3f}<extra></extra>",
+    ))
+
+    height = max(400, n_shown * (18 + 4 * K))
+    apply_style(fig, title=f"Top {n_shown} features -- per-archetype |beta| + global R-squared",
+                height=height)
+    fig.update_layout(
+        barmode="group",
+        xaxis_title="|beta|",
+        xaxis2=dict(
+            title="R-squared",
+            overlaying="x",
+            side="top",
+            showgrid=False,
+            zeroline=False,
+            linecolor="#aaa",
+            linewidth=0.5,
+            ticks="outside",
+            ticklen=3,
+            tickwidth=0.5,
+            tickcolor="#aaa",
+            tickfont=dict(size=10),
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+        ),
+    )
 
     return save_and_show(fig, save_path=save_path, show=show)
 
@@ -215,7 +313,7 @@ def vertex_radar(
     idx = names.index(feature)
     betas = coefs[idx]
     K = len(betas)
-    arch_names = [f"Archetype {k}" for k in range(K)]
+    arch_names = [f"Archetype {k+1}" for k in range(K)]
 
     fig = go.Figure(data=go.Scatterpolar(
         r=list(betas) + [betas[0]],  # close the polygon
@@ -252,15 +350,23 @@ def vertex_radar(
 def regression_volcano(
     adata: AnnData,
     *,
+    alpha: float = 0.05,
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
-    """Scatter plot: R² vs max vertex contrast (max β − min β).
+    """Scatter plot: R-squared vs max vertex contrast (max beta - min beta),
+    colored by FDR significance.
+
+    Features with FDR-corrected F-test q-value < ``alpha`` are highlighted
+    in the primary color; non-significant features are shown in muted gray.
 
     Parameters
     ----------
     adata : AnnData
         Must have regression results in ``uns['peach_simplex_regression']``.
+    alpha : float
+        Significance threshold for FDR-corrected p-values (default 0.05).
+        Features with q < alpha are colored as significant.
     save_path : str or None
         If provided, save figure as HTML to this path.
     show : bool
@@ -277,17 +383,68 @@ def regression_volcano(
 
     contrast = np.ptp(coefs, axis=1)  # max - min per feature
 
-    fig = go.Figure(data=go.Scatter(
-        x=contrast,
-        y=r2,
-        mode="markers",
-        text=names,
-        hovertemplate="%{text}<br>R²=%{y:.3f}<br>Contrast=%{x:.2f}<extra></extra>",
-        marker=dict(size=4, opacity=0.5, color=COLOR_PRIMARY),
-    ))
-    apply_style(fig, title="R² vs vertex contrast",
-                xaxis_title="max β − min β",
-                yaxis_title="R²")
+    # Determine significance from FDR-corrected F-test p-values
+    # Fall back to raw f_pvalue, then to vertex_pvalues_fdr min across archetypes
+    qvals = None
+    if reg.get("f_pvalue_fdr") is not None:
+        qvals = np.asarray(reg["f_pvalue_fdr"])
+    elif reg.get("f_pvalue") is not None:
+        qvals = np.asarray(reg["f_pvalue"])
+    elif reg.get("vertex_pvalues_fdr") is not None:
+        # Use minimum FDR q-value across archetypes per feature
+        qvals = np.min(np.asarray(reg["vertex_pvalues_fdr"]), axis=1)
+
+    if qvals is not None:
+        sig_mask = qvals < alpha
+        n_sig = int(np.sum(sig_mask))
+        n_nonsig = len(sig_mask) - n_sig
+
+        fig = go.Figure()
+
+        # Non-significant points (muted gray, behind)
+        if n_nonsig > 0:
+            ns_idx = ~sig_mask
+            fig.add_trace(go.Scatter(
+                x=contrast[ns_idx],
+                y=r2[ns_idx],
+                mode="markers",
+                text=[names[i] for i in range(len(names)) if ns_idx[i]],
+                hovertemplate=(
+                    "%{text}<br>R-squared=%{y:.3f}<br>Contrast=%{x:.2f}"
+                    f"<br>q>={alpha:.2g}<extra></extra>"
+                ),
+                marker=dict(size=4, opacity=0.3, color=COLOR_MUTED),
+                name=f"q >= {alpha} (n={n_nonsig})",
+            ))
+
+        # Significant points (primary color, on top)
+        if n_sig > 0:
+            fig.add_trace(go.Scatter(
+                x=contrast[sig_mask],
+                y=r2[sig_mask],
+                mode="markers",
+                text=[names[i] for i in range(len(names)) if sig_mask[i]],
+                hovertemplate=(
+                    "%{text}<br>R-squared=%{y:.3f}<br>Contrast=%{x:.2f}"
+                    f"<br>q<{alpha:.2g}<extra></extra>"
+                ),
+                marker=dict(size=5, opacity=0.7, color=COLOR_PRIMARY),
+                name=f"q < {alpha} (n={n_sig})",
+            ))
+    else:
+        # No q-values available -- fall back to uniform coloring
+        fig = go.Figure(data=go.Scatter(
+            x=contrast,
+            y=r2,
+            mode="markers",
+            text=names,
+            hovertemplate="%{text}<br>R-squared=%{y:.3f}<br>Contrast=%{x:.2f}<extra></extra>",
+            marker=dict(size=4, opacity=0.5, color=COLOR_PRIMARY),
+        ))
+
+    apply_style(fig, title="R-squared vs vertex contrast",
+                xaxis_title="max beta - min beta",
+                yaxis_title="R-squared")
 
     return save_and_show(fig, save_path=save_path, show=show)
 
@@ -296,13 +453,15 @@ def archetype_regression_dotplot(
     adata: AnnData,
     *,
     top_n: int = 10,
+    exclusive_only: bool = False,
+    degree: int = 1,
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
     """Dotplot of top genes per archetype from regression coefficients.
 
     Rows: top genes per archetype (by |beta|, union across archetypes).
-    Columns: archetypes.
+    Columns: archetypes (and optionally interaction pairs for degree=2).
     Dot size: |beta coefficient|.
     Dot color: -log10(vertex p-value).
 
@@ -312,6 +471,14 @@ def archetype_regression_dotplot(
         Must have regression results in ``uns['peach_simplex_regression']``.
     top_n : int
         Number of top features per archetype to include.
+    exclusive_only : bool
+        If True, only show features where the max coefficient is at least
+        2x the second-highest coefficient across archetypes. This filters
+        to archetype-exclusive features.
+    degree : int
+        1 = show only degree-1 (vertex) coefficients.
+        2 = also show interaction term coefficients from degree-2 regression
+        as additional columns.
     save_path : str or None
     show : bool
 
@@ -333,15 +500,61 @@ def archetype_regression_dotplot(
         selected.update(top_idx)
     selected = sorted(selected, key=lambda i: -np.max(np.abs(coefs[i])))
 
+    # Filter to exclusive features if requested
+    if exclusive_only:
+        exclusive = []
+        for i in selected:
+            abs_betas = np.sort(np.abs(coefs[i]))[::-1]
+            if len(abs_betas) >= 2 and abs_betas[1] > 0:
+                if abs_betas[0] / abs_betas[1] >= 2.0:
+                    exclusive.append(i)
+            elif len(abs_betas) >= 1 and abs_betas[0] > 0:
+                # Only one non-zero -- trivially exclusive
+                exclusive.append(i)
+        selected = exclusive
+
+    if len(selected) == 0:
+        # Empty plot with message
+        fig = go.Figure()
+        fig.add_annotation(
+            text="No features pass the exclusivity filter (max/2nd >= 2x).",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font=dict(size=14),
+        )
+        apply_style(fig, title="Regression dotplot -- no exclusive features")
+        return save_and_show(fig, save_path=save_path, show=show)
+
     gene_labels = [names[i] for i in selected]
-    arch_labels = [f"A{k}" for k in range(K)]
+    arch_labels = [f"A{k+1}" for k in range(K)]
+
+    # Build column labels: archetypes + optionally interaction pairs
+    col_labels = list(arch_labels)
+    int_coefs = None
+    int_pvals = None
+    if degree >= 2 and reg.get("interaction_coefficients") is not None:
+        int_coefs = np.asarray(reg["interaction_coefficients"])  # [n_features, K-choose-2]
+        int_pvals_raw = reg.get("interaction_pvalues")
+        int_pvals = (
+            np.asarray(int_pvals_raw) if int_pvals_raw is not None
+            else np.ones_like(int_coefs)
+        )
+        pairs = reg.get("interaction_pairs", [])
+        # Pair labels use 1-indexed archetype names
+        pair_labels = [f"A{p[0]+1}xA{p[1]+1}" for p in pairs]
+        col_labels.extend(pair_labels)
 
     # Build dot arrays
     x_vals, y_vals, sizes, colors, hover = [], [], [], [], []
-    abs_coefs = np.abs(coefs[selected])
-    max_abs = abs_coefs.max() if abs_coefs.max() > 0 else 1.0
+
+    # Compute max absolute coefficient for size scaling (across both vertex + interaction)
+    abs_vertex = np.abs(coefs[selected])
+    max_abs = abs_vertex.max() if abs_vertex.max() > 0 else 1.0
+    if int_coefs is not None:
+        abs_int = np.abs(int_coefs[selected])
+        max_abs = max(max_abs, abs_int.max() if abs_int.max() > 0 else 0)
 
     for gi, gene_idx in enumerate(selected):
+        # Vertex coefficients
         for k in range(K):
             x_vals.append(arch_labels[k])
             y_vals.append(gene_labels[gi])
@@ -349,7 +562,21 @@ def archetype_regression_dotplot(
             pval = max(pvals[gene_idx, k], 1e-300)
             sizes.append(np.abs(beta) / max_abs * 20 + 2)
             colors.append(-np.log10(pval))
-            hover.append(f"{names[gene_idx]}<br>β={beta:.3f}<br>p={pval:.2e}")
+            hover.append(f"{names[gene_idx]}<br>beta={beta:.3f}<br>p={pval:.2e}")
+
+        # Interaction coefficients (degree 2)
+        if int_coefs is not None:
+            for pi in range(int_coefs.shape[1]):
+                x_vals.append(col_labels[K + pi])
+                y_vals.append(gene_labels[gi])
+                beta = int_coefs[gene_idx, pi]
+                pval = max(int_pvals[gene_idx, pi], 1e-300)
+                sizes.append(np.abs(beta) / max_abs * 20 + 2)
+                colors.append(-np.log10(pval))
+                hover.append(
+                    f"{names[gene_idx]}<br>"
+                    f"{col_labels[K + pi]} beta={beta:.3f}<br>p={pval:.2e}"
+                )
 
     fig = go.Figure(data=go.Scatter(
         x=x_vals,
@@ -359,17 +586,305 @@ def archetype_regression_dotplot(
             size=sizes,
             color=colors,
             colorscale=SEQUENTIAL_COLORSCALE,
-            colorbar=dict(title="-log₁₀(p)", thickness=12, len=0.6),
+            colorbar=dict(title="-log10(p)", thickness=12, len=0.6),
             line=dict(width=0.5, color="#999"),
         ),
         text=hover,
         hovertemplate="%{text}<extra></extra>",
     ))
     n_genes = len(gene_labels)
-    apply_style(fig, title=f"Regression dotplot — top {top_n} per archetype",
-                height=max(400, n_genes * 18 + 80))
+    n_cols = len(col_labels)
+
+    # Proportional width: scale by columns shown, capped at 1000px
+    width = min(1000, max(600, n_cols * 25))
+
+    title_parts = [f"Regression dotplot -- top {top_n} per archetype"]
+    if exclusive_only:
+        title_parts.append("(exclusive only)")
+    if degree >= 2 and int_coefs is not None:
+        title_parts.append("+ interactions")
+
+    apply_style(fig, title=" ".join(title_parts),
+                height=max(400, n_genes * 18 + 80),
+                width=width)
 
     return save_and_show(fig, save_path=save_path, show=show)
+
+
+def archetype_radar_ridgeplot(
+    adata: AnnData,
+    *,
+    top_n: int = 10,
+    feature_type: str = "genes",
+    min_degree: int = 1,
+    show: bool = True,
+    save: str | None = None,
+) -> tuple[go.Figure, go.Figure]:
+    """Two standalone figures for archetype phenotype characterization.
+
+    Returns a tuple of two independent figures:
+
+    **Figure 1 (radar)**: Radar/spider plot where each polygon represents a
+    feature and each angular spoke an archetype. Polygon vertices are
+    ``|vertex_coefficient|`` -- features shared across archetypes produce
+    round polygons; exclusive features produce spiky ones.
+
+    **Figure 2 (ridgeplot)**: Horizontal ridge-style violin grid. Rows =
+    features (top ``top_n`` per archetype, union). Each row shows one
+    violin per archetype, colored by archetype, representing the expression
+    distribution of that feature in cells dominated by that archetype
+    (top 20% by archetype weight).
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must contain regression results (run ``pc.tl.feature_simplex_regression``
+        first) and ``cell_archetype_weights`` in ``obsm``.
+    top_n : int
+        Number of top features per archetype (by ``|vertex_coefficient|``)
+        to include. The union across archetypes is displayed, truncated to
+        ``top_n`` total features for both figures.
+    feature_type : str
+        ``"genes"`` (uses ``adata.X``) or ``"pathways"`` (uses
+        ``adata.obsm["pathway_scores"]``).
+    min_degree : int
+        When set to 2, only include features that have a significant
+        degree-2 (interaction) coefficient (FDR q < 0.05 for at least one
+        interaction term). Default 1 (no interaction filter).
+    show : bool
+        Whether to display the figures interactively.
+    save : str or None
+        Path prefix to save figures. The radar plot is saved as
+        ``{save}_radar.{ext}`` and the ridgeplot as ``{save}_ridge.{ext}``.
+        If the path has an extension, it is split accordingly.
+
+    Returns
+    -------
+    tuple[go.Figure, go.Figure]
+        (radar_fig, ridge_fig) -- two independent plotly figures.
+    """
+    import os
+
+    import scipy.sparse as sp
+
+    # ------------------------------------------------------------------
+    # 1. Resolve regression result
+    # ------------------------------------------------------------------
+    reg = _get_regression_data(adata, feature_type=feature_type)
+    coefs = np.asarray(reg["vertex_coefficients"])  # [n_features, K]
+    feat_names = list(reg["feature_names"])
+    K = coefs.shape[1]
+
+    if "cell_archetype_weights" not in adata.obsm:
+        raise ValueError(
+            "adata.obsm['cell_archetype_weights'] not found. "
+            "Run pc.tl.extract_archetype_weights() first."
+        )
+    weights = np.asarray(adata.obsm["cell_archetype_weights"])  # [n_cells, K]
+
+    # ------------------------------------------------------------------
+    # 2. Select top_n features per archetype (union), then truncate
+    # ------------------------------------------------------------------
+    selected_idx = set()
+    for k in range(K):
+        top_idx = np.argsort(np.abs(coefs[:, k]))[-top_n:]
+        selected_idx.update(top_idx.tolist())
+    # Sort by max absolute coefficient across any archetype (descending)
+    selected_idx = sorted(selected_idx, key=lambda i: -np.max(np.abs(coefs[i])))
+
+    # Filter by min_degree=2: only keep features with significant interaction terms
+    if min_degree >= 2:
+        int_fdr = reg.get("interaction_pvalues_fdr")
+        if int_fdr is not None:
+            int_fdr_arr = np.asarray(int_fdr)
+            # Keep features where at least one interaction term has FDR < 0.05
+            sig_mask = np.any(int_fdr_arr < 0.05, axis=1)
+            selected_idx = [i for i in selected_idx if sig_mask[i]]
+        # If no FDR available, skip the filter with a warning
+        # (better than silently dropping everything)
+
+    # Truncate to top_n total features (the bug fix: union can exceed top_n)
+    selected_idx = selected_idx[:top_n]
+
+    if len(selected_idx) == 0:
+        # Return empty figures with annotation
+        radar_fig = go.Figure()
+        radar_fig.add_annotation(
+            text="No features pass the filters.",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font=dict(size=14),
+        )
+        apply_style(radar_fig, title="Radar -- no features")
+        ridge_fig = go.Figure()
+        ridge_fig.add_annotation(
+            text="No features pass the filters.",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font=dict(size=14),
+        )
+        apply_style(ridge_fig, title="Ridgeplot -- no features")
+        return radar_fig, ridge_fig
+
+    sel_names = []
+    for i in selected_idx:
+        name = feat_names[i]
+        # Strip HALLMARK_ prefix for pathway readability
+        if feature_type == "pathways" and name.startswith("HALLMARK_"):
+            name = name[len("HALLMARK_"):]
+        # Truncate long names
+        if len(name) > 20:
+            name = name[:18] + ".."
+        sel_names.append(name)
+
+    n_features = len(selected_idx)
+    arch_labels = [f"A{k+1}" for k in range(K)]
+
+    # ------------------------------------------------------------------
+    # 3. FIGURE 1: Standalone radar plot
+    # ------------------------------------------------------------------
+    abs_coefs = np.abs(coefs[selected_idx])  # [n_sel, K]
+    theta_labels = arch_labels + [arch_labels[0]]  # close polygon
+
+    radar_fig = go.Figure()
+    for fi, (feat_idx, feat_label) in enumerate(zip(selected_idx, sel_names)):
+        r_vals = abs_coefs[fi].tolist()
+        r_vals_closed = r_vals + [r_vals[0]]
+        color = CATEGORICAL_PALETTE[fi % len(CATEGORICAL_PALETTE)]
+
+        radar_fig.add_trace(
+            go.Scatterpolar(
+                r=r_vals_closed,
+                theta=theta_labels,
+                fill="toself",
+                fillcolor=_hex_to_rgba(color, 0.08),
+                line=dict(color=color, width=1.5),
+                name=feat_label,
+                legendgroup=feat_label,
+                showlegend=True,
+                hovertemplate=(
+                    feat_label + "<br>%{theta}: %{r:.3f}<extra></extra>"
+                ),
+            ),
+        )
+
+    radar_size = max(450, 350 + n_features * 10)
+    apply_style(radar_fig, title="Archetype phenotype radar",
+                height=radar_size, width=radar_size)
+    # Re-apply polar styling (apply_style resets to cartesian defaults)
+    radar_fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, gridcolor="#eee", linewidth=0),
+            angularaxis=dict(linewidth=0, gridcolor="#eee"),
+            bgcolor="white",
+        ),
+        legend=dict(
+            font=dict(size=9),
+            bgcolor="rgba(255,255,255,0.85)",
+            borderwidth=0,
+        ),
+        margin=dict(l=60, r=60, t=50, b=40),
+    )
+
+    # ------------------------------------------------------------------
+    # 4. FIGURE 2: Standalone horizontal ridgeplot
+    # ------------------------------------------------------------------
+    # Resolve expression / score matrix
+    if feature_type == "pathways":
+        if "pathway_scores" not in adata.obsm:
+            raise ValueError(
+                "adata.obsm['pathway_scores'] not found. "
+                "Run pc.pp.compute_pathway_scores() first."
+            )
+        pw_matrix = np.asarray(adata.obsm["pathway_scores"])
+        pw_names = list(adata.uns.get("pathway_scores_pathways", []))
+        pw_name_to_col = {n: i for i, n in enumerate(pw_names)}
+    else:
+        X = adata.X
+
+    ridge_fig = go.Figure()
+
+    # Horizontal violins: y = feature name, x = expression value
+    # One violin per archetype per feature, grouped by archetype
+    threshold_quantile = 0.80
+    for k in range(K):
+        threshold = np.quantile(weights[:, k], threshold_quantile)
+        cell_mask = weights[:, k] >= threshold
+        color = CATEGORICAL_PALETTE[k % len(CATEGORICAL_PALETTE)]
+
+        for fi, feat_idx in enumerate(selected_idx):
+            # Extract expression values for selected cells
+            if feature_type == "pathways":
+                orig_name = feat_names[feat_idx]
+                col = pw_name_to_col.get(orig_name)
+                if col is None:
+                    continue
+                vals = pw_matrix[cell_mask, col]
+            else:
+                col_slice = X[cell_mask, feat_idx]
+                if hasattr(col_slice, "toarray"):
+                    vals = np.asarray(col_slice.toarray()).ravel()
+                elif sp.issparse(col_slice):
+                    vals = np.asarray(col_slice.todense()).ravel()
+                else:
+                    vals = np.asarray(col_slice).ravel()
+
+            ridge_fig.add_trace(
+                go.Violin(
+                    y=[sel_names[fi]] * len(vals),
+                    x=vals,
+                    legendgroup=arch_labels[k],
+                    scalegroup=sel_names[fi],
+                    name=arch_labels[k],
+                    side="positive",
+                    orientation="h",
+                    line_color=color,
+                    fillcolor=_hex_to_rgba(color, 0.25),
+                    meanline_visible=True,
+                    showlegend=(fi == 0),  # Only show legend once per archetype
+                    offsetgroup=arch_labels[k],
+                    hovertemplate=(
+                        f"{arch_labels[k]} | {sel_names[fi]}"
+                        "<br>value=%{x:.3f}<extra></extra>"
+                    ),
+                    bandwidth=(
+                        max(0.01, float(np.std(vals) * 0.3))
+                        if len(vals) > 1 else 0.1
+                    ),
+                    points=False,
+                ),
+            )
+
+    ridge_height = max(400, n_features * 60 + 100)
+    apply_style(ridge_fig, title="Expression ridgeplot by archetype",
+                height=ridge_height, width=700)
+    ridge_fig.update_layout(
+        violinmode="group",
+        xaxis_title="Expression",
+        yaxis_title="",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            font=dict(size=10),
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # 5. Save and show
+    # ------------------------------------------------------------------
+    if save:
+        base, ext = os.path.splitext(save)
+        if not ext:
+            ext = ".png"
+        save_and_show(radar_fig, save_path=f"{base}_radar{ext}", show=False)
+        save_and_show(ridge_fig, save_path=f"{base}_ridge{ext}", show=False)
+
+    if show:
+        radar_fig.show()
+        ridge_fig.show()
+
+    return radar_fig, ridge_fig
 
 
 def pattern_summary(

@@ -32,6 +32,7 @@ venv/
 
 # Data files (large)
 *.h5ad
+*.npy
 *.pkl
 *.tar.gz
 data/
@@ -51,9 +52,8 @@ temp_*/
 elbow_plot.png
 gene_associations.csv
 
-# Notebooks (except tutorials)
-notebooks/
-!docs/tutorials/*.ipynb
+# Notebooks
+*.ipynb
 
 # Sphinx build output
 docs/_build/

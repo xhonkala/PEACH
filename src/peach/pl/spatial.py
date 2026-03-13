@@ -76,7 +76,7 @@ def nhood_enrichment(
     if cluster_key in adata.obs.columns:
         labels = sorted(adata.obs[cluster_key].unique())
     else:
-        labels = [f"archetype_{i}" for i in range(zscore.shape[0])]
+        labels = [f"archetype_{i+1}" for i in range(zscore.shape[0])]
 
     # Symmetric color range centered on 0
     vmax = np.abs(zscore).max()
@@ -160,7 +160,7 @@ def co_occurrence(
     if cluster_key in adata.obs.columns:
         labels = sorted(adata.obs[cluster_key].unique())
     else:
-        labels = [f"archetype_{i}" for i in range(occ.shape[0])]
+        labels = [f"archetype_{i+1}" for i in range(occ.shape[0])]
 
     # Distance midpoints
     distances = (interval[:-1] + interval[1:]) / 2

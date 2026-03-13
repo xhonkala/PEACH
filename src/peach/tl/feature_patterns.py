@@ -173,7 +173,7 @@ def archetype_summary(
                     other = pair[1] if pair[0] == k else pair[0]
                     # Mean interaction across features
                     mean_int = float(np.mean(int_coefs[:, idx]))
-                    relevant[f"archetype_{other}"] = mean_int
+                    relevant[f"archetype_{other+1}"] = mean_int
             summary["interactions"] = relevant
 
         # Pattern counts

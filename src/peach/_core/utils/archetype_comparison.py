@@ -181,9 +181,9 @@ def compute_feature_similarity(
             spearman_matrix[i, j] = rho
             spearman_pvalue_matrix[i, j] = pval
 
-    # Global FDR correction across all K_a x K_b Spearman tests
+    # Global FDR correction across all K_a x K_b Spearman tests (clamp underflowed zeros)
     from statsmodels.stats.multitest import multipletests as _mt_spearman
-    all_spearman_pvals = spearman_pvalue_matrix.ravel()
+    all_spearman_pvals = np.clip(spearman_pvalue_matrix.ravel(), np.finfo(float).tiny, 1.0)
     _, spearman_fdr_flat, _, _ = _mt_spearman(all_spearman_pvals, method="fdr_bh")
     spearman_pvalue_fdr_matrix = spearman_fdr_flat.reshape(spearman_pvalue_matrix.shape)
 
@@ -296,8 +296,8 @@ def compute_wald_contrasts(
         offset += n_features
 
     # Global FDR correction across ALL pairs (not per-pair)
-    all_pvals_flat = np.concatenate(all_pvals)
-    # Filter out trivial tests (SE=0 → p=1) to avoid diluting FDR
+    # Clamp underflowed zeros, then filter trivial tests (SE=0 → p=1) to avoid diluting FDR
+    all_pvals_flat = np.clip(np.concatenate(all_pvals), np.finfo(float).tiny, 1.0)
     testable = all_pvals_flat < 1.0
     all_fdr = np.ones_like(all_pvals_flat)
     if testable.any():

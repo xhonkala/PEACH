@@ -14,6 +14,58 @@ from ._style import (
 )
 
 
+def _add_top_labels(
+    fig: go.Figure,
+    delta: np.ndarray,
+    pvals: np.ndarray,
+    neg_log_p: np.ndarray,
+    names: list[str],
+    *,
+    n_labels: int = 10,
+    fdr_threshold: float = 0.05,
+    xref: str = "x",
+    yref: str = "y",
+) -> None:
+    """Annotate a volcano plot with text labels for top features.
+
+    Selection strategy: among significant features (FDR < threshold), pick
+    those with the largest absolute effect size. If fewer than n_labels are
+    significant, fill remaining slots by lowest p-value regardless of
+    significance.
+    """
+    abs_delta = np.abs(delta)
+
+    # Significant mask
+    sig_mask = pvals < fdr_threshold
+    n_sig = int(sig_mask.sum())
+
+    if n_sig >= n_labels:
+        # Among significant, take top N by |delta|
+        sig_indices = np.where(sig_mask)[0]
+        top_within_sig = np.argsort(abs_delta[sig_indices])[::-1][:n_labels]
+        label_indices = sig_indices[top_within_sig]
+    else:
+        # Take all significant, then fill by lowest p-value
+        sig_indices = set(np.where(sig_mask)[0].tolist())
+        remaining_n = n_labels - n_sig
+        by_pval = np.argsort(pvals)
+        extra = [i for i in by_pval if i not in sig_indices][:remaining_n]
+        label_indices = np.array(list(sig_indices) + extra, dtype=int)
+
+    for i in label_indices:
+        fig.add_annotation(
+            x=delta[i],
+            y=neg_log_p[i],
+            text=names[i],
+            showarrow=False,
+            xref=xref,
+            yref=yref,
+            font=dict(size=8, color="#333"),
+            yshift=7,
+            xanchor="center",
+        )
+
+
 def mmd_heatmap(
     adata: AnnData,
     *,
@@ -39,7 +91,7 @@ def mmd_heatmap(
 
     mmd_matrix = np.asarray(mmd_data["mmd_matrix"])
     K = mmd_matrix.shape[0]
-    labels = [f"A{i}" for i in range(K)]
+    labels = [f"A{i+1}" for i in range(K)]
 
     fig = go.Figure(data=go.Heatmap(
         z=mmd_matrix,
@@ -58,6 +110,7 @@ def contrast_volcano(
     pair: tuple[int, int],
     *,
     fdr_threshold: float = 0.05,
+    n_labels: int = 10,
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
@@ -68,8 +121,12 @@ def contrast_volcano(
     adata : AnnData
         Must have contrast results in uns['peach_archetype_contrasts'].
     pair : tuple[int, int]
-        Archetype pair (j, k).
+        Archetype pair (j, k), 0-indexed.
     fdr_threshold : float
+        Significance threshold for FDR-corrected p-values.
+    n_labels : int
+        Number of top features to label on the plot (by absolute effect size
+        among significant features, falling back to lowest p-value).
     save_path : str or None
     show : bool
 
@@ -112,10 +169,16 @@ def contrast_volcano(
     fig.add_hline(y=-np.log10(fdr_threshold), line_dash="dot",
                   line_color="#999", line_width=1)
 
+    # Add text labels for top N features
+    if n_labels > 0:
+        _add_top_labels(fig, delta, pvals, neg_log_p, names,
+                        n_labels=n_labels, fdr_threshold=fdr_threshold)
+
     j, k = pair
-    apply_style(fig, title=f"Contrast: A{j} vs A{k}",
-                xaxis_title=f"\u03b2_{j} \u2212 \u03b2_{k}",
-                yaxis_title="-log\u2081\u2080(FDR q)")
+    apply_style(fig, title=f"Contrast: A{j+1} vs A{k+1}",
+                xaxis_title=f"\u03b2\u2081 \u2212 \u03b2\u2082 (A{j+1} vs A{k+1})",
+                yaxis_title="-log\u2081\u2080(FDR q)",
+                width=750)
     return save_and_show(fig, save_path=save_path, show=show)
 
 
@@ -123,6 +186,7 @@ def contrast_volcano_grid(
     adata: AnnData,
     *,
     fdr_threshold: float = 0.05,
+    n_labels: int = 5,
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
@@ -133,6 +197,10 @@ def contrast_volcano_grid(
     adata : AnnData
         Must have contrast results in uns['peach_archetype_contrasts'].
     fdr_threshold : float
+        Significance threshold for FDR-corrected p-values.
+    n_labels : int
+        Number of top features to label per subplot (by absolute effect size
+        among significant features, falling back to lowest p-value).
     save_path : str or None
     show : bool
 
@@ -154,7 +222,7 @@ def contrast_volcano_grid(
 
     fig = make_subplots(
         rows=n_rows, cols=n_cols,
-        subplot_titles=[f"A{j} vs A{k}" for j, k in pairs],
+        subplot_titles=[f"A{j+1} vs A{k+1}" for j, k in pairs],
         shared_xaxes=True, shared_yaxes=True,
         horizontal_spacing=0.04, vertical_spacing=0.08,
     )
@@ -177,15 +245,23 @@ def contrast_volcano_grid(
                 mode="markers", text=names,
                 marker=dict(size=4, opacity=0.5, color=colors),
                 showlegend=False,
-                hovertemplate="%{text}<br>Δβ=%{x:.3f}<br>-log10(q)=%{y:.1f}<extra></extra>",
+                hovertemplate="%{text}<br>\u0394\u03b2=%{x:.3f}<br>-log10(q)=%{y:.1f}<extra></extra>",
             ),
             row=row, col=col,
         )
         fig.add_hline(y=-np.log10(fdr_threshold), line_dash="dot",
                       line_color="#999", line_width=0.5, row=row, col=col)
 
+        # Add text labels for top N features per subplot
+        if n_labels > 0:
+            _add_top_labels(fig, delta, pvals, neg_log_p, names,
+                            n_labels=n_labels, fdr_threshold=fdr_threshold,
+                            xref=f"x{idx+1}" if idx > 0 else "x",
+                            yref=f"y{idx+1}" if idx > 0 else "y")
+
     apply_style(fig, title="Pairwise Wald Contrasts")
-    fig.update_layout(height=250 * n_rows, width=300 * n_cols)
+    grid_width = min(800, 270 * n_cols)
+    fig.update_layout(height=250 * n_rows, width=grid_width)
     return save_and_show(fig, save_path=save_path, show=show)
 
 
@@ -218,7 +294,7 @@ def feature_similarity_heatmap(
 
     spearman = np.asarray(sim_data["spearman_matrix"])
     K = spearman.shape[0]
-    labels = [f"A{i}" for i in range(K)]
+    labels = [f"A{i+1}" for i in range(K)]
 
     fig = go.Figure(data=go.Heatmap(
         z=spearman,
