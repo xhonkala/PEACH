@@ -690,9 +690,9 @@ def bin_cells_by_archetype(
             cell_id = adata.obs.index[cell_position]
             cell_distance = arch_distances[cell_position]
 
-            # Adjust archetype numbering if central archetype exists
-            archetype_num = arch_idx + 1 if include_central_archetype else arch_idx
-            archetype_storage_idx = arch_idx + 1 if include_central_archetype else arch_idx
+            # Extremal archetypes always 1-indexed (archetype_0 reserved for central)
+            archetype_num = arch_idx + 1
+            archetype_storage_idx = arch_idx + 1
 
             assignments.append(
                 {
@@ -777,8 +777,8 @@ def bin_cells_by_archetype(
             print(f"   Archetype 0 (central): {central_count} cells ({100 * central_count / n_cells:.1f}%)")
 
         for arch_idx in range(n_archetypes):
-            storage_idx = arch_idx + 1 if include_central_archetype else arch_idx
-            display_num = arch_idx + 1 if include_central_archetype else arch_idx + 1
+            storage_idx = arch_idx + 1
+            display_num = arch_idx + 1
             count = (assignments_df["archetype_idx"] == storage_idx).sum()
             print(f"   Archetype {display_num}: {count} cells ({100 * count / n_cells:.1f}%)")
 
@@ -814,7 +814,7 @@ def select_cells(
     ----------
     coordinates_df : pd.DataFrame
         DataFrame from :func:`get_all_archetypal_coordinates` with weight columns.
-        Must have columns like 'archetype_0_weight', 'archetype_1_weight', etc.
+        Must have columns like 'archetype_1_weight', 'archetype_2_weight', etc.
     selection_criteria : dict[str, str]
         Dictionary mapping archetype names to percentage criteria.
 
@@ -918,7 +918,7 @@ def select_cells(
     weight_cols = [col for col in coordinates_df.columns if col.endswith("_weight")]
     if not weight_cols:
         raise ValueError(
-            "No weight columns found. Expected columns like 'archetype_0_weight', 'archetype_1_weight', etc."
+            "No weight columns found. Expected columns like 'archetype_1_weight', 'archetype_2_weight', etc."
         )
 
     # Create boolean mask for cell selection
@@ -995,7 +995,7 @@ def select_cells(
             dominant_archetypes = selected_df["dominant_archetype"].value_counts()
             print("\n   Dominant archetype distribution in selected cells:")
             for arch_idx, count in dominant_archetypes.items():
-                arch_name = f"archetype_{arch_idx}"
+                arch_name = f"archetype_{arch_idx + 1}"
                 percentage_of_selected = 100 * count / n_selected
                 print(f"      {arch_name}: {count} cells ({percentage_of_selected:.1f}%)")
         else:
@@ -1070,13 +1070,13 @@ def get_all_archetypal_coordinates(model, dataloader, device: str = "cpu", verbo
         DataFrame with columns:
 
         - ``cell_idx`` : int - Cell index (0 to n_cells-1)
-        - ``archetype_0_weight``, ``archetype_1_weight``, ... : float
-            A matrix weights (barycentric coordinates, sum to 1).
-        - ``archetype_0_latent``, ``archetype_1_latent``, ... : float
-            z latent variables.
-        - ``archetype_0_mu``, ``archetype_1_mu``, ... : float
-            Encoder means.
-        - ``archetype_0_log_var``, ``archetype_1_log_var``, ... : float
+        - ``archetype_1_weight``, ``archetype_2_weight``, ... : float
+            A matrix weights (barycentric coordinates, sum to 1; 1-indexed).
+        - ``archetype_1_latent``, ``archetype_2_latent``, ... : float
+            z latent variables (1-indexed).
+        - ``archetype_1_mu``, ``archetype_2_mu``, ... : float
+            Encoder means (1-indexed).
+        - ``archetype_1_log_var``, ``archetype_2_log_var``, ... : float
             Encoder log variances.
         - ``max_weight`` : float - Maximum weight across archetypes.
         - ``dominant_archetype`` : int - Index of archetype with highest weight.
@@ -1140,18 +1140,18 @@ def get_all_archetypal_coordinates(model, dataloader, device: str = "cpu", verbo
     # Create DataFrame with clear column names
     data_dict = {"cell_idx": list(range(total_samples))}
 
-    # Add archetype weights (A matrix)
+    # Add archetype weights (A matrix) — 1-indexed labels
     for arch_idx in range(n_archetypes):
-        data_dict[f"archetype_{arch_idx}_weight"] = A_matrix[:, arch_idx].numpy()
+        data_dict[f"archetype_{arch_idx + 1}_weight"] = A_matrix[:, arch_idx].numpy()
 
-    # Add latent variables (z matrix)
+    # Add latent variables (z matrix) — 1-indexed labels
     for arch_idx in range(n_archetypes):
-        data_dict[f"archetype_{arch_idx}_latent"] = z_matrix[:, arch_idx].numpy()
+        data_dict[f"archetype_{arch_idx + 1}_latent"] = z_matrix[:, arch_idx].numpy()
 
-    # Add encoder outputs (optional, but useful for analysis)
+    # Add encoder outputs (optional, but useful for analysis) — 1-indexed labels
     for arch_idx in range(n_archetypes):
-        data_dict[f"archetype_{arch_idx}_mu"] = mu_matrix[:, arch_idx].numpy()
-        data_dict[f"archetype_{arch_idx}_log_var"] = log_var_matrix[:, arch_idx].numpy()
+        data_dict[f"archetype_{arch_idx + 1}_mu"] = mu_matrix[:, arch_idx].numpy()
+        data_dict[f"archetype_{arch_idx + 1}_log_var"] = log_var_matrix[:, arch_idx].numpy()
 
     df = pd.DataFrame(data_dict)
 
@@ -1166,7 +1166,7 @@ def get_all_archetypal_coordinates(model, dataloader, device: str = "cpu", verbo
         print("   Dominant archetype distribution:")
         for arch_idx in range(n_archetypes):
             count = (df["dominant_archetype"] == arch_idx).sum()
-            print(f"      Archetype {arch_idx}: {count} cells ({100 * count / len(df):.1f}%)")
+            print(f"      Archetype {arch_idx + 1}: {count} cells ({100 * count / len(df):.1f}%)")
 
     return df
 
@@ -1215,8 +1215,8 @@ def compute_archetype_distances(
             Cell identifier from ``adata.obs.index``.
         - ``cell_idx`` : int
             0-based position index.
-        - ``archetype_0_distance``, ``archetype_1_distance``, ... : float
-            Distance to each archetype.
+        - ``archetype_1_distance``, ``archetype_2_distance``, ... : float
+            Distance to each archetype (1-indexed).
         - ``nearest_archetype`` : int
             Index of the nearest archetype.
         - ``nearest_distance`` : float
@@ -1372,9 +1372,9 @@ def compute_archetype_distances(
     data_dict["cell_id"] = adata.obs.index.tolist()
     data_dict["cell_idx"] = list(range(len(adata.obs)))  # 0-based position indices
 
-    # Add individual distances to each archetype
+    # Add individual distances to each archetype — 1-indexed labels
     for arch_idx in range(n_archetypes):
-        data_dict[f"archetype_{arch_idx}_distance"] = distance_matrix[:, arch_idx]
+        data_dict[f"archetype_{arch_idx + 1}_distance"] = distance_matrix[:, arch_idx]
 
     # Add summary statistics
     nearest_archetypes = np.argmin(distance_matrix, axis=1)
@@ -1397,7 +1397,7 @@ def compute_archetype_distances(
             count = (df["nearest_archetype"] == arch_idx).sum()
             mean_dist = df[df["nearest_archetype"] == arch_idx]["nearest_distance"].mean()
             print(
-                f"      Archetype {arch_idx}: {count} cells ({100 * count / len(df):.1f}%), mean distance: {mean_dist:.4f}"
+                f"      Archetype {arch_idx + 1}: {count} cells ({100 * count / len(df):.1f}%), mean distance: {mean_dist:.4f}"
             )
 
         print("   Overall statistics:")
@@ -1617,7 +1617,7 @@ def extract_and_store_archetypal_coordinates(
     adata.uns[coords_key] = archetype_pca
 
     # Store cell weights in AnnData.obsm with proper column names
-    cell_weight_df = pd.DataFrame(A_matrix, columns=[f"archetype_{i}_weight" for i in range(n_archetypes)])
+    cell_weight_df = pd.DataFrame(A_matrix, columns=[f"archetype_{i+1}_weight" for i in range(n_archetypes)])
     cell_weight_df["cell_idx"] = range(total_samples)
     adata.obsm[cell_coords_key] = A_matrix
 
@@ -1718,7 +1718,7 @@ def get_archetype_positions(model, device: str = "cpu", verbose: bool = True) ->
 
         for i in range(n_archetypes):
             row = df.iloc[i]
-            print(f"\nArchetype {i}:")
+            print(f"\nArchetype {i + 1}:")
             print(f"  First 5 features: {archetype_positions[i, :5]}")
             print(f"  Stats: mean={row['mean']:.3f}, std={row['std']:.3f}")
             print(f"  Range: [{row['min']:.3f}, {row['max']:.3f}] (span: {row['range']:.3f})")

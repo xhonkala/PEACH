@@ -218,7 +218,7 @@ def plot_archetype_weights(
     # Plot A matrix weight distributions
     ax1 = axes[0, 0]
     for i in range(A.shape[1]):
-        ax1.hist(A[:, i], alpha=0.6, label=f"Archetype {i}", bins=30)
+        ax1.hist(A[:, i], alpha=0.6, label=f"Archetype {i + 1}", bins=30)
     ax1.set_title("A Matrix: Sample Weight Distributions (Primary)")
     ax1.set_xlabel("Weight Value")
     ax1.set_ylabel("Frequency")
@@ -227,7 +227,7 @@ def plot_archetype_weights(
     # Plot B matrix weight distributions (dummy - should be uniform)
     ax2 = axes[0, 1]
     for i in range(B.shape[1]):
-        ax2.hist(B[:, i], alpha=0.6, label=f"Archetype {i}", bins=30)
+        ax2.hist(B[:, i], alpha=0.6, label=f"Archetype {i + 1}", bins=30)
     ax2.set_title("B Matrix: Dummy Weights (Uniform)")
     ax2.set_xlabel("Weight Value")
     ax2.set_ylabel("Frequency")

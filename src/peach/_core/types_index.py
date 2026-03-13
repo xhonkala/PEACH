@@ -86,10 +86,10 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
     "tl.archetypal_coordinates": (
         "DataFrame",
         [
-            "archetype_0_distance",
             "archetype_1_distance",
-            "...",  # Per-archetype distances
-            "nearest_archetype",  # str: 'archetype_0', etc.
+            "archetype_2_distance",
+            "...",  # Per-archetype distances (1-indexed)
+            "nearest_archetype",  # str: 'archetype_1', etc.
             "nearest_archetype_distance",  # float
             # Also stores in adata.obsm['archetype_distances']
         ],
@@ -222,12 +222,14 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
     ),
     # --- CellRank Integration ---
     "tl.setup_cellrank": (
-        "VelocityKernel",
-        ["CellRank VelocityKernel object", "MODIFIES: adata.obsp['T_forward'] transition matrix"],
+        "Tuple[ConnectivityKernel, GPCCA]",
+        ["CellRank ConnectivityKernel + GPCCA estimator with fate probabilities",
+         "MODIFIES: adata.obs['terminal_states'], adata.obsm['fate_probabilities'], adata.uns['lineage_names']"],
     ),
     "tl.compute_lineage_pseudotimes": (
-        "Dict[str, np.ndarray]",
-        ["lineage_name → pseudotime array", "MODIFIES: adata.obs['dpt_pseudotime'], adata.obs['{lineage}_pseudotime']"],
+        "None",
+        ["Modifies adata.obs in-place: adds pseudotime_to_{lineage} columns",
+         "MODIFIES: adata.obs['pseudotime_to_{lineage}']"],
     ),
     "tl.compute_lineage_drivers": ("DataFrame", ["gene", "lineage", "correlation", "pvalue", "qvalue"]),
     "tl.compute_transition_frequencies": (
@@ -896,8 +898,10 @@ FUNCTION_PARAMS = {
         "batch_size": ("int", 256),
         "n_steps": ("int", 50),
         "device": ("str", "cpu"),
+        "solver_method": ("str", "euler"),
         "name": ("str|None", None),
         "random_state": ("int", 42),
+        "return_model": ("bool", False),
         "copy": ("bool", False),
     },
     "tl.flow_between": {
@@ -1301,7 +1305,7 @@ USE_GET_FOR: set[str] = {
 DATAFRAME_SCHEMAS = {
     "gene_associations": [
         "gene",  # str: gene name
-        "archetype",  # str: "archetype_0", "archetype_1", ...
+        "archetype",  # str: "archetype_1", "archetype_2", ... (1-indexed; archetype_0 = central)
         "n_archetype_cells",  # int: cells in archetype bin
         "n_other_cells",  # int: cells outside archetype bin
         "mean_archetype",  # float: mean expression in archetype

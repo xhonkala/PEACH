@@ -34,6 +34,7 @@ from .regression import (
     vertex_radar,
     regression_volcano,
     archetype_regression_dotplot,
+    archetype_radar_ridgeplot,
     pattern_summary,
 )
 
@@ -46,6 +47,7 @@ from .decomposition import (
     gmm_bic_curve,
     component_heatmap,
     component_archetype_summary,
+    component_neighborhood_graph,
     component_stability,
 )
 
@@ -58,6 +60,8 @@ from .flow import (
     flow_magnitude,
     density_comparison,
     archetype_correspondence,
+    soft_assignment_flow,
+    flow_topo_landscape,
 )
 
 # Archetype comparison visualization
@@ -96,6 +100,7 @@ __all__ = [
     "vertex_radar",
     "regression_volcano",
     "archetype_regression_dotplot",
+    "archetype_radar_ridgeplot",
     "pattern_summary",
     # Ternary
     "ternary_facet",
@@ -105,6 +110,7 @@ __all__ = [
     "gmm_bic_curve",
     "component_heatmap",
     "component_archetype_summary",
+    "component_neighborhood_graph",
     "component_stability",
     # Flow Matching
     "velocity_quiver",
@@ -114,6 +120,8 @@ __all__ = [
     "flow_magnitude",
     "density_comparison",
     "archetype_correspondence",
+    "soft_assignment_flow",
+    "flow_topo_landscape",
     # Archetype comparison
     "mmd_heatmap",
     "contrast_volcano",

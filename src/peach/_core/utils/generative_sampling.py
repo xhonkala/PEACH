@@ -1138,7 +1138,7 @@ def validate_pca_distributions(
             # KS test comparing distance distributions
             ks_stat, ks_pval = stats.ks_2samp(gen_distances, real_distances)
 
-            archetype_stats[f"archetype_{arch_idx}"] = {
+            archetype_stats[f"archetype_{arch_idx + 1}"] = {
                 "gen_mean_distance": float(gen_distances.mean()),
                 "real_mean_distance": float(real_distances.mean()),
                 "gen_std_distance": float(gen_distances.std()),
@@ -1478,7 +1478,7 @@ def validate_archetypal_distributions(
 
         if verbose:
             print(
-                f"   Archetype {arch_idx}: KS statistic={ks_stat:.3f}, p-value={ks_pval:.3f} {'(significant)' if ks_pval < 0.05 else ''}"
+                f"   Archetype {arch_idx + 1}: KS statistic={ks_stat:.3f}, p-value={ks_pval:.3f} {'(significant)' if ks_pval < 0.05 else ''}"
             )
 
     # Overall summary
@@ -1588,7 +1588,7 @@ def create_generated_samples_anndata(
         # Fallback: simple dominant archetype assignment
         dominant_archetypes = np.argmax(archetype_weights, axis=1)
         adata.obs["dominant_archetype"] = [
-            f"archetype_{dominant_archetypes[i]}" for i in range(len(dominant_archetypes))
+            f"archetype_{dominant_archetypes[i] + 1}" for i in range(len(dominant_archetypes))
         ]
         adata.obs["dominant_archetype"] = adata.obs["dominant_archetype"].astype("category")
 

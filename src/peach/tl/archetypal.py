@@ -729,7 +729,7 @@ def extract_archetype_weights(
             max_w = cell_weights[:, i].max()
             dominant = (cell_weights[:, i] > 0.5).sum()
             print(
-                f"   Archetype {i}: mean={mean_w:.3f}, std={std_w:.3f}, max={max_w:.3f}, dominant in {dominant} cells"
+                f"   Archetype {i + 1}: mean={mean_w:.3f}, std={std_w:.3f}, max={max_w:.3f}, dominant in {dominant} cells"
             )
 
     return cell_weights

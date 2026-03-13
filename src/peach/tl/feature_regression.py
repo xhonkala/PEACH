@@ -26,6 +26,7 @@ def feature_simplex_regression(
     robust_se: bool = True,
     store_residuals: bool = True,
     comprehensive_degree: bool = False,
+    store_to_adata: bool = True,
     copy: bool = False,
 ) -> dict:
     """Simplex regression of features on archetype weights (Scheffe polynomials).
@@ -53,6 +54,10 @@ def feature_simplex_regression(
     comprehensive_degree : bool
         If True, run degree d=2..K-1 fits with incremental F-tests, storing
         results in serialized['degree_comparison'].
+    store_to_adata : bool
+        If True (default), store results in adata.uns. Set to False when
+        calling in a loop (e.g., per-component regression) to avoid
+        overwriting shared keys.
     copy : bool
         If True, operate on a copy of adata.
 
@@ -73,17 +78,18 @@ def feature_simplex_regression(
     K = weights.shape[1]
     n_cells = adata.n_obs
     n_features = len(feat_names)
-    archetype_names = [f"archetype_{i}" for i in range(K)]
+    archetype_names = [f"archetype_{i+1}" for i in range(K)]
 
     # Degree 1
     W1, _ = scheffe_design_matrix(weights, degree=1)
     result1 = ols_fit(W1, Y, robust_se=robust_se)
 
-    # FDR correction on F-test
-    _, f_pvalue_fdr, _, _ = multipletests(result1["f_pvalues"], method="fdr_bh")
+    # FDR correction on F-test (clamp underflowed zeros for large-N datasets)
+    f_pvals_clamped = np.clip(result1["f_pvalues"], np.finfo(float).tiny, 1.0)
+    _, f_pvalue_fdr, _, _ = multipletests(f_pvals_clamped, method="fdr_bh")
 
     # FDR on vertex t-pvalues (across genes x archetypes)
-    flat_vertex_pvals = result1["t_pvalues"].ravel()
+    flat_vertex_pvals = np.clip(result1["t_pvalues"].ravel(), np.finfo(float).tiny, 1.0)
     _, flat_vertex_fdr, _, _ = multipletests(flat_vertex_pvals, method="fdr_bh")
     vertex_pvalues_fdr = flat_vertex_fdr.reshape(result1["t_pvalues"].shape)
 
@@ -104,8 +110,8 @@ def feature_simplex_regression(
         interaction_se = result2["standard_errors"][:, K:]
         r_squared_degree2 = result2["r_squared"]
 
-        # FDR on interaction t-pvalues
-        flat_int_pvals = result2["t_pvalues"][:, K:].ravel()
+        # FDR on interaction t-pvalues (clamp underflowed zeros)
+        flat_int_pvals = np.clip(result2["t_pvalues"][:, K:].ravel(), np.finfo(float).tiny, 1.0)
         _, flat_int_fdr, _, _ = multipletests(flat_int_pvals, method="fdr_bh")
         interaction_pvalues_fdr = flat_int_fdr.reshape(interaction_pvalues.shape)
 
@@ -178,9 +184,10 @@ def feature_simplex_regression(
             r_squared_degree1=result1["r_squared"],
         )
 
-    suffix = regression_storage_suffix(feature_matrix)
-    store_result(adata, f"simplex_regression_{suffix}", serialized)
-    store_result(adata, "simplex_regression", serialized)
+    if store_to_adata:
+        suffix = regression_storage_suffix(feature_matrix)
+        store_result(adata, f"simplex_regression_{suffix}", serialized)
+        store_result(adata, "simplex_regression", serialized)
 
     return serialized
 
@@ -362,8 +369,9 @@ def _comprehensive_degree_comparison(weights, Y, K, *, robust_se, r_squared_degr
             incremental_f[valid] = np.maximum(incremental_f[valid], 0.0)
             incremental_p[valid] = stats.f.sf(incremental_f[valid], dfn=df_extra, dfd=df_res)
 
-        # FDR correct incremental p-values
-        _, incremental_p_fdr, _, _ = multipletests(incremental_p, method="fdr_bh")
+        # FDR correct incremental p-values (clamp underflowed zeros)
+        incremental_p_clamped = np.clip(incremental_p, np.finfo(float).tiny, 1.0)
+        _, incremental_p_fdr, _, _ = multipletests(incremental_p_clamped, method="fdr_bh")
 
         # Significant features at FDR < 0.05
         significant_features = np.sum(incremental_p_fdr < 0.05)
@@ -568,23 +576,15 @@ def archetype_driver_regression(
             max_degree=1,  # CIs on main effects only
         )
 
-    # Global FDR across all ILR components and features
-    all_main_pvals = main_pvalues.ravel()
-    nonzero_mask = all_main_pvals > 0
-    main_pvalues_fdr = np.ones_like(all_main_pvals)
-    if nonzero_mask.any():
-        _, fdr_vals, _, _ = multipletests(all_main_pvals[nonzero_mask], method="fdr_bh")
-        main_pvalues_fdr[nonzero_mask] = fdr_vals
+    # Global FDR across all ILR components and features (clamp underflowed zeros)
+    all_main_pvals = np.clip(main_pvalues.ravel(), np.finfo(float).tiny, 1.0)
+    _, main_pvalues_fdr, _, _ = multipletests(all_main_pvals, method="fdr_bh")
     main_pvalues_fdr = main_pvalues_fdr.reshape(main_pvalues.shape)
 
     interaction_pvalues_fdr = None
     if interaction_pvalues is not None:
-        all_int_pvals = interaction_pvalues.ravel()
-        nonzero_int = all_int_pvals > 0
-        int_fdr = np.ones_like(all_int_pvals)
-        if nonzero_int.any():
-            _, fdr_vals, _, _ = multipletests(all_int_pvals[nonzero_int], method="fdr_bh")
-            int_fdr[nonzero_int] = fdr_vals
+        all_int_pvals = np.clip(interaction_pvalues.ravel(), np.finfo(float).tiny, 1.0)
+        _, int_fdr, _, _ = multipletests(all_int_pvals, method="fdr_bh")
         interaction_pvalues_fdr = int_fdr.reshape(interaction_pvalues.shape)
 
     result = DriverRegressionResult(
