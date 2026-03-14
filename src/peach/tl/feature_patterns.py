@@ -73,11 +73,21 @@ def classify_feature_patterns(
         p = c["pattern"]
         pattern_counts[p] = pattern_counts.get(p, 0) + 1
 
+    # Build archetype -> feature name mapping for archetype-exclusive and structured
+    archetype_features = {}
+    feat_names = regression_result.feature_names
+    for i, c in enumerate(classifications):
+        if c["pattern"] in ("archetype-exclusive", "structured"):
+            dominant = c["details"].get("dominant_archetype")
+            if dominant is not None:
+                archetype_features.setdefault(dominant, []).append(feat_names[i])
+
     result = PatternClassificationResult(
         feature_names=regression_result.feature_names,
         n_features=regression_result.n_features,
         classifications=classifications,
         pattern_counts=pattern_counts,
+        archetype_features=archetype_features if archetype_features else None,
     )
 
     serialized = result.to_serializable()

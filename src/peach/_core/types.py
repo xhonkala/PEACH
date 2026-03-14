@@ -3564,15 +3564,19 @@ class PatternClassificationResult(BaseModel):
     n_features: int
     classifications: list[dict]  # one per feature: {pattern, confidence, details}
     pattern_counts: dict[str, int]  # pattern_name -> count
+    archetype_features: dict | None = None  # archetype_idx -> list of feature names
 
     def to_serializable(self) -> dict:
         """Convert to h5ad-safe dict for adata.uns storage."""
-        return {
+        result = {
             "feature_names": self.feature_names,
             "n_features": self.n_features,
             "classifications": self.classifications,
             "pattern_counts": self.pattern_counts,
         }
+        if self.archetype_features is not None:
+            result["archetype_features"] = self.archetype_features
+        return result
 
 
 class FlowWithinResult(BaseModel):
