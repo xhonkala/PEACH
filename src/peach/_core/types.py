@@ -3512,12 +3512,11 @@ class ArchetypeFeatureSimilarityResult(BaseModel):
     """Feature-level similarity between archetypes."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    silhouette_per_archetype: np.ndarray   # [K]
-    silhouette_overall: float
     spearman_matrix: np.ndarray            # [K, K] or [K_A, K_B]
     spearman_pvalue_matrix: np.ndarray     # [K, K] or [K_A, K_B]
     spearman_pvalue_fdr_matrix: np.ndarray | None = None  # [K, K] BH-corrected
     n_shared_features: int
+    n_significant_features: int = 0
     is_between_fit: bool = False
     archetype_names_a: list[str]
     archetype_names_b: list[str] | None = None

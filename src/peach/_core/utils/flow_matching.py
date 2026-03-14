@@ -421,5 +421,8 @@ def compute_mmd(X, Y, bandwidth=None, max_samples=5000):
 
     n = len(X)
     m = len(Y)
-    mmd2 = K_XX.sum() / (n * n) + K_YY.sum() / (m * m) - 2 * K_XY.sum() / (n * m)
+    # Unbiased estimator: exclude diagonal (self-similarity) terms
+    mmd2 = (K_XX.sum() - np.trace(K_XX)) / (n * (n - 1)) \
+         + (K_YY.sum() - np.trace(K_YY)) / (m * (m - 1)) \
+         - 2 * K_XY.sum() / (n * m)
     return float(mmd2)

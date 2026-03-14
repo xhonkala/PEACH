@@ -78,10 +78,12 @@ def archetype_feature_similarity(
     adata: AnnData,
     adata_b: AnnData | None = None,
     *,
-    pca_key: str = "X_pca",
     copy: bool = False,
 ) -> dict:
-    """Feature-level archetype similarity: silhouette + Spearman on beta vectors.
+    """Feature-level archetype similarity: Spearman on FDR-significant beta vectors.
+
+    Only features with at least one vertex having ``vertex_pvalues_fdr < 0.05``
+    in the regression result are included in the Spearman correlation.
 
     Parameters
     ----------
@@ -89,7 +91,6 @@ def archetype_feature_similarity(
         Must have regression results in uns['peach_simplex_regression'].
     adata_b : AnnData or None
         If provided, compute between-fit Spearman on shared features.
-    pca_key : str
     copy : bool
 
     Returns
@@ -101,7 +102,7 @@ def archetype_feature_similarity(
         adata = adata.copy()
 
     K_a = get_archetype_weights(adata).shape[1]
-    sim = compute_feature_similarity(adata, adata_b, pca_key=pca_key)
+    sim = compute_feature_similarity(adata, adata_b)
 
     arch_names_a = [f"archetype_{i+1}" for i in range(K_a)]
     is_between = adata_b is not None
@@ -111,12 +112,11 @@ def archetype_feature_similarity(
         arch_names_b = [f"archetype_{i+1}" for i in range(K_b)]
 
     result = ArchetypeFeatureSimilarityResult(
-        silhouette_per_archetype=sim["silhouette_per_archetype"],
-        silhouette_overall=sim["silhouette_overall"],
         spearman_matrix=sim["spearman_matrix"],
         spearman_pvalue_matrix=sim["spearman_pvalue_matrix"],
         spearman_pvalue_fdr_matrix=sim.get("spearman_pvalue_fdr_matrix"),
         n_shared_features=sim["n_shared_features"],
+        n_significant_features=sim["n_significant_features"],
         is_between_fit=is_between,
         archetype_names_a=arch_names_a,
         archetype_names_b=arch_names_b,
