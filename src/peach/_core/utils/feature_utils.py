@@ -34,16 +34,16 @@ def regression_storage_suffix(feature_matrix) -> str:
     return "custom"
 
 
-def resolve_regression_result(adata, prefer: str = "genes"):
+def resolve_regression_result(adata, feature_type: str = "genes"):
     """Find simplex regression results, preferring the namespaced key.
 
     Lookup order:
-      1. adata.uns['peach_simplex_regression_{prefer}']
+      1. adata.uns['peach_simplex_regression_{feature_type}']
       2. adata.uns['peach_simplex_regression']  (backward compat)
 
     Returns None if neither exists.
     """
-    specific = f"peach_simplex_regression_{prefer}"
+    specific = f"peach_simplex_regression_{feature_type}"
     if specific in adata.uns:
         return adata.uns[specific]
     if "peach_simplex_regression" in adata.uns:

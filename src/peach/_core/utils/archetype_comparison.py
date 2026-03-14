@@ -199,7 +199,7 @@ def compute_feature_similarity(
     dict with spearman_matrix, spearman_pvalue_matrix,
          spearman_pvalue_fdr_matrix, n_shared_features, n_significant_features
     """
-    reg_a = resolve_regression_result(adata, prefer="genes")
+    reg_a = resolve_regression_result(adata, feature_type="genes")
     if reg_a is None:
         raise ValueError(
             "No regression results. Run pc.tl.feature_simplex_regression() first."
@@ -219,7 +219,7 @@ def compute_feature_similarity(
         sig_mask_a = np.ones(len(names_a), dtype=bool)
 
     if adata_b is not None:
-        reg_b = resolve_regression_result(adata_b, prefer="genes")
+        reg_b = resolve_regression_result(adata_b, feature_type="genes")
         if reg_b is None:
             raise ValueError("No regression results in adata_b.")
         coefs_b = np.asarray(reg_b["vertex_coefficients"])
@@ -306,7 +306,7 @@ def compute_wald_contrasts(
     """
     from statsmodels.stats.multitest import multipletests
 
-    reg = resolve_regression_result(adata, prefer="genes")
+    reg = resolve_regression_result(adata, feature_type="genes")
     if reg is None:
         raise ValueError(
             "No regression results. Run pc.tl.feature_simplex_regression() first."
@@ -356,7 +356,7 @@ def compute_wald_contrasts(
         ])
 
         z = np.where(d_se > 0, d_beta / d_se, 0.0)
-        pval = 2 * stats.t.sf(np.abs(z), df=df)
+        pval = np.clip(2 * stats.t.sf(np.abs(z), df=df), np.finfo(float).tiny, 1.0)
 
         delta_beta[(j, k)] = d_beta
         delta_se[(j, k)] = d_se

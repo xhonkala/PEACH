@@ -192,7 +192,7 @@ def component_heatmap(
     # Feature names (try from regression results or var_names)
     feature_names = None
     from peach._core.utils.feature_utils import resolve_regression_result
-    _reg = resolve_regression_result(adata, prefer="genes")
+    _reg = resolve_regression_result(adata, feature_type="genes")
     if _reg is not None:
         feature_names = _reg.get("feature_names")
     if feature_names is not None and len(feature_names) == n_features:
@@ -380,36 +380,40 @@ def component_stability(
 def component_neighborhood_graph(
     adata: AnnData,
     *,
+    pca_key: str = "X_pca",
     edge_threshold: float | None = None,
     show: bool = True,
     save: str | None = None,
 ) -> go.Figure:
-    """3D network graph of GMM components in archetypal weight space.
+    """2D network graph of GMM components in PCA space.
 
-    Nodes are GMM components positioned at their weight-space centroids,
-    sized by cell count and colored by dominant archetype. Edges connect
-    components whose centroids are within ``edge_threshold`` Euclidean
-    distance, revealing the topology of subpopulation relationships on
-    the simplex.
+    Nodes are GMM components positioned at their mean PCA coordinates
+    (centroid of assigned cells), sized by cell count and colored by
+    dominant archetype. Edges connect components whose centroids are
+    within ``edge_threshold`` Euclidean distance in full weight space,
+    revealing the topology of subpopulation relationships.
 
     Parameters
     ----------
     adata : AnnData
         Must have GMM results in ``uns['peach_gmm']`` with at least
         ``component_assignments`` and one of ``component_weight_means``
-        or ``component_simplex_means``.
+        or ``component_simplex_means``. Must also have PCA coordinates
+        in ``obsm[pca_key]``.
+    pca_key : str
+        Key in ``obsm`` for PCA coordinates used for node layout.
     edge_threshold : float or None
         Maximum Euclidean distance (in weight space) for drawing an edge.
         Default: median pairwise distance between component centroids.
     show : bool
         Whether to call ``fig.show()``.
     save : str or None
-        If provided, save figure to this path (HTML recommended for 3D).
+        If provided, save figure to this path.
 
     Returns
     -------
     go.Figure
-        Interactive 3D plotly figure.
+        Interactive 2D plotly figure.
     """
     from scipy.spatial.distance import pdist, squareform
     from scipy.stats import entropy as sp_entropy
@@ -418,7 +422,19 @@ def component_neighborhood_graph(
     assignments = np.asarray(gmm["component_assignments"])
     n_stable = int(gmm["n_components_stable"])
 
-    # Get component centroids — prefer weight_means, fall back to simplex_means
+    # PCA coordinates for layout
+    if pca_key not in adata.obsm:
+        raise ValueError(f"adata.obsm['{pca_key}'] not found.")
+    pca = np.asarray(adata.obsm[pca_key])
+
+    # Compute PCA centroids per component (mean PCA position of assigned cells)
+    centroids_pca = np.zeros((n_stable, 2))
+    for c in range(n_stable):
+        mask = assignments == c
+        if np.any(mask):
+            centroids_pca[c] = pca[mask, :2].mean(axis=0)
+
+    # Get weight-space centroids for edge distance computation
     centroids_raw = gmm.get("component_weight_means")
     if centroids_raw is None:
         centroids_raw = gmm.get("component_simplex_means")
@@ -430,18 +446,14 @@ def component_neighborhood_graph(
     centroids_raw = np.asarray(centroids_raw)[:n_stable]
     K = centroids_raw.shape[1]
 
-    # Project to 3D using first 3 weight dimensions
-    centroids_3d = centroids_raw[:, :3]
-
     # Archetype map for coloring
     archetype_map = gmm.get("component_archetype_map")
     if archetype_map is not None:
         archetype_map = np.asarray(archetype_map)[:n_stable].astype(int)
     else:
-        # Fall back: dominant archetype = argmax of centroid weights
         archetype_map = np.argmax(centroids_raw, axis=1)
 
-    # Pairwise distances in full weight space (not just the 3D projection)
+    # Pairwise distances in full weight space for edge decisions
     if n_stable < 2:
         dist_matrix = np.zeros((1, 1))
     else:
@@ -474,12 +486,6 @@ def component_neighborhood_graph(
     else:
         node_sizes = np.full(n_stable, 16.0)
 
-    # Node colors by dominant archetype
-    node_colors = [
-        CATEGORICAL_PALETTE[int(archetype_map[c]) % len(CATEGORICAL_PALETTE)]
-        for c in range(n_stable)
-    ]
-
     # Per-component entropy for hover info
     weights = adata.obsm.get("cell_archetype_weights")
     comp_entropies = np.full(n_stable, np.nan)
@@ -495,21 +501,16 @@ def component_neighborhood_graph(
     # Build figure
     fig = go.Figure()
 
-    # Cell scatter background — low-alpha cloud showing data distribution
-    cell_weights = adata.obsm.get("cell_archetype_weights")
-    if cell_weights is not None:
-        cell_weights = np.asarray(cell_weights)
-        cell_3d = cell_weights[:, :3]
-        fig.add_trace(go.Scatter3d(
-            x=cell_3d[:, 0],
-            y=cell_3d[:, 1],
-            z=cell_3d[:, 2],
-            mode="markers",
-            marker=dict(size=1.5, color=COLOR_MUTED, opacity=0.03),
-            hoverinfo="skip",
-            name="Cells",
-            showlegend=True,
-        ))
+    # Cell scatter background — low-alpha cloud in PCA space
+    fig.add_trace(go.Scatter(
+        x=pca[:, 0],
+        y=pca[:, 1],
+        mode="markers",
+        marker=dict(size=2, color=COLOR_MUTED, opacity=0.05),
+        hoverinfo="skip",
+        name="Cells",
+        showlegend=True,
+    ))
 
     # Edges — draw individual edges so width can vary by distance
     if edges:
@@ -520,14 +521,12 @@ def component_neighborhood_graph(
         for idx, (i, j) in enumerate(edges):
             d = dist_matrix[i, j]
             if max_d > min_d:
-                # Invert: closer = thicker, range [1, 5]
                 w = 1 + 4 * (1 - (d - min_d) / (max_d - min_d))
             else:
                 w = 3
-            fig.add_trace(go.Scatter3d(
-                x=[centroids_3d[i, 0], centroids_3d[j, 0]],
-                y=[centroids_3d[i, 1], centroids_3d[j, 1]],
-                z=[centroids_3d[i, 2], centroids_3d[j, 2]],
+            fig.add_trace(go.Scatter(
+                x=[centroids_pca[i, 0], centroids_pca[j, 0]],
+                y=[centroids_pca[i, 1], centroids_pca[j, 1]],
                 mode="lines",
                 line=dict(color=COLOR_MUTED, width=w),
                 showlegend=False,
@@ -551,10 +550,9 @@ def component_neighborhood_graph(
     for arch_idx in unique_archetypes:
         comp_mask = [c for c in range(n_stable) if int(archetype_map[c]) == arch_idx]
         arch_color = CATEGORICAL_PALETTE[arch_idx % len(CATEGORICAL_PALETTE)]
-        fig.add_trace(go.Scatter3d(
-            x=centroids_3d[comp_mask, 0],
-            y=centroids_3d[comp_mask, 1],
-            z=centroids_3d[comp_mask, 2],
+        fig.add_trace(go.Scatter(
+            x=centroids_pca[comp_mask, 0],
+            y=centroids_pca[comp_mask, 1],
             mode="markers+text",
             marker=dict(
                 size=[node_sizes[c] for c in comp_mask],
@@ -572,64 +570,17 @@ def component_neighborhood_graph(
             legendgroup=f"arch_{arch_idx}",
         ))
 
-    # Archetype reference vertices — identity basis projected to 3D
-    # For K >= 3, the first 3 archetypes sit at (1,0,0), (0,1,0), (0,0,1).
-    # For archetypes beyond the 3rd, project their K-dim identity vector
-    # into the first 3 dimensions (all zeros for k >= 3).
-    arch_positions = np.eye(K)[:, :3]
-
-    for k in range(K):
-        arch_color = CATEGORICAL_PALETTE[k % len(CATEGORICAL_PALETTE)]
-        fig.add_trace(go.Scatter3d(
-            x=[arch_positions[k, 0]],
-            y=[arch_positions[k, 1]],
-            z=[arch_positions[k, 2]],
-            mode="markers+text",
-            marker=dict(
-                size=10,
-                color=arch_color,
-                symbol="diamond",
-                opacity=0.6,
-                line=dict(width=1.5, color="#555"),
-            ),
-            text=[f"A{k+1}"],
-            textposition="bottom center",
-            textfont=dict(size=10, color="#555"),
-            hoverinfo="text",
-            hovertext=[f"<b>Archetype A{k+1}</b>"],
-            name=f"A{k+1} vertex",
-            showlegend=True,
-            legendgroup=f"arch_{k}",
-        ))
-
     # Style
-    apply_style(fig, title="GMM Component Neighborhood Graph")
+    apply_style(fig, title="GMM Component Neighborhood Graph (PCA space)",
+                xaxis_title="PC1", yaxis_title="PC2")
     fig.update_layout(
-        height=650,
-        width=700,
+        height=550,
+        width=650,
         legend=dict(
             title=dict(text="Legend", font=dict(size=10)),
             x=1.0, y=0.95, xanchor="left",
             bgcolor="rgba(255,255,255,0.8)", borderwidth=0,
             font=dict(size=9),
-        ),
-        scene=dict(
-            xaxis_title="A1 weight",
-            yaxis_title="A2 weight",
-            zaxis_title="A3 weight",
-            xaxis=dict(
-                showgrid=True, gridcolor="#eee", gridwidth=0.5,
-                zeroline=False, linecolor="#aaa", linewidth=0.5,
-            ),
-            yaxis=dict(
-                showgrid=True, gridcolor="#eee", gridwidth=0.5,
-                zeroline=False, linecolor="#aaa", linewidth=0.5,
-            ),
-            zaxis=dict(
-                showgrid=True, gridcolor="#eee", gridwidth=0.5,
-                zeroline=False, linecolor="#aaa", linewidth=0.5,
-            ),
-            bgcolor="white",
         ),
     )
 
