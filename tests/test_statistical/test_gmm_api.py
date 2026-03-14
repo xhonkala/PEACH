@@ -218,3 +218,45 @@ class TestFeatureSimplexDecomposition:
 
         with pytest.raises(ValueError, match="feature_simplex_decomposition"):
             pc.tl.component_regression(gmm_adata)
+
+    def test_icl_model_selection(self, gmm_adata):
+        """ICL model selection returns icl_values and selects reasonable k."""
+        import peach as pc
+
+        result = pc.tl.feature_simplex_decomposition(
+            gmm_adata, model_selection="icl",
+            n_initializations=3, n_components_range=(2, 4),
+        )
+        assert result["n_components_optimal"] >= 2
+        assert "icl_values" in result
+        icl_vals = result["icl_values"]
+        assert len(icl_vals) == len(result["n_components_tested"])
+        # ICL values should be finite
+        assert np.all(np.isfinite(icl_vals))
+        # ICL >= BIC (entropy term is non-negative)
+        bic_vals = result["bic_values"]
+        assert np.all(icl_vals >= bic_vals - 1e-6)
+
+    def test_pairwise_nmi_stability(self, gmm_adata):
+        """Pairwise stability scores are bounded and high for well-separated data."""
+        import peach as pc
+
+        result = pc.tl.feature_simplex_decomposition(
+            gmm_adata, n_initializations=5, n_components_range=(2, 4),
+        )
+        scores = result["component_stability_scores"]
+        assert np.all(scores >= 0) and np.all(scores <= 1)
+        assert np.mean(scores) > 0.5  # well-separated clusters
+
+    def test_dirichlet_mixture(self, gmm_adata):
+        """Dirichlet mixture fits, returns simplex means summing to 1."""
+        import peach as pc
+
+        result = pc.tl.feature_simplex_decomposition(
+            gmm_adata, model_type="dirichlet",
+            n_initializations=3, n_components_range=(2, 4),
+        )
+        assert result["n_components_optimal"] >= 2
+        assert result.get("model_type") == "dirichlet"
+        means = np.asarray(result["component_simplex_means"])
+        np.testing.assert_allclose(means.sum(axis=1), 1.0, atol=1e-6)
