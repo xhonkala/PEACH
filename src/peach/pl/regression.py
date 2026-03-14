@@ -23,7 +23,7 @@ def _get_regression_data(adata, feature_type="genes"):
     Tries namespaced key first (e.g. peach_simplex_regression_genes),
     falls back to generic peach_simplex_regression.
     """
-    result = resolve_regression_result(adata, prefer=feature_type)
+    result = resolve_regression_result(adata, feature_type=feature_type)
     if result is None:
         raise ValueError(
             "No regression results found. Run pc.tl.feature_simplex_regression() first."

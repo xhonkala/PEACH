@@ -213,3 +213,18 @@ def test_bifurcation_scoring():
     assert bif["eigenvalue_real"].shape == (5, n, dim)
     assert bif["eigenvalue_imag"].shape == (5, n, dim)
     assert len(bif["timepoints"]) == 5
+
+
+def test_jacobian_det_nonzero_after_training():
+    """After real training, Jacobian determinant should not be all zeros."""
+    from peach._core.utils.flow_matching import FlowModel
+
+    rng = np.random.default_rng(42)
+    model = FlowModel(dim=5, hidden_dims=(64, 64))
+    source = rng.standard_normal((100, 5)).astype(np.float32)
+    target = source + rng.standard_normal((100, 5)).astype(np.float32) * 2
+    model.train(source, target, n_epochs=100, batch_size=64)
+    jac = model.jacobian(source[:5], t=0.5)
+    dets = np.linalg.det(jac)
+    assert not np.allclose(dets, 0, atol=1e-6), f"Jacobian dets all ~0: {dets}"
+    assert np.all(np.isfinite(dets))

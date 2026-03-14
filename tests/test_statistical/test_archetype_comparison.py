@@ -225,6 +225,30 @@ class TestPublicAPI:
         assert "peach_archetype_contrasts" in comparison_adata.uns
 
 
+class TestWaldQvalueUnderflow:
+    def test_wald_qvalues_not_all_zero(self):
+        """Wald FDR q-values should not ALL be zero -- at minimum flat genes should be non-significant."""
+        from peach._core.utils.archetype_comparison import compute_wald_contrasts
+        import peach as pc
+
+        rng = np.random.default_rng(42)
+        K, n, n_genes = 3, 500, 50
+        weights = rng.dirichlet([1] * K, size=n)
+        true_beta = rng.standard_normal((n_genes, K)) * 5
+        true_beta[1] = [3.0, 3.0, 3.0]  # flat gene
+        noise = rng.normal(0, 0.3, size=(n, n_genes))
+        X = weights @ true_beta.T + noise
+        adata = AnnData(X)
+        adata.var_names = [f"gene_{i}" for i in range(n_genes)]
+        adata.obsm["cell_archetype_weights"] = weights
+        pc.tl.feature_simplex_regression(adata, n_bootstrap=0)
+        result = compute_wald_contrasts(adata)
+        pairs = result["pairs"]
+        all_fdr = np.concatenate([np.asarray(result["pvalues_fdr"][p]) for p in pairs])
+        # Not ALL zero
+        assert np.any(all_fdr > 0), "All Wald FDR q-values are zero"
+
+
 class TestMMDUnbiased:
     def test_mmd_unbiased_identical(self):
         """MMD of identical distribution should be near zero."""

@@ -189,7 +189,7 @@ def component_regression(
         adata_sub = adata[mask].copy()
         reg = feature_simplex_regression(
             adata_sub, n_bootstrap=n_bootstrap, robust_se=robust_se,
-            store_to_adata=False,
+            store_to_adata=False, store_residuals=False,
         )
         component_regs[c] = reg
 

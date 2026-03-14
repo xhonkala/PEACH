@@ -939,7 +939,7 @@ def soft_assignment_flow(
     # ------------------------------------------------------------------
     # 1. Resolve regression data
     # ------------------------------------------------------------------
-    reg = resolve_regression_result(adata, prefer=feature_type)
+    reg = resolve_regression_result(adata, feature_type=feature_type)
     if reg is None:
         raise ValueError(
             "No regression results found. "

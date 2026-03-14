@@ -39,7 +39,7 @@ def classify_feature_patterns(
         Also stored in adata.uns['peach_feature_patterns'].
     """
     if regression_result is None:
-        stored = resolve_regression_result(adata, prefer="genes")
+        stored = resolve_regression_result(adata, feature_type="genes")
         if stored is None:
             raise ValueError(
                 "No regression results found. Run pc.tl.feature_simplex_regression() first "
@@ -117,7 +117,7 @@ def archetype_summary(
         Per-archetype structured summary.
     """
     # Check for regression results
-    reg = resolve_regression_result(adata, prefer="genes")
+    reg = resolve_regression_result(adata, feature_type="genes")
     if reg is None:
         raise ValueError(
             "No simplex regression results found. "
