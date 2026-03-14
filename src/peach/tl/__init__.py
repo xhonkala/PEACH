@@ -61,6 +61,7 @@ from .flow import (
     flow_gene_alignment,
     flow_jacobian,
     flow_significance,
+    flow_bifurcation,
     flow_feature_graph,
     flow_temporal_feature_graph,
 )
@@ -117,6 +118,7 @@ __all__ = [
     "flow_gene_alignment",
     "flow_jacobian",
     "flow_significance",
+    "flow_bifurcation",
     "flow_feature_graph",
     "flow_temporal_feature_graph",
     # v0.5.0: Archetype comparison

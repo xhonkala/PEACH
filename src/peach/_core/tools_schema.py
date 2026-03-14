@@ -1171,7 +1171,8 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
         ],
         returns="dict (serialized SimplexRegressionResult)",
-        returns_description="vertex_coefficients [n_features, K], r_squared_degree1, f_pvalue, vertex_pvalues, "
+        returns_description="vertex_coefficients [n_features, K], vertex_covariance [n_features] list of [K,K], "
+        "r_squared_degree1, f_pvalue, vertex_pvalues, "
         "interaction_coefficients (optional), CIs (optional), effective_rank, expected_rank, extra_rank_deficient",
         requires=["cell_archetype_weights in adata.obsm"],
         modifies_adata=[
@@ -1181,8 +1182,8 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
     ),
     "tl.classify_feature_patterns": ToolSchema(
         name="tl.classify_feature_patterns",
-        description="Classify features into biological pattern types (exclusive, gradient, flat, etc.) "
-        "based on simplex regression coefficients.",
+        description="Classify features into biological pattern types (flat, archetype-exclusive, "
+        "interaction, structured) based on FDR-corrected regression p-values.",
         parameters=[
             Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
             Parameter(
@@ -1192,12 +1193,12 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
                 required=False,
                 default=None,
             ),
-            Parameter("r2_threshold", ParamType.FLOAT, "Minimum R^2 for non-flat classification", default=0.05),
-            Parameter("cv_threshold", ParamType.FLOAT, "CV(beta) below this → flat", default=0.15),
+            Parameter("fdr_threshold", ParamType.FLOAT, "FDR p-value threshold for significance", default=0.05),
             Parameter("exclusive_ratio", ParamType.FLOAT, "Min fold-change for exclusive pattern", default=2.0),
         ],
         returns="PatternClassificationResult",
-        returns_description="classifications [n_features] with pattern type and details, pattern_counts dict",
+        returns_description="classifications [n_features] with pattern type and details, pattern_counts dict, "
+        "archetype_features {archetype_idx: [feature_names]}",
         requires=["peach_simplex_regression in adata.uns (or regression_result)"],
         modifies_adata=["uns['peach_feature_patterns']"],
     ),
@@ -1234,8 +1235,9 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
     ),
     "tl.feature_simplex_decomposition": ToolSchema(
         name="tl.feature_simplex_decomposition",
-        description="Decompose cell populations by GMM in ILR-transformed archetype weight space. "
-        "Selects component count by BIC and filters by multi-initialization stability.",
+        description="Decompose cell populations by mixture model in archetype weight space. "
+        "Supports Gaussian (ILR) or Dirichlet mixture. Selects component count by BIC or ICL "
+        "and filters by multi-initialization pairwise stability.",
         parameters=[
             Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
             Parameter(
@@ -1253,6 +1255,20 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
                 required=False,
                 default=None,
             ),
+            Parameter(
+                "model_type",
+                ParamType.STRING,
+                "Mixture model type: 'gaussian' (GMM in ILR space) or 'dirichlet'",
+                default="gaussian",
+                enum=["gaussian", "dirichlet"],
+            ),
+            Parameter(
+                "model_selection",
+                ParamType.STRING,
+                "Model selection criterion: 'bic' or 'icl' (integrated classification likelihood)",
+                default="bic",
+                enum=["bic", "icl"],
+            ),
             Parameter("covariance_type", ParamType.STRING, "GMM covariance type", default="full"),
             Parameter("n_initializations", ParamType.INTEGER, "Random inits for stability", default=20),
             Parameter("stability_threshold", ParamType.FLOAT, "Min stability score to retain", default=0.7),
@@ -1269,14 +1285,16 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         ],
         returns="dict",
         returns_description="n_components_optimal, n_components_stable, component_assignments, "
-        "component_simplex_means, component_probabilities, bic_values",
+        "component_simplex_means, component_probabilities, bic_values, "
+        "icl_values (when model_selection='icl'), model_type",
         requires=["cell_archetype_weights in adata.obsm"],
         modifies_adata=["uns['peach_gmm']", "obsm['peach_gmm_labels']"],
     ),
     "tl.flow_within": ToolSchema(
         name="tl.flow_within",
         description="Train a neural ODE flow model to transport source cells to target cells "
-        "within a single AnnData. Measures transport quality via MMD.",
+        "within a single AnnData. Measures transport quality via MMD. Supports OT-CFM "
+        "training and holdout validation.",
         parameters=[
             Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
             Parameter("source", ParamType.OBJECT, "Obs column filter dict, e.g. {'treatment': 'Base'}"),
@@ -1288,14 +1306,17 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter("batch_size", ParamType.INTEGER, "Batch size", default=256),
             Parameter("n_steps", ParamType.INTEGER, "ODE integration steps", default=50),
             Parameter("device", ParamType.STRING, "Computing device", default="cpu"),
-            Parameter("solver_method", ParamType.STRING, "ODE solver: 'euler', 'midpoint', 'heun3', 'dopri5'", default="euler"),
+            Parameter("solver_method", ParamType.STRING, "ODE solver: 'euler', 'midpoint', 'heun3', 'dopri5'", default="dopri5"),
             Parameter("name", ParamType.STRING, "Name for storage key", required=False, default=None),
             Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
             Parameter("return_model", ParamType.BOOLEAN, "Return FlowModel in result (needed for Jacobian/trajectory)", default=False),
+            Parameter("use_ot", ParamType.BOOLEAN, "Use minibatch Sinkhorn OT coupling for training pairs (requires POT)", default=False),
+            Parameter("holdout_fraction", ParamType.FLOAT, "Fraction of source cells held out for validation MMD (0 to 1)", default=0.0),
             Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
         ],
         returns="FlowWithinResult",
-        returns_description="transported [n_source, dim], losses, mmd_before, mmd_after, source/target masks, model (if return_model=True)",
+        returns_description="transported [n_source, dim], losses, mmd_before, mmd_after, source/target masks, "
+        "model (if return_model=True), holdout_mmd (if holdout_fraction > 0)",
         requires=["X_pca in adata.obsm", "source/target columns in adata.obs"],
         modifies_adata=["uns['peach_flow_*']"],
     ),
@@ -1325,7 +1346,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
     "tl.archetype_mmd": ToolSchema(
         name="tl.archetype_mmd",
         description="K x K MMD similarity matrix between archetype cell populations. "
-        "Uses hard assignments (argmax of weights) and permutation-based p-values.",
+        "Uses soft archetype weights (not hard argmax) and permutation-based p-values.",
         parameters=[
             Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
             Parameter(
@@ -1348,8 +1369,8 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
     ),
     "tl.archetype_feature_similarity": ToolSchema(
         name="tl.archetype_feature_similarity",
-        description="Feature-level archetype similarity: silhouette scores + Spearman correlation "
-        "on regression coefficient vectors. Requires simplex regression results.",
+        description="Feature-level archetype similarity: Spearman correlation on FDR-significant "
+        "regression coefficient vectors. Requires simplex regression results.",
         parameters=[
             Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
             Parameter(
@@ -1359,27 +1380,26 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
                 required=False,
                 default=None,
             ),
-            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
             Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
         ],
         returns="dict (serialized ArchetypeFeatureSimilarityResult)",
-        returns_description="silhouette_per_archetype [K], silhouette_overall, spearman_matrix [K, K], "
-        "spearman_pvalue_matrix [K, K], spearman_pvalue_fdr_matrix [K, K], n_shared_features",
-        requires=["peach_simplex_regression in adata.uns", "cell_archetype_weights in adata.obsm"],
+        returns_description="spearman_matrix [K, K], spearman_pvalue_matrix [K, K], "
+        "spearman_pvalue_fdr_matrix [K, K], n_shared_features, n_significant_features",
+        requires=["peach_simplex_regression in adata.uns"],
         modifies_adata=["uns['peach_archetype_feature_similarity']"],
     ),
     "tl.archetype_contrasts": ToolSchema(
         name="tl.archetype_contrasts",
         description="Pairwise Wald contrasts between archetype regression coefficients. "
-        "Tests H0: beta_j = beta_k for every feature with global BH FDR correction.",
+        "Tests H0: beta_j = beta_k using t-distribution (n - K df) with global BH FDR correction.",
         parameters=[
             Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights and regression results"),
             Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 heteroscedasticity-consistent covariance", default=True),
             Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
         ],
         returns="dict (serialized ArchetypeContrastsResult)",
-        returns_description="pairs [(j,k)], delta_beta {pair: [n_features]}, delta_se, z_scores, "
-        "pvalues, pvalues_fdr (global BH), feature_names, n_features, n_archetypes",
+        returns_description="pairs [(j,k)], delta_beta {pair: [n_features]}, delta_se, t_scores, "
+        "pvalues (t-distribution), pvalues_fdr (global BH), feature_names, n_features, n_archetypes",
         requires=["cell_archetype_weights in adata.obsm", "peach_simplex_regression in adata.uns"],
         modifies_adata=["uns['peach_archetype_contrasts']"],
     ),
@@ -1415,11 +1435,13 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
                 default=None,
             ),
             Parameter("n_permutations", ParamType.INTEGER, "Permutations for significance. 0 to skip", default=0),
+            Parameter("per_cell", ParamType.BOOLEAN, "Compute per-cell per-gene alignment scores", default=False),
             Parameter("random_state", ParamType.INTEGER, "Random seed for permutations", default=42),
         ],
         returns="dict",
         returns_description="alignment_scores [n_genes], gene_names, top_aligned, top_opposed, t, "
-        "alignment_pvalues (optional), alignment_pvalues_fdr (optional)",
+        "alignment_pvalues (optional), alignment_pvalues_fdr (optional), "
+        "per_cell_alignment [n_cells, n_genes] (if per_cell=True)",
         requires=["PCs in adata.varm", "FlowWithinResult"],
         modifies_adata=[],
     ),
@@ -1439,6 +1461,69 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         returns="dict",
         returns_description="jacobian_det [n_points], mean_jacobian [dim, dim], feature_expansion [n_genes], t",
         requires=["FlowModel from flow_within(return_model=True)", "PCs in adata.varm (for feature_expansion)"],
+        modifies_adata=[],
+    ),
+    "tl.flow_bifurcation": ToolSchema(
+        name="tl.flow_bifurcation",
+        description="Eigenvalue-based bifurcation scoring along the flow trajectory. "
+        "Computes Jacobian eigenvalues at multiple timepoints to detect saddle points "
+        "and divergent dynamics.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
+            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
+            Parameter("flow_model", ParamType.OBJECT, "FlowModel (from flow_result['model'] when return_model=True)"),
+            Parameter("n_timepoints", ParamType.INTEGER, "Number of timepoints to evaluate along trajectory", default=10),
+            Parameter("evaluation_points", ParamType.ARRAY, "Points to evaluate [n_points, dim]. None = source cells",
+                      required=False, default=None),
+        ],
+        returns="dict",
+        returns_description="divergence [n_eval, n_t], bifurcation_score [n_eval], "
+        "eigenvalue_real [n_eval, n_t, dim], eigenvalue_imag [n_eval, n_t, dim], "
+        "timepoints [n_t], n_saddle_points [n_eval]",
+        requires=["FlowModel from flow_within(return_model=True)"],
+        modifies_adata=[],
+    ),
+    "tl.flow_feature_graph": ToolSchema(
+        name="tl.flow_feature_graph",
+        description="Static feature coupling graph from flow Jacobian. Builds a directed "
+        "gene interaction graph by projecting the mean Jacobian into gene space "
+        "via PCA loadings, collapsed over time.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA loadings"),
+            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
+            Parameter("flow_model", ParamType.OBJECT, "FlowModel (from flow_result['model'] when return_model=True)"),
+            Parameter("n_top_genes", ParamType.INTEGER, "Number of top genes by PCA loading", default=200),
+            Parameter("n_timepoints", ParamType.INTEGER, "Timepoints for Jacobian averaging", default=20),
+            Parameter("n_eval_points", ParamType.INTEGER, "Points to evaluate Jacobian", default=300),
+            Parameter("edge_threshold", ParamType.FLOAT, "Min |weight| for edges. Auto = mean + 2*std",
+                      required=False, default=None),
+            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
+        ],
+        returns="dict",
+        returns_description="adjacency_matrix [n_top, n_top], gene_names, gene_indices, "
+        "out_centrality, in_centrality, flow_centrality, top_hub_genes, "
+        "igraph (optional), hub_genes_per_archetype {k: [genes]}",
+        requires=["PCs in adata.varm", "FlowModel from flow_within(return_model=True)"],
+        modifies_adata=[],
+    ),
+    "tl.flow_temporal_feature_graph": ToolSchema(
+        name="tl.flow_temporal_feature_graph",
+        description="Temporal feature graph with (gene, timepoint) nodes. Retains full "
+        "temporal structure with backbone edges and cross-feature edges per timepoint.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA loadings"),
+            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
+            Parameter("flow_model", ParamType.OBJECT, "FlowModel (from flow_result['model'] when return_model=True)"),
+            Parameter("n_top_genes", ParamType.INTEGER, "Number of top genes by PCA loading", default=200),
+            Parameter("n_timepoints", ParamType.INTEGER, "Timepoints for temporal nodes", default=20),
+            Parameter("n_eval_points", ParamType.INTEGER, "Points to evaluate Jacobian", default=300),
+            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
+        ],
+        returns="dict",
+        returns_description="cross_matrices [n_t], self_expansion [n_top, n_t], gene_names, timepoints, "
+        "temporal_centrality [n_top], temporal_profile [n_top, 4], "
+        "top_early_genes, top_mid_early_genes, top_mid_late_genes, top_late_genes",
+        requires=["PCs in adata.varm", "FlowModel from flow_within(return_model=True)"],
         modifies_adata=[],
     ),
     # =========================================================================

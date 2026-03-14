@@ -509,9 +509,9 @@ def main():
         done()
         report([
             f"FEATURE SIMILARITY ({name}):",
-            f"  Overall silhouette: {sim['silhouette_overall']:.3f}",
-            f"  Per-archetype: {np.array2string(np.asarray(sim['silhouette_per_archetype']), precision=3)}",
-            f"  CONTROL: Positive silhouette = archetypes have distinct feature profiles",
+            f"  Significant features: {sim.get('n_significant_features', 'N/A')}",
+            f"  Shared features: {sim.get('n_shared_features', 'N/A')}",
+            f"  CONTROL: Low Spearman = archetypes have distinct feature profiles",
         ])
         fig = pc.pl.feature_similarity_heatmap(ad_obj, show=False)
         save_viz(fig, f"feature_similarity_{name}.html")
