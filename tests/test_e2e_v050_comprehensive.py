@@ -594,7 +594,7 @@ for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
 
     # Feature similarity (now includes FDR-corrected Spearman)
     sim = pc.tl.archetype_feature_similarity(ad_obj)
-    print(f"  {name} silhouette: {sim['silhouette_overall']:.3f}")
+    print(f"  {name} n_significant_features: {sim.get('n_significant_features', 'N/A')}")
     assert "spearman_pvalue_fdr_matrix" in sim, "Missing Spearman FDR"
     pc.pl.feature_similarity_heatmap(
         ad_obj, show=False,
@@ -611,7 +611,7 @@ print(f"\n  Between-fit MMD matrix:")
 print(f"  {np.array2string(np.asarray(mmd_between['mmd_matrix']), precision=4)}")
 
 sim_between = pc.tl.archetype_feature_similarity(adata_cmp, adata_mono)
-print(f"  Between-fit Spearman: overall silhouette={sim_between['silhouette_overall']:.3f}")
+print(f"  Between-fit Spearman: n_significant_features={sim_between.get('n_significant_features', 'N/A')}")
 
 
 # ================================================================

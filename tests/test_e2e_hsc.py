@@ -201,7 +201,7 @@ def main():
     for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
         step(f"Feature similarity for {name}")
         sim = pc.tl.archetype_feature_similarity(ad_obj)
-        done(f"(silhouette={sim['silhouette_overall']:.3f})")
+        done(f"(n_significant={sim.get('n_significant_features', 'N/A')})")
 
     # 5d. Between-fit feature similarity
     step("Between-fit feature similarity (CMP vs Mono)")

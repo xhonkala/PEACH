@@ -133,12 +133,15 @@ def test_ot_cfm_training():
     pot = pytest.importorskip("ot")
     from peach._core.utils.flow_matching import FlowModel
 
-    source = np.random.randn(100, 5).astype(np.float32)
-    target = np.random.randn(100, 5).astype(np.float32)
+    rng = np.random.default_rng(42)
+    # Use shifted distributions so there's actual transport to learn
+    source = rng.standard_normal((100, 5)).astype(np.float32)
+    target = (rng.standard_normal((100, 5)) + 3.0).astype(np.float32)
     model = FlowModel(dim=5, hidden_dims=(32, 32))
-    losses = model.train(source, target, n_epochs=50, batch_size=64, use_ot=True)
-    assert len(losses) == 50
-    assert losses[-1] < losses[0]
+    losses = model.train(source, target, n_epochs=80, batch_size=64, use_ot=True)
+    assert len(losses) == 80
+    # Compare mean of first 10 vs last 10 epochs (smoothed) to avoid single-epoch noise
+    assert np.mean(losses[-10:]) < np.mean(losses[:10])
 
 
 def test_holdout_validation():

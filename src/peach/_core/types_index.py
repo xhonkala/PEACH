@@ -330,6 +330,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         "dict (serialized SimplexRegressionResult)",
         [
             "vertex_coefficients [n_features, K]",
+            "vertex_covariance [n_features] list of [K, K] matrices",
             "r_squared_degree1 [n_features]",
             "f_pvalue, f_pvalue_fdr [n_features]",
             "vertex_pvalues, vertex_pvalues_fdr, vertex_se [n_features, K]",
@@ -347,6 +348,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         [
             "classifications [n_features]",
             "pattern_counts {pattern: count}",
+            "archetype_features {archetype_idx: [feature_names]}",
         ],
     ),
     "tl.archetype_driver_regression": (
@@ -370,6 +372,8 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "component_weight_means [n_stable, K] (optional)",
             "component_probabilities [n_cells, n_stable] (optional)",
             "bic_values [n_tested]",
+            "icl_values [n_tested] (when model_selection='icl')",
+            "model_type ('gaussian' or 'dirichlet')",
         ],
     ),
     "tl.component_regression": (
@@ -395,6 +399,9 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "losses [n_epochs]",
             "mmd_before, mmd_after",
             "source_mask, target_mask",
+            "model (if return_model=True)",
+            "holdout_mmd (if holdout_fraction > 0)",
+            "holdout_fraction (if holdout_fraction > 0)",
         ],
     ),
     "tl.flow_between": (
@@ -411,6 +418,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "top_aligned, top_opposed [n_top]",
             "alignment_pvalues [n_genes] (if n_permutations > 0)",
             "alignment_pvalues_fdr [n_genes] (if n_permutations > 0)",
+            "per_cell_alignment [n_cells, n_genes] (if per_cell=True)",
         ],
     ),
     "tl.flow_jacobian": (
@@ -422,6 +430,41 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "tl.flow_significance": ("dict", ["p_value, observed_stat, null_distribution"]),
+    "tl.flow_bifurcation": (
+        "dict",
+        [
+            "divergence [n_eval_points, n_timepoints]",
+            "bifurcation_score [n_eval_points]",
+            "eigenvalue_real [n_eval_points, n_timepoints, dim]",
+            "eigenvalue_imag [n_eval_points, n_timepoints, dim]",
+            "timepoints [n_timepoints]",
+            "n_saddle_points [n_eval_points]",
+        ],
+    ),
+    "tl.flow_feature_graph": (
+        "dict",
+        [
+            "adjacency_matrix [n_top, n_top] sparse",
+            "gene_names [n_top]",
+            "gene_indices [n_top]",
+            "out_centrality, in_centrality, flow_centrality [n_top]",
+            "top_hub_genes [n_top]",
+            "igraph (optional, requires igraph package)",
+            "hub_genes_per_archetype {k: [gene_names]}",
+        ],
+    ),
+    "tl.flow_temporal_feature_graph": (
+        "dict",
+        [
+            "cross_matrices [n_timepoints] list of [n_top, n_top]",
+            "self_expansion [n_top, n_timepoints]",
+            "gene_names [n_top]",
+            "timepoints [n_timepoints]",
+            "temporal_centrality [n_top]",
+            "temporal_profile [n_top, 4] (early, mid-early, mid-late, late)",
+            "top_early_genes, top_mid_early_genes, top_mid_late_genes, top_late_genes",
+        ],
+    ),
     # v0.5.0: Archetype comparison
     "tl.archetype_mmd": (
         "ArchetypeMMDResult",
@@ -434,10 +477,10 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
     "tl.archetype_feature_similarity": (
         "ArchetypeFeatureSimilarityResult",
         [
-            "silhouette_per_archetype: [K]",
-            "silhouette_overall: float",
             "spearman_matrix: [K, K] rank correlation",
             "spearman_pvalue_fdr_matrix: [K, K] BH-corrected",
+            "n_shared_features: int",
+            "n_significant_features: int (features with FDR < 0.05)",
             "stored in adata.uns['peach_archetype_feature_similarity']",
         ],
     ),
@@ -478,10 +521,18 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
     "pl.flow_magnitude": ("go.Figure", ["Transport magnitude scatter"]),
     "pl.density_comparison": ("go.Figure", ["Source vs target KDE"]),
     "pl.archetype_correspondence": ("go.Figure", ["K x K correspondence"]),
+    "pl.soft_assignment_flow": ("go.Figure", ["Soft weight flow alluvial/sankey"]),
+    "pl.soft_assignment_heatmap": ("go.Figure", ["K_source x K_target correspondence heatmap"]),
+    "pl.flow_topo_landscape": ("go.Figure", ["Topological landscape of flow divergence"]),
     # Archetype comparison
     "pl.mmd_heatmap": ("go.Figure", ["Heatmap of K x K MMD matrix"]),
     "pl.contrast_volcano": ("go.Figure", ["Volcano plot: delta-beta vs -log10(FDR q)"]),
+    "pl.contrast_volcano_grid": ("go.Figure", ["Grid of volcano subplots per archetype pair"]),
     "pl.feature_similarity_heatmap": ("go.Figure", ["Spearman correlation heatmap"]),
+    "pl.archetype_radar": ("go.Figure", ["Radar/spider plot of archetype characterization"]),
+    "pl.archetype_regression_dotplot": ("go.Figure", ["Dotplot: |beta| x -log10(p) per archetype"]),
+    "pl.component_archetype_summary": ("go.Figure", ["2x2 panel: component sizes, weights, proximity, entropy"]),
+    "pl.component_neighborhood_graph": ("go.Figure", ["Network graph of component neighborhoods"]),
     # =========================================================================
     # _core (INTERNAL) - Key functions
     # =========================================================================
@@ -852,8 +903,7 @@ FUNCTION_PARAMS = {
     "tl.classify_feature_patterns": {
         "adata": ("AnnData", REQUIRED),
         "regression_result": ("SimplexRegressionResult|None", None),
-        "r2_threshold": ("float", 0.05),
-        "cv_threshold": ("float", 0.15),
+        "fdr_threshold": ("float", 0.05),  # FDR p-value threshold for significance
         "exclusive_ratio": ("float", 2.0),
     },
     "tl.archetype_driver_regression": {
@@ -871,12 +921,14 @@ FUNCTION_PARAMS = {
         "feature_matrix": ("None|str|array", None),
         "feature_names": ("list[str]|None", None),
         "n_components_range": ("tuple[int,int]|None", None),
-        "model_selection": ("str", "bic"),
+        "model_selection": ("str", "bic"),  # "bic" or "icl"
+        "model_type": ("str", "gaussian"),  # "gaussian" or "dirichlet"
         "covariance_type": ("str", "full"),
         "n_initializations": ("int", 20),
         "stability_threshold": ("float", 0.7),
-        "ilr_epsilon": ("float", 0.001),
+        "reassignment_confidence": ("float", 0.0),
         "characterize_features": ("bool", True),
+        "ilr_epsilon": ("float", 0.001),
         "random_state": ("int", 42),
         "copy": ("bool", False),
     },
@@ -898,10 +950,12 @@ FUNCTION_PARAMS = {
         "batch_size": ("int", 256),
         "n_steps": ("int", 50),
         "device": ("str", "cpu"),
-        "solver_method": ("str", "euler"),
+        "solver_method": ("str", "dopri5"),  # changed from "euler" in v0.5.0
         "name": ("str|None", None),
         "random_state": ("int", 42),
         "return_model": ("bool", False),
+        "use_ot": ("bool", False),  # OT-CFM training coupling
+        "holdout_fraction": ("float", 0.0),  # holdout validation fraction
         "copy": ("bool", False),
     },
     "tl.flow_between": {
@@ -916,6 +970,8 @@ FUNCTION_PARAMS = {
         "batch_size": ("int", 256),
         "n_steps": ("int", 50),
         "device": ("str", "cpu"),
+        "solver_method": ("str", "dopri5"),  # changed from "euler" in v0.5.0
+        "use_ot": ("bool", False),  # OT-CFM training coupling
         "random_state": ("int", 42),
     },
     "tl.flow_gene_alignment": {
@@ -925,6 +981,7 @@ FUNCTION_PARAMS = {
         "n_top": ("int", 50),
         "pca_loadings_key": ("str|None", None),
         "n_permutations": ("int", 0),
+        "per_cell": ("bool", False),  # per-cell per-gene alignment scores
         "random_state": ("int", 42),
     },
     "tl.flow_jacobian": {
@@ -950,6 +1007,32 @@ FUNCTION_PARAMS = {
         "batch_size": ("int", 256),
         "n_steps": ("int", 50),
         "device": ("str", "cpu"),
+        "random_state": ("int", 42),
+    },
+    "tl.flow_bifurcation": {
+        "adata": ("AnnData", REQUIRED),
+        "flow_result": ("dict", REQUIRED),
+        "flow_model": ("FlowModel", REQUIRED),
+        "n_timepoints": ("int", 10),
+        "evaluation_points": ("ndarray|None", None),
+    },
+    "tl.flow_feature_graph": {
+        "adata": ("AnnData", REQUIRED),
+        "flow_result": ("dict", REQUIRED),
+        "flow_model": ("FlowModel", REQUIRED),
+        "n_top_genes": ("int", 200),
+        "n_timepoints": ("int", 20),
+        "n_eval_points": ("int", 300),
+        "edge_threshold": ("float|None", None),
+        "random_state": ("int", 42),
+    },
+    "tl.flow_temporal_feature_graph": {
+        "adata": ("AnnData", REQUIRED),
+        "flow_result": ("dict", REQUIRED),
+        "flow_model": ("FlowModel", REQUIRED),
+        "n_top_genes": ("int", 200),
+        "n_timepoints": ("int", 20),
+        "n_eval_points": ("int", 300),
         "random_state": ("int", 42),
     },
     "tl.archetype_pair_enrichment": {
@@ -1278,6 +1361,7 @@ USE_GET_FOR: set[str] = {
     "fdr_pvalue",
     "significant",
     # v0.5.0: SimplexRegressionResult optional fields
+    "vertex_covariance",
     "interaction_coefficients",
     "interaction_pvalues",
     "interaction_pvalues_fdr",
@@ -1293,8 +1377,18 @@ USE_GET_FOR: set[str] = {
     "degree_comparison",
     # v0.5.0: GMMResult optional fields
     "component_feature_profiles",
+    # v0.5.0: FlowWithinResult optional fields
+    "holdout_mmd",
+    "holdout_fraction",
+    "per_cell_alignment",
     # v0.5.0: FlowBetweenResult optional fields
     "archetype_correspondence",
+    # v0.5.0: FlowFeatureGraphResult optional fields
+    "igraph",
+    "hub_genes_per_archetype",
+    # v0.5.0: GMMResult optional fields
+    "icl_values",
+    "model_type",
 }
 
 
