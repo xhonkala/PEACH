@@ -12,11 +12,13 @@ def classify_feature_patterns(
     adata: AnnData,
     *,
     regression_result: SimplexRegressionResult | None = None,
-    r2_threshold: float = 0.05,
-    cv_threshold: float = 0.15,
+    fdr_threshold: float = 0.05,
     exclusive_ratio: float = 2.0,
 ) -> dict:
     """Classify features into biological pattern types from regression coefficients.
+
+    Uses FDR-corrected p-values as the primary significance gate.
+    Categories: flat, archetype-exclusive, interaction, structured.
 
     Parameters
     ----------
@@ -25,12 +27,10 @@ def classify_feature_patterns(
         or provide regression_result directly.
     regression_result : SimplexRegressionResult or None
         If None, reads from adata.uns['peach_simplex_regression'].
-    r2_threshold : float
-        Minimum R^2 to be classified as non-flat (default 0.05 = 5%).
-    cv_threshold : float
-        Below this coefficient of variation, the feature is classified as "flat".
+    fdr_threshold : float
+        FDR-corrected p-value threshold for significance (default 0.05).
     exclusive_ratio : float
-        Minimum ratio of max(beta) to second_max(beta) for "archetype-exclusive".
+        Minimum ratio of max(|beta|) to second_max(|beta|) for "archetype-exclusive".
 
     Returns
     -------
@@ -47,17 +47,23 @@ def classify_feature_patterns(
             )
         regression_result = SimplexRegressionResult(**stored)
     elif isinstance(regression_result, dict):
-        # Accept serialized dict (returned by feature_simplex_regression)
         regression_result = SimplexRegressionResult(**regression_result)
+
+    # Extract interaction FDR p-values from degree_comparison if available
+    interaction_f_pvalue_fdr = None
+    stored_uns = adata.uns.get("peach_simplex_regression", {})
+    degree_comparison = stored_uns.get("degree_comparison")
+    if degree_comparison is not None:
+        deg2 = degree_comparison.get("degree_2")
+        if deg2 is not None:
+            interaction_f_pvalue_fdr = np.asarray(deg2["incremental_p_fdr"])
 
     classifications = classify_all_features(
         vertex_coefficients=regression_result.vertex_coefficients,
-        interaction_coefficients=regression_result.interaction_coefficients,
         r_squared=regression_result.r_squared_degree1,
-        vertex_pvalues=regression_result.vertex_pvalues,
-        interaction_pvalues=regression_result.interaction_pvalues,
-        r2_threshold=r2_threshold,
-        cv_threshold=cv_threshold,
+        f_pvalue_fdr=regression_result.f_pvalue_fdr,
+        interaction_f_pvalue_fdr=interaction_f_pvalue_fdr,
+        fdr_threshold=fdr_threshold,
         exclusive_ratio=exclusive_ratio,
     )
 
