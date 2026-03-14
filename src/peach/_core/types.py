@@ -3402,6 +3402,9 @@ class SimplexRegressionResult(BaseModel):
     permutation_pvalue: np.ndarray | None = None  # [n_features]
     permutation_pvalue_fdr: np.ndarray | None = None  # [n_features]
 
+    # Covariance matrices — cached for Wald contrast reuse
+    vertex_covariance: list | None = None  # list of [K, K] covariance matrices per feature
+
     # Bootstrap CIs — None if n_bootstrap=0
     vertex_ci_lower: np.ndarray | None = None  # [n_features, K]
     vertex_ci_upper: np.ndarray | None = None
@@ -3417,7 +3420,11 @@ class SimplexRegressionResult(BaseModel):
             if isinstance(value, np.ndarray):
                 d[field_name] = value
             elif isinstance(value, list):
-                d[field_name] = value
+                # Convert list of np.ndarrays to list of lists for JSON safety
+                if value and isinstance(value[0], np.ndarray):
+                    d[field_name] = [arr.tolist() for arr in value]
+                else:
+                    d[field_name] = value
             else:
                 d[field_name] = value
         return d

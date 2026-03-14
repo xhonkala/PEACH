@@ -82,7 +82,7 @@ def feature_simplex_regression(
 
     # Degree 1
     W1, _ = scheffe_design_matrix(weights, degree=1)
-    result1 = ols_fit(W1, Y, robust_se=robust_se)
+    result1 = ols_fit(W1, Y, robust_se=robust_se, return_covariance=True)
 
     # FDR correction on F-test (clamp underflowed zeros for large-N datasets)
     f_pvals_clamped = np.clip(result1["f_pvalues"], np.finfo(float).tiny, 1.0)
@@ -160,6 +160,7 @@ def feature_simplex_regression(
         vertex_pvalues=result1["t_pvalues"],
         vertex_pvalues_fdr=vertex_pvalues_fdr,
         vertex_se=result1["standard_errors"],
+        vertex_covariance=result1.get("covariance"),
         interaction_coefficients=interaction_coefficients,
         interaction_pairs=interaction_pairs,
         interaction_pvalues=interaction_pvalues,

@@ -240,8 +240,6 @@ def compute_wald_contrasts(
          feature_names, n_features, n_archetypes
     """
     from statsmodels.stats.multitest import multipletests
-    from .simplex_regression import ols_fit, scheffe_design_matrix
-    from .feature_utils import resolve_features
 
     reg = resolve_regression_result(adata, prefer="genes")
     if reg is None:
@@ -253,13 +251,22 @@ def compute_wald_contrasts(
     feat_names = list(reg["feature_names"])
     K = weights.shape[1]
     n_features = len(feat_names)
+    n_cells = adata.n_obs
+    df = max(n_cells - K, 1)
 
-    Y, _ = resolve_features(adata, None, feat_names)
-    W, _ = scheffe_design_matrix(weights, degree=1)
-    fit = ols_fit(W, Y, robust_se=robust_se, return_covariance=True)
-
-    beta = fit["coefficients"]  # [n_features, K]
-    cov_list = fit["covariance"]  # list of K x K matrices
+    # Use cached covariance if available; fall back to re-running regression
+    cached_cov = reg.get("vertex_covariance")
+    if cached_cov is not None:
+        beta = np.asarray(reg["vertex_coefficients"])
+        cov_list = [np.asarray(c) for c in cached_cov]
+    else:
+        from .simplex_regression import ols_fit, scheffe_design_matrix
+        from .feature_utils import resolve_features
+        Y, _ = resolve_features(adata, None, feat_names)
+        W, _ = scheffe_design_matrix(weights, degree=1)
+        fit = ols_fit(W, Y, robust_se=robust_se, return_covariance=True)
+        beta = fit["coefficients"]  # [n_features, K]
+        cov_list = fit["covariance"]  # list of K x K matrices
 
     pairs = list(combinations(range(K), 2))
     delta_beta = {}
@@ -284,7 +291,7 @@ def compute_wald_contrasts(
         ])
 
         z = np.where(d_se > 0, d_beta / d_se, 0.0)
-        pval = 2 * stats.norm.sf(np.abs(z))
+        pval = 2 * stats.t.sf(np.abs(z), df=df)
 
         delta_beta[(j, k)] = d_beta
         delta_se[(j, k)] = d_se
