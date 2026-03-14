@@ -180,6 +180,18 @@ class TestRankInfo:
         assert result["effective_rank"] < W_degen.shape[1]
 
 
+class TestCovarianceCache:
+    def test_covariance_stored_by_default(self, regression_adata):
+        """Regression result should include vertex_covariance for Wald reuse."""
+        import peach as pc
+        result = pc.tl.feature_simplex_regression(regression_adata, n_bootstrap=0)
+        assert "vertex_covariance" in result
+        assert result["vertex_covariance"] is not None
+        cov_list = result["vertex_covariance"]
+        assert len(cov_list) == 50  # n_features
+        assert np.array(cov_list[0]).shape == (3, 3)  # K x K
+
+
 class TestK2EdgeCase:
     def test_k2_regression(self):
         """Simplex regression works with K=2 archetypes."""
