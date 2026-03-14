@@ -19,10 +19,12 @@ def flow_within(
     batch_size: int = 256,
     n_steps: int = 50,
     device: str = "cpu",
-    solver_method: str = "euler",
+    solver_method: str = "dopri5",
     name: str | None = None,
     random_state: int = 42,
     return_model: bool = False,
+    use_ot: bool = False,
+    holdout_fraction: float = 0.0,
     copy: bool = False,
 ) -> dict:
     """Intra-model flow between obs-defined cell subsets.
@@ -41,13 +43,21 @@ def flow_within(
         ODE integration steps.
     device : str
     solver_method : str
-        ODE solver method: 'euler', 'midpoint', 'heun3', 'dopri5'.
+        ODE solver method: 'dopri5' (default, adaptive), 'euler',
+        'midpoint', 'heun3'.
     name : str or None
         Name for storage key.
     random_state : int
     return_model : bool
         If True, include the trained FlowModel in the result dict under
         key ``'model'``. Needed for Jacobian and trajectory analysis.
+    use_ot : bool
+        If True, use minibatch Sinkhorn OT coupling for training pairs.
+        Requires the ``POT`` package.
+    holdout_fraction : float
+        Fraction of source cells to hold out for validation (0 to 1).
+        If > 0, trains on the remaining source cells and evaluates MMD
+        on the held-out set after transport.
     copy : bool
     """
     if copy:
@@ -65,14 +75,29 @@ def flow_within(
     target_pca = pca[target_mask]
     dim = source_pca.shape[1]
 
+    # Holdout split
+    if holdout_fraction > 0:
+        rng_ho = np.random.default_rng(random_state)
+        n_source = source_pca.shape[0]
+        n_holdout = max(int(n_source * holdout_fraction), 1)
+        perm = rng_ho.permutation(n_source)
+        holdout_idx = perm[:n_holdout]
+        train_idx = perm[n_holdout:]
+        source_train = source_pca[train_idx]
+        source_holdout = source_pca[holdout_idx]
+    else:
+        source_train = source_pca
+        source_holdout = None
+
     # Train flow model
     import torch
     torch.manual_seed(random_state)
     model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr,
                       solver_method=solver_method, device=device)
-    losses = model.train(source_pca, target_pca, n_epochs=n_epochs, batch_size=batch_size)
+    losses = model.train(source_train, target_pca, n_epochs=n_epochs,
+                         batch_size=batch_size, use_ot=use_ot)
 
-    # Transport
+    # Transport full source (not just training subset)
     transported = model.transport(source_pca, n_steps=n_steps)
 
     # MMD
@@ -91,6 +116,13 @@ def flow_within(
     }
     if return_model:
         result["model"] = model
+
+    # Holdout validation
+    if source_holdout is not None:
+        holdout_transported = model.transport(source_holdout, n_steps=n_steps)
+        holdout_mmd = compute_mmd(holdout_transported, target_pca)
+        result["holdout_mmd"] = holdout_mmd
+        result["holdout_fraction"] = holdout_fraction
 
     # Store summary (not the model itself)
     storage_key = f"flow_{name}" if name else "flow_within"
@@ -118,7 +150,8 @@ def flow_between(
     batch_size: int = 256,
     n_steps: int = 50,
     device: str = "cpu",
-    solver_method: str = "euler",
+    solver_method: str = "dopri5",
+    use_ot: bool = False,
     random_state: int = 42,
 ) -> dict:
     """Inter-model flow between separate AnnDatas.
@@ -131,6 +164,8 @@ def flow_between(
     pairs : list[tuple] or None
         (source_label, target_label) pairs. Default: consecutive pairs.
     pca_key : str
+    use_ot : bool
+        If True, use minibatch Sinkhorn OT coupling for training pairs.
     """
     import anndata as ad
 
@@ -175,6 +210,7 @@ def flow_between(
             n_steps=n_steps,
             device=device,
             solver_method=solver_method,
+            use_ot=use_ot,
             name=f"{src_label}_to_{tgt_label}",
             random_state=random_state + pair_idx,
         )
@@ -196,6 +232,7 @@ def flow_gene_alignment(
     n_top: int = 50,
     pca_loadings_key: str | None = None,
     n_permutations: int = 0,
+    per_cell: bool = False,
     random_state: int = 42,
 ) -> dict:
     """Compute gene alignment with flow velocity.
@@ -210,6 +247,10 @@ def flow_gene_alignment(
         Top aligned/opposed genes to report.
     pca_loadings_key : str or None
         Key in adata.varm for PCA loadings. Default: 'PCs'.
+    per_cell : bool
+        If True, also compute per-cell per-gene alignment scores.
+        Returns an additional key ``'per_cell_alignment'`` with shape
+        ``[n_source, n_genes]``.
     """
     # Get PCA loadings
     if pca_loadings_key is None:
@@ -243,6 +284,17 @@ def flow_gene_alignment(
         "top_opposed": top_opposed,
         "t": t,
     }
+
+    if per_cell:
+        velocity_per_cell = flow_result["transported"] - source_pca  # [n_source, n_pcs]
+        vel_norm = velocity_per_cell / (
+            np.linalg.norm(velocity_per_cell, axis=1, keepdims=True) + 1e-10
+        )
+        load_norm = loadings_trimmed / (
+            np.linalg.norm(loadings_trimmed, axis=1, keepdims=True) + 1e-10
+        )
+        per_cell_alignment = vel_norm @ load_norm.T  # [n_source, n_genes]
+        result["per_cell_alignment"] = per_cell_alignment
 
     if n_permutations > 0:
         rng = np.random.default_rng(random_state)
@@ -421,6 +473,107 @@ def flow_significance(
         "p_value": p_value,
         "observed_stat": observed_improvement,
         "null_distribution": null_stats,
+    }
+
+
+def flow_bifurcation(
+    adata: AnnData,
+    flow_result: dict,
+    flow_model,
+    *,
+    n_timepoints: int = 10,
+    evaluation_points: np.ndarray | None = None,
+) -> dict:
+    """Eigenvalue-based bifurcation scoring along the flow trajectory.
+
+    Transports evaluation points along the learned flow and computes the
+    Jacobian at each timepoint. Bifurcation is scored by the maximum
+    absolute divergence (trace of Jacobian) along the trajectory, and
+    saddle points are identified as timepoints with mixed-sign eigenvalue
+    real parts.
+
+    Parameters
+    ----------
+    adata : AnnData
+    flow_result : dict
+        Output of :func:`flow_within`.
+    flow_model : FlowModel
+        Trained flow model with ``.jacobian()`` and ``.transport()`` methods.
+    n_timepoints : int
+        Number of timepoints to evaluate along the trajectory.
+    evaluation_points : np.ndarray or None
+        Points to evaluate. Default: source cells from ``flow_result``.
+
+    Returns
+    -------
+    dict
+        Keys:
+
+        - ``divergence``: ``[n_timepoints, n_cells]`` — trace of Jacobian
+        - ``bifurcation_score``: ``[n_cells]`` — max |divergence| along trajectory
+        - ``eigenvalue_real``: ``[n_timepoints, n_cells, dim]``
+        - ``eigenvalue_imag``: ``[n_timepoints, n_cells, dim]``
+        - ``timepoints``: ``[n_timepoints]``
+        - ``n_saddle_points``: ``[n_cells]`` — count of timepoints with
+          mixed-sign eigenvalue real parts
+    """
+    if evaluation_points is None:
+        evaluation_points = adata.obsm[flow_result["pca_key"]][flow_result["source_mask"]]
+
+    n_cells = evaluation_points.shape[0]
+    dim = evaluation_points.shape[1]
+    timepoints = np.linspace(0.05, 0.95, n_timepoints)
+
+    # Transport to get positions at each timepoint
+    trajectory = flow_model.transport(
+        evaluation_points, n_steps=n_timepoints - 1, return_trajectory=True
+    )  # [n_steps+1, n_cells, dim]
+
+    # Map trajectory frames to timepoints: trajectory has n_timepoints frames
+    # at np.linspace(0, 1, n_timepoints), but we want to evaluate Jacobian at
+    # our custom timepoints. We use the trajectory positions that are closest
+    # to each desired timepoint.
+    traj_times = np.linspace(0, 1, trajectory.shape[0])
+
+    divergence = np.zeros((n_timepoints, n_cells))
+    eigenvalue_real = np.zeros((n_timepoints, n_cells, dim))
+    eigenvalue_imag = np.zeros((n_timepoints, n_cells, dim))
+
+    for ti, t_val in enumerate(timepoints):
+        # Find closest trajectory frame
+        frame_idx = np.argmin(np.abs(traj_times - t_val))
+        positions = trajectory[frame_idx]  # [n_cells, dim]
+
+        # Compute Jacobian at these positions and this time
+        jac = flow_model.jacobian(positions, float(t_val))  # [n_cells, dim, dim]
+
+        # Divergence = trace(J) per cell
+        for ci in range(n_cells):
+            divergence[ti, ci] = np.trace(jac[ci])
+
+            # Eigenvalues
+            eigvals = np.linalg.eigvals(jac[ci])
+            eigenvalue_real[ti, ci] = eigvals.real
+            eigenvalue_imag[ti, ci] = eigvals.imag
+
+    # Bifurcation score: max |divergence| along trajectory per cell
+    bifurcation_score = np.max(np.abs(divergence), axis=0)  # [n_cells]
+
+    # Saddle points: timepoints with mixed-sign eigenvalue real parts
+    n_saddle_points = np.zeros(n_cells, dtype=int)
+    for ci in range(n_cells):
+        for ti in range(n_timepoints):
+            real_parts = eigenvalue_real[ti, ci]
+            if np.any(real_parts > 0) and np.any(real_parts < 0):
+                n_saddle_points[ci] += 1
+
+    return {
+        "divergence": divergence,
+        "bifurcation_score": bifurcation_score,
+        "eigenvalue_real": eigenvalue_real,
+        "eigenvalue_imag": eigenvalue_imag,
+        "timepoints": timepoints,
+        "n_saddle_points": n_saddle_points,
     }
 
 
