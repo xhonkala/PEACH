@@ -19,6 +19,7 @@ def feature_simplex_decomposition(
     feature_names=None,
     n_components_range=None,
     model_selection: str = "bic",
+    model_type: str = "gaussian",
     covariance_type: str = "full",
     n_initializations: int = 20,
     stability_threshold: float = 0.7,
@@ -28,10 +29,11 @@ def feature_simplex_decomposition(
     random_state: int = 42,
     copy: bool = False,
 ) -> dict:
-    """Decompose cell populations by GMM in ILR-transformed weight space.
+    """Decompose cell populations by mixture model in weight space.
 
-    Fits a Gaussian Mixture Model to archetype weights after ILR transform,
-    selects the number of components by BIC, and filters by multi-initialization
+    Fits a Gaussian Mixture Model (in ILR space) or Dirichlet Mixture Model
+    (directly on the simplex) to archetype weights, selects the number of
+    components by BIC or ICL, and filters by multi-initialization pairwise
     stability analysis. Identifies sub-populations that occupy distinct regions
     of the archetype weight simplex.
 
@@ -48,9 +50,14 @@ def feature_simplex_decomposition(
     n_components_range : tuple[int, int] or None
         (min_components, max_components). Default: (K, 3*K).
     model_selection : str
-        'bic' (only supported option currently).
+        'bic' or 'icl'. ICL = BIC + 2*entropy(posterior), which penalizes
+        overlapping clusters more heavily.
+    model_type : str
+        'gaussian' (default): GMM in ILR-transformed space.
+        'dirichlet': Dirichlet mixture directly on the simplex.
     covariance_type : str
         sklearn GMM covariance type. One of 'full', 'tied', 'diag', 'spherical'.
+        Only used when model_type='gaussian'.
     n_initializations : int
         Number of random initializations for stability analysis.
     stability_threshold : float
@@ -62,6 +69,8 @@ def feature_simplex_decomposition(
         reassigned (backward compatible).
     characterize_features : bool
         If True, compute per-component mean feature profiles.
+    ilr_epsilon : float
+        Smoothing epsilon for ILR transform. Only used when model_type='gaussian'.
     random_state : int
         Random seed for reproducibility.
     copy : bool
@@ -70,7 +79,7 @@ def feature_simplex_decomposition(
     Returns
     -------
     dict
-        Plain dict with GMM results. Stored in adata.uns['peach_gmm'],
+        Plain dict with mixture model results. Stored in adata.uns['peach_gmm'],
         labels in adata.obsm['peach_gmm_labels'].
     """
     if copy:
@@ -87,6 +96,8 @@ def feature_simplex_decomposition(
         random_state=random_state,
         ilr_epsilon=ilr_epsilon,
         reassignment_confidence=reassignment_confidence,
+        model_selection=model_selection,
+        model_type=model_type,
     )
 
     # Component characterization
@@ -115,6 +126,10 @@ def feature_simplex_decomposition(
 
     # Serialize to plain dict (PEACH convention: public API returns dicts)
     serialized = result_obj.to_serializable()
+
+    # Add fields not in GMMResult Pydantic model
+    serialized["icl_values"] = gmm_result.get("icl_values")
+    serialized["model_type"] = gmm_result.get("model_type")
 
     # Store in adata
     store_result(adata, "gmm", serialized)

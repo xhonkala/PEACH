@@ -1,14 +1,18 @@
-"""Simplex density decomposition via GMM in ILR-transformed weight space.
+"""Simplex density decomposition via GMM/Dirichlet in weight space.
 
-Fits a Gaussian Mixture Model to archetype weights after ILR transform,
-selects the number of components by BIC, and filters by multi-initialization
+Fits a Gaussian Mixture Model (in ILR space) or Dirichlet Mixture Model
+(directly on the simplex) to archetype weights, selects the number of
+components by BIC or ICL, and filters by multi-initialization pairwise
 stability analysis using the Hungarian algorithm for component correspondence.
 
 This module decomposes the cell population into sub-populations that occupy
 distinct regions of the archetype weight simplex, enabling identification of
 stable cell states and transitional populations.
 
-Reference: McLachlan & Peel (2000), "Finite Mixture Models", Wiley.
+References:
+- McLachlan & Peel (2000), "Finite Mixture Models", Wiley.
+- Biernacki et al. (2000), "Assessing a mixture model for clustering with the
+  integrated completed likelihood", IEEE TPAMI 22(7).
 """
 
 import numpy as np
@@ -16,6 +20,30 @@ from sklearn.mixture import GaussianMixture
 from scipy.optimize import linear_sum_assignment
 
 from peach._core.utils.ilr_transform import ilr_transform, inverse_ilr
+
+
+def _compute_icl(gmm, X):
+    """Integrated Completed Likelihood criterion.
+
+    ICL = BIC + 2 * entropy(posterior probabilities).
+    Penalizes overlapping clusters more than BIC alone.
+
+    Parameters
+    ----------
+    gmm : GaussianMixture or object with bic() and predict_proba()
+        Fitted mixture model.
+    X : np.ndarray [n, d]
+        Data the model was fitted on.
+
+    Returns
+    -------
+    float
+        ICL value (lower is better).
+    """
+    bic = gmm.bic(X)
+    proba = gmm.predict_proba(X)
+    entropy = -np.sum(proba * np.log(np.clip(proba, 1e-300, 1.0)))
+    return bic + 2 * entropy
 
 
 def fit_simplex_gmm(
@@ -27,8 +55,10 @@ def fit_simplex_gmm(
     random_state=42,
     ilr_epsilon=1e-3,
     reassignment_confidence=0.0,
+    model_selection="bic",
+    model_type="gaussian",
 ):
-    """Fit GMM in ILR-transformed weight space with BIC selection and stability analysis.
+    """Fit mixture model to archetype weights with model selection and stability analysis.
 
     Parameters
     ----------
@@ -38,6 +68,7 @@ def fit_simplex_gmm(
         (min_components, max_components). Default: (K, 3*K).
     covariance_type : str
         GMM covariance type. One of 'full', 'tied', 'diag', 'spherical'.
+        Only used when model_type='gaussian'.
     n_initializations : int
         Number of random initializations for stability analysis.
     stability_threshold : float
@@ -45,17 +76,25 @@ def fit_simplex_gmm(
         component is recovered).
     random_state : int
         Random seed for reproducibility.
+    ilr_epsilon : float
+        Smoothing epsilon for ILR transform. Only used when model_type='gaussian'.
     reassignment_confidence : float
-        Minimum posterior probability (from GMM predict_proba) required to
+        Minimum posterior probability (from predict_proba) required to
         reassign an unstable cell to a stable component. Default 0.0 means
         all unstable cells are reassigned (backward compatible). Higher values
         (e.g. 0.8) leave low-confidence cells as -1 (unassigned).
+    model_selection : str
+        Criterion for selecting optimal n_components. 'bic' or 'icl'.
+        ICL = BIC + 2*entropy(posterior), which penalizes overlapping clusters.
+    model_type : str
+        'gaussian' (default): GMM in ILR-transformed space.
+        'dirichlet': Dirichlet mixture directly on the simplex.
 
     Returns
     -------
     dict with keys:
         n_components_optimal : int
-            BIC-selected number of components.
+            Selected number of components.
         n_components_stable : int
             Number of components after stability filtering.
         component_assignments : np.ndarray [n_cells]
@@ -70,32 +109,61 @@ def fit_simplex_gmm(
             Stability score for each retained component.
         bic_values : np.ndarray [n_tested]
             BIC values for each n_components tested.
+        icl_values : np.ndarray [n_tested]
+            ICL values for each n_components tested.
         n_components_tested : np.ndarray [n_tested]
             Array of n_components values tested.
-        gmm_model : GaussianMixture
-            Fitted GaussianMixture model (in ILR space) for the BIC-optimal
-            n_components.
+        gmm_model : fitted model
+            Fitted model for the optimal n_components.
         component_probabilities : np.ndarray or None [n_cells, n_stable]
             Posterior probabilities for stable components. None if no unstable
             cells exist.
+        model_type : str
+            'gaussian' or 'dirichlet'.
     """
+    if model_selection not in ("bic", "icl"):
+        raise ValueError(f"model_selection must be 'bic' or 'icl', got '{model_selection}'")
+    if model_type not in ("gaussian", "dirichlet"):
+        raise ValueError(f"model_type must be 'gaussian' or 'dirichlet', got '{model_type}'")
+
     weights = np.asarray(weights, dtype=np.float64)
     K = weights.shape[1]
     n_cells = weights.shape[0]
-
-    # Transform to ILR space
-    ilr_coords = ilr_transform(weights, epsilon=ilr_epsilon)  # [n_cells, K-1]
 
     # Determine range
     if n_components_range is None:
         n_components_range = (K, 3 * K)
     n_min, n_max = n_components_range
 
-    # BIC scan
+    if model_type == "dirichlet":
+        return _fit_dirichlet(
+            weights, K, n_cells, n_min, n_max,
+            n_initializations, stability_threshold,
+            random_state, reassignment_confidence, model_selection,
+        )
+    else:
+        return _fit_gaussian(
+            weights, K, n_cells, n_min, n_max,
+            covariance_type, n_initializations, stability_threshold,
+            random_state, ilr_epsilon, reassignment_confidence, model_selection,
+        )
+
+
+def _fit_gaussian(
+    weights, K, n_cells, n_min, n_max,
+    covariance_type, n_initializations, stability_threshold,
+    random_state, ilr_epsilon, reassignment_confidence, model_selection,
+):
+    """Fit Gaussian mixture in ILR space."""
+    # Transform to ILR space
+    ilr_coords = ilr_transform(weights, epsilon=ilr_epsilon)  # [n_cells, K-1]
+
+    # BIC/ICL scan
     n_range = np.arange(n_min, n_max + 1)
     bic_values = np.full(len(n_range), np.inf)
-    best_gmm = None
-    best_bic = np.inf
+    icl_values = np.full(len(n_range), np.inf)
+    best_model = None
+    best_score = np.inf
     best_n = n_min
 
     for idx, n_comp in enumerate(n_range):
@@ -107,13 +175,17 @@ def fit_simplex_gmm(
         )
         gmm.fit(ilr_coords)
         bic = gmm.bic(ilr_coords)
+        icl = _compute_icl(gmm, ilr_coords)
         bic_values[idx] = bic
-        if bic < best_bic:
-            best_bic = bic
-            best_gmm = gmm
+        icl_values[idx] = icl
+
+        score = icl if model_selection == "icl" else bic
+        if score < best_score:
+            best_score = score
+            best_model = gmm
             best_n = n_comp
 
-    # Stability analysis for BIC-optimal n_components
+    # Stability analysis for optimal n_components
     stability_scores = _compute_stability(
         ilr_coords, best_n, covariance_type, n_initializations, random_state
     )
@@ -123,13 +195,12 @@ def fit_simplex_gmm(
     n_stable = int(np.sum(stable_mask))
 
     if n_stable == 0:
-        # Fall back to all components if none are stable
         stable_mask = np.ones(best_n, dtype=bool)
         n_stable = best_n
 
     # Get assignments and centroids
-    all_labels = best_gmm.predict(ilr_coords)
-    ilr_centroids = best_gmm.means_  # [n_components, K-1]
+    all_labels = best_model.predict(ilr_coords)
+    ilr_centroids = best_model.means_  # [n_components, K-1]
     simplex_centroids = inverse_ilr(ilr_centroids)  # [n_components, K]
 
     # Map stable components
@@ -137,7 +208,7 @@ def fit_simplex_gmm(
     stable_centroids = simplex_centroids[stable_indices]
     stable_stability = stability_scores[stable_indices]
 
-    # Remap labels — assign cells in stable components
+    # Remap labels
     label_map = {old: new for new, old in enumerate(stable_indices)}
     component_assignments = np.full(n_cells, -1, dtype=int)
     for old_label, new_label in label_map.items():
@@ -147,12 +218,10 @@ def fit_simplex_gmm(
     unstable_mask = component_assignments == -1
     component_probabilities = None
     if np.any(unstable_mask) and n_stable > 0:
-        # Get posterior probabilities from full GMM (unnormalized for stable subset)
-        all_proba = best_gmm.predict_proba(ilr_coords)  # [n_cells, best_n]
-        stable_proba = all_proba[:, stable_indices]  # [n_cells, n_stable]
+        all_proba = best_model.predict_proba(ilr_coords)
+        stable_proba = all_proba[:, stable_indices]
         component_probabilities = stable_proba
 
-        # Reassign unstable cells where max stable probability exceeds threshold
         unstable_proba = stable_proba[unstable_mask]
         max_prob = unstable_proba.max(axis=1)
         confident_mask = max_prob >= reassignment_confidence
@@ -160,7 +229,6 @@ def fit_simplex_gmm(
         component_assignments[confident_idx] = np.argmax(
             stable_proba[confident_idx], axis=1
         )
-        # Cells below threshold remain -1
 
     # Nearest archetype per component
     archetype_map = np.argmax(stable_centroids, axis=1)
@@ -181,9 +249,116 @@ def fit_simplex_gmm(
         "component_stability_scores": stable_stability,
         "component_weight_means": component_weight_means,
         "bic_values": bic_values,
+        "icl_values": icl_values,
         "n_components_tested": n_range,
-        "gmm_model": best_gmm,
+        "gmm_model": best_model,
         "component_probabilities": component_probabilities,
+        "model_type": "gaussian",
+    }
+
+
+def _fit_dirichlet(
+    weights, K, n_cells, n_min, n_max,
+    n_initializations, stability_threshold,
+    random_state, reassignment_confidence, model_selection,
+):
+    """Fit Dirichlet mixture directly on the simplex."""
+    from peach._core.utils.dirichlet_mixture import DirichletMixture
+
+    n_range = np.arange(n_min, n_max + 1)
+    bic_values = np.full(len(n_range), np.inf)
+    icl_values = np.full(len(n_range), np.inf)
+    best_model = None
+    best_score = np.inf
+    best_n = n_min
+
+    for idx, n_comp in enumerate(n_range):
+        dm = DirichletMixture(
+            n_components=n_comp,
+            n_init=3,
+            random_state=random_state,
+        )
+        dm.fit(weights)
+        bic = dm.bic(weights)
+        icl = _compute_icl(dm, weights)
+        bic_values[idx] = bic
+        icl_values[idx] = icl
+
+        score = icl if model_selection == "icl" else bic
+        if score < best_score:
+            best_score = score
+            best_model = dm
+            best_n = n_comp
+
+    # Stability analysis for optimal n_components
+    stability_scores = _compute_stability_dirichlet(
+        weights, best_n, n_initializations, random_state
+    )
+
+    # Filter stable components
+    stable_mask = stability_scores >= stability_threshold
+    n_stable = int(np.sum(stable_mask))
+
+    if n_stable == 0:
+        stable_mask = np.ones(best_n, dtype=bool)
+        n_stable = best_n
+
+    # Get assignments and centroids
+    all_labels = best_model.predict(weights)
+    # Dirichlet centroids: alpha_k / sum(alpha_k), already on simplex
+    simplex_centroids = best_model.means_  # [n_components, K]
+
+    # Map stable components
+    stable_indices = np.where(stable_mask)[0]
+    stable_centroids = simplex_centroids[stable_indices]
+    stable_stability = stability_scores[stable_indices]
+
+    # Remap labels
+    label_map = {old: new for new, old in enumerate(stable_indices)}
+    component_assignments = np.full(n_cells, -1, dtype=int)
+    for old_label, new_label in label_map.items():
+        component_assignments[all_labels == old_label] = new_label
+
+    # Handle unstable cells using predict_proba
+    unstable_mask = component_assignments == -1
+    component_probabilities = None
+    if np.any(unstable_mask) and n_stable > 0:
+        all_proba = best_model.predict_proba(weights)
+        stable_proba = all_proba[:, stable_indices]
+        component_probabilities = stable_proba
+
+        unstable_proba = stable_proba[unstable_mask]
+        max_prob = unstable_proba.max(axis=1)
+        confident_mask = max_prob >= reassignment_confidence
+        confident_idx = np.where(unstable_mask)[0][confident_mask]
+        component_assignments[confident_idx] = np.argmax(
+            stable_proba[confident_idx], axis=1
+        )
+
+    # Nearest archetype per component
+    archetype_map = np.argmax(stable_centroids, axis=1)
+
+    # Arithmetic mean of archetype weights per component
+    component_weight_means = np.zeros((n_stable, K))
+    for c in range(n_stable):
+        mask = component_assignments == c
+        if np.any(mask):
+            component_weight_means[c] = weights[mask].mean(axis=0)
+
+    return {
+        "n_components_optimal": best_n,
+        "n_components_stable": n_stable,
+        "component_assignments": component_assignments,
+        "component_simplex_means": stable_centroids,
+        "component_archetype_map": archetype_map,
+        "component_stability_scores": stable_stability,
+        "component_weight_means": component_weight_means,
+        "bic_values": bic_values,
+        "icl_values": icl_values,
+        "n_components_tested": n_range,
+        "gmm_model": best_model,
+        "component_probabilities": component_probabilities,
+        "model_type": "dirichlet",
     }
 
 
@@ -226,13 +401,11 @@ def characterize_components(component_assignments, feature_matrix, n_components)
 def _compute_stability(
     ilr_coords, n_components, covariance_type, n_initializations, random_state
 ):
-    """Compute per-component stability via cell recovery rate across initializations.
+    """Compute per-component stability via pairwise cell recovery rate.
 
-    Fits GMM n_initializations times with different seeds. Uses the first run as
-    reference. For each subsequent run, builds a confusion matrix between reference
-    and test labels, applies Hungarian matching to find optimal component
-    correspondence, then measures what fraction of cells assigned to each reference
-    component are recovered in the matched test component.
+    Fits GMM n_initializations times with different seeds. Computes recovery
+    rates across ALL pairwise comparisons of initializations using Hungarian
+    matching, avoiding first-initialization bias.
 
     Parameters
     ----------
@@ -265,41 +438,84 @@ def _compute_stability(
         gmm.fit(ilr_coords)
         all_labels.append(gmm.predict(ilr_coords))
 
-    # Reference: first run
-    ref_labels = all_labels[0]
+    return _pairwise_recovery(all_labels, n_components)
 
-    # Pre-compute per-component ref masks and counts
-    ref_masks = [(ref_labels == c) for c in range(n_components)]
-    ref_counts = [int(np.sum(m)) for m in ref_masks]
 
-    recovery_sums = np.zeros(n_components)
-    n_comparisons = n_initializations - 1
+def _compute_stability_dirichlet(
+    weights, n_components, n_initializations, random_state
+):
+    """Compute per-component stability for Dirichlet mixture via pairwise recovery.
 
-    for i in range(1, n_initializations):
-        test_labels = all_labels[i]
+    Parameters
+    ----------
+    weights : np.ndarray [n_cells, K]
+        Simplex weights.
+    n_components : int
+        Number of Dirichlet components to fit.
+    n_initializations : int
+        Number of independent random initializations.
+    random_state : int
+        Base random seed.
 
-        # Build confusion matrix ONCE per initialization
-        confusion = np.zeros((n_components, n_components))
-        for r in range(n_components):
-            for t in range(n_components):
-                confusion[r, t] = np.sum((ref_labels == r) & (test_labels == t))
+    Returns
+    -------
+    np.ndarray [n_components]
+        Stability score per component (in [0, 1]).
+    """
+    from peach._core.utils.dirichlet_mixture import DirichletMixture
 
-        # Hungarian matching (maximize overlap = minimize negative overlap)
-        row_ind, col_ind = linear_sum_assignment(-confusion)
+    rng = np.random.default_rng(random_state)
+    all_labels = []
 
-        # Accumulate recovery for each component
-        for c in range(n_components):
-            if ref_counts[c] == 0:
-                continue
-            matched_test = col_ind[c]
-            n_recovered = np.sum(ref_masks[c] & (test_labels == matched_test))
-            recovery_sums[c] += n_recovered / ref_counts[c]
+    for i in range(n_initializations):
+        dm = DirichletMixture(
+            n_components=n_components,
+            n_init=1,
+            random_state=int(rng.integers(0, 2**31)),
+        )
+        dm.fit(weights)
+        all_labels.append(dm.predict(weights))
 
-    component_stability = np.zeros(n_components)
-    for c in range(n_components):
-        if ref_counts[c] == 0 or n_comparisons == 0:
-            component_stability[c] = 0.0
-        else:
-            component_stability[c] = recovery_sums[c] / n_comparisons
+    return _pairwise_recovery(all_labels, n_components)
 
-    return component_stability
+
+def _pairwise_recovery(all_labels, n_components):
+    """Compute pairwise cell recovery rates across all pairs of label assignments.
+
+    Parameters
+    ----------
+    all_labels : list of np.ndarray [n_cells]
+        Label assignments from each initialization.
+    n_components : int
+        Number of components.
+
+    Returns
+    -------
+    np.ndarray [n_components]
+        Mean recovery rate per component across all pairwise comparisons.
+    """
+    n_runs = len(all_labels)
+    component_recovery = np.zeros(n_components)
+    n_pairs = 0
+
+    for i in range(n_runs):
+        for j in range(i + 1, n_runs):
+            confusion = np.zeros((n_components, n_components))
+            for r in range(n_components):
+                for t in range(n_components):
+                    confusion[r, t] = np.sum(
+                        (all_labels[i] == r) & (all_labels[j] == t)
+                    )
+            row_ind, col_ind = linear_sum_assignment(-confusion)
+            for c in range(n_components):
+                count_c = np.sum(all_labels[i] == c)
+                if count_c == 0:
+                    continue
+                matched = col_ind[c]
+                recovered = np.sum(
+                    (all_labels[i] == c) & (all_labels[j] == matched)
+                )
+                component_recovery[c] += recovered / count_c
+            n_pairs += 1
+
+    return component_recovery / max(n_pairs, 1)
