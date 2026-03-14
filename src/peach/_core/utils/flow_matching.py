@@ -120,14 +120,14 @@ class FlowModel:
     lr : float
         Learning rate for Adam optimizer.
     solver_method : str
-        ODE solver method for transport. 'euler' (default), 'midpoint',
-        'heun3', or 'dopri5' (adaptive).
+        ODE solver method for transport. 'dopri5' (default, adaptive),
+        'euler', 'midpoint', or 'heun3'.
     device : str
         ``'cpu'`` or ``'cuda'``.
     """
 
     def __init__(self, dim, hidden_dims=(128, 128, 128), lr=1e-3,
-                 solver_method="euler", device="cpu"):
+                 solver_method="dopri5", device="cpu"):
         _check_flow_matching()
 
         self.dim = dim
@@ -137,7 +137,7 @@ class FlowModel:
         self.optimizer = torch.optim.Adam(self.velocity_net.parameters(), lr=lr)
         self._losses = []
 
-    def train(self, source, target, n_epochs=1000, batch_size=256):
+    def train(self, source, target, n_epochs=1000, batch_size=256, use_ot=False):
         """Train velocity field to transport source to target.
 
         Uses fb ``CondOTProbPath`` for conditional optimal transport path
@@ -154,6 +154,10 @@ class FlowModel:
             Number of training epochs.
         batch_size : int
             Number of pairs sampled per epoch.
+        use_ot : bool
+            If True, use minibatch Sinkhorn optimal transport coupling
+            to pair source and target samples within each epoch instead
+            of random pairing. Requires the ``POT`` package.
 
         Returns
         -------
@@ -178,6 +182,15 @@ class FlowModel:
                 UserWarning,
             )
 
+        if use_ot:
+            try:
+                import ot as pot
+            except ImportError:
+                raise ImportError(
+                    "POT (Python Optimal Transport) is required for OT-CFM. "
+                    "Install with: pip install POT"
+                )
+
         self.velocity_net.train()
         self._losses = []
 
@@ -188,6 +201,25 @@ class FlowModel:
             idx_t = torch.randint(0, len(target_t), (n,), device=self.device)
             x0 = source_t[idx_s]
             x1 = target_t[idx_t]
+
+            # OT-CFM: reshuffle pairings via Sinkhorn coupling
+            if use_ot:
+                cost = torch.cdist(x0, x1).detach().cpu().numpy()
+                coupling = pot.sinkhorn(
+                    np.ones(len(x0)) / len(x0),
+                    np.ones(len(x1)) / len(x1),
+                    cost,
+                    reg=0.1,
+                )
+                coupling_flat = coupling.ravel()
+                coupling_flat /= coupling_flat.sum()
+                pair_idx = np.random.choice(
+                    len(x0) * len(x1), size=len(x0), p=coupling_flat
+                )
+                idx_i = pair_idx // len(x1)
+                idx_j = pair_idx % len(x1)
+                x0 = x0[idx_i]
+                x1 = x1[idx_j]
 
             # Random time
             t = torch.rand(n, device=self.device)
