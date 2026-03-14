@@ -25,6 +25,8 @@ def _add_top_labels(
     fdr_threshold: float = 0.05,
     xref: str = "x",
     yref: str = "y",
+    font_size: int = 8,
+    textangle: int = 0,
 ) -> None:
     """Annotate a volcano plot with text labels for top features.
 
@@ -60,9 +62,10 @@ def _add_top_labels(
             showarrow=False,
             xref=xref,
             yref=yref,
-            font=dict(size=8, color="#333"),
+            font=dict(size=font_size, color="#333"),
             yshift=7,
             xanchor="center",
+            textangle=textangle,
         )
 
 
@@ -100,8 +103,18 @@ def mmd_heatmap(
         colorscale=SEQUENTIAL_COLORSCALE,
         colorbar=dict(title="MMD", thickness=12, len=0.6),
     ))
+
+    # Axis labels: between-fit vs within-fit
+    is_between = mmd_data.get("is_between_fit", False)
+    if is_between:
+        x_title = "Fit B archetypes"
+        y_title = "Fit A archetypes"
+    else:
+        x_title = "Archetypes"
+        y_title = "Archetypes"
+
     apply_style(fig, title="Archetype MMD similarity",
-                xaxis_title="Archetype", yaxis_title="Archetype")
+                xaxis_title=x_title, yaxis_title=y_title)
     return save_and_show(fig, save_path=save_path, show=show)
 
 
@@ -186,7 +199,7 @@ def contrast_volcano_grid(
     adata: AnnData,
     *,
     fdr_threshold: float = 0.05,
-    n_labels: int = 5,
+    n_labels: int = 3,
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
@@ -224,7 +237,7 @@ def contrast_volcano_grid(
         rows=n_rows, cols=n_cols,
         subplot_titles=[f"A{j+1} vs A{k+1}" for j, k in pairs],
         shared_xaxes=True, shared_yaxes=True,
-        horizontal_spacing=0.04, vertical_spacing=0.08,
+        horizontal_spacing=0.04, vertical_spacing=0.12,
     )
 
     names = list(contrast_data["feature_names"])
@@ -257,7 +270,8 @@ def contrast_volcano_grid(
             _add_top_labels(fig, delta, pvals, neg_log_p, names,
                             n_labels=n_labels, fdr_threshold=fdr_threshold,
                             xref=f"x{idx+1}" if idx > 0 else "x",
-                            yref=f"y{idx+1}" if idx > 0 else "y")
+                            yref=f"y{idx+1}" if idx > 0 else "y",
+                            font_size=6, textangle=-45)
 
     apply_style(fig, title="Pairwise Wald Contrasts")
     grid_width = min(800, 270 * n_cols)
@@ -296,16 +310,32 @@ def feature_similarity_heatmap(
     K = spearman.shape[0]
     labels = [f"A{i+1}" for i in range(K)]
 
+    # Format rho values as text annotations on each cell
+    text_matrix = [[f"{spearman[i, j]:.2f}" for j in range(K)] for i in range(K)]
+
     fig = go.Figure(data=go.Heatmap(
         z=spearman,
         x=labels,
         y=labels,
+        text=text_matrix,
+        texttemplate="%{text}",
+        textfont=dict(size=10),
         colorscale=DIVERGING_COLORSCALE,
         zmid=0,
         zmin=-1,
         zmax=1,
         colorbar=dict(title="\u03c1", thickness=12, len=0.6),
     ))
+
+    # Axis labels: between-fit vs within-fit
+    is_between = sim_data.get("is_between_fit", False)
+    if is_between:
+        x_title = "Fit B archetypes"
+        y_title = "Fit A archetypes"
+    else:
+        x_title = "Archetypes"
+        y_title = "Archetypes"
+
     apply_style(fig, title="Archetype feature similarity (Spearman)",
-                xaxis_title="Archetype", yaxis_title="Archetype")
+                xaxis_title=x_title, yaxis_title=y_title)
     return save_and_show(fig, save_path=save_path, show=show)

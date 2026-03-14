@@ -28,6 +28,7 @@ def velocity_quiver(
     *,
     pca_key: str = "X_pca",
     n_arrows: int = 200,
+    arrow_alpha: float = 0.3,
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
@@ -43,6 +44,8 @@ def velocity_quiver(
         Key in ``adata.obsm`` for PCA coordinates.
     n_arrows : int
         Number of arrows to draw (subsampled from source cells).
+    arrow_alpha : float
+        Opacity for arrow color (0.0 = transparent, 1.0 = opaque).
     save_path : str or None
         If provided, save figure to this path (format inferred from extension).
     show : bool
@@ -66,6 +69,11 @@ def velocity_quiver(
     dx = transported[idx, 0] - x
     dy = transported[idx, 1] - y
 
+    # Convert hex arrow color to rgba with specified alpha
+    hex_color = COLOR_NEGATIVE.lstrip("#")
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    arrow_rgba = f"rgba({r},{g},{b},{arrow_alpha})"
+
     fig = go.Figure()
 
     # Background: all cells — minimal ink
@@ -87,7 +95,7 @@ def velocity_quiver(
             showarrow=True,
             arrowhead=2, arrowsize=1,
             arrowwidth=0.8,
-            arrowcolor=COLOR_NEGATIVE,
+            arrowcolor=arrow_rgba,
         )
 
     apply_style(fig, title="Flow velocity field",
@@ -1219,6 +1227,9 @@ def soft_assignment_flow(
         ]
     )
 
-    apply_style(fig, title=title, height=max(450, K * 80), width=800)
+    apply_style(fig, title=title, height=max(450, K * 80), width=950)
+    fig.update_layout(
+        legend=dict(x=1.02, y=1, xanchor="left"),
+    )
 
     return save_and_show(fig, save_path=save, show=show)

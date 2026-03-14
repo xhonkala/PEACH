@@ -42,6 +42,7 @@ def coefficient_heatmap(
     adata: AnnData,
     *,
     top_n: int = 50,
+    fdr_threshold: float = 0.05,
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
@@ -53,6 +54,10 @@ def coefficient_heatmap(
         Must have regression results in ``uns['peach_simplex_regression']``.
     top_n : int
         Number of top features to display, ranked by R-squared.
+    fdr_threshold : float
+        FDR significance threshold. Only features with FDR q < threshold
+        are shown (ranked by R-squared). Falls back to all features ranked
+        by R-squared if none are significant.
     save_path : str or None
         If provided, save figure as HTML to this path.
     show : bool
@@ -67,7 +72,14 @@ def coefficient_heatmap(
     names = list(reg["feature_names"])
     r2 = np.asarray(reg["r_squared_degree1"])
 
-    top_idx = np.argsort(r2)[-top_n:][::-1]
+    # Filter to significant features before ranking by R-squared
+    f_fdr = np.asarray(reg.get("f_pvalue_fdr", np.zeros(len(r2))))
+    sig_mask = f_fdr < fdr_threshold
+    if sig_mask.any():
+        sig_idx = np.where(sig_mask)[0]
+        top_idx = sig_idx[np.argsort(r2[sig_idx])[-top_n:][::-1]]
+    else:
+        top_idx = np.argsort(r2)[-top_n:][::-1]  # fallback
     top_coefs = coefs[top_idx]
     top_names = [names[i] for i in top_idx]
 
@@ -146,7 +158,7 @@ def interaction_heatmap(
 def r2_barplot(
     adata: AnnData,
     *,
-    top_n: int = 50,
+    top_n: int = 30,
     per_archetype: bool = True,
     save_path: str | None = None,
     show: bool = True,
@@ -394,6 +406,8 @@ def regression_volcano(
         # Use minimum FDR q-value across archetypes per feature
         qvals = np.min(np.asarray(reg["vertex_pvalues_fdr"]), axis=1)
 
+    n_total = len(r2)
+
     if qvals is not None:
         sig_mask = qvals < alpha
         n_sig = int(np.sum(sig_mask))
@@ -433,6 +447,7 @@ def regression_volcano(
             ))
     else:
         # No q-values available -- fall back to uniform coloring
+        n_sig = None
         fig = go.Figure(data=go.Scatter(
             x=contrast,
             y=r2,
@@ -442,7 +457,11 @@ def regression_volcano(
             marker=dict(size=4, opacity=0.5, color=COLOR_PRIMARY),
         ))
 
-    apply_style(fig, title="R-squared vs vertex contrast",
+    if n_sig is not None:
+        volcano_title = f"Regression volcano (N={n_sig} significant / {n_total} total)"
+    else:
+        volcano_title = f"Regression volcano (N={n_total} features)"
+    apply_style(fig, title=volcano_title,
                 xaxis_title="max beta - min beta",
                 yaxis_title="R-squared")
 
@@ -611,7 +630,7 @@ def archetype_regression_dotplot(
     return save_and_show(fig, save_path=save_path, show=show)
 
 
-def archetype_radar_ridgeplot(
+def archetype_radar(
     adata: AnnData,
     *,
     top_n: int = 10,
@@ -619,54 +638,38 @@ def archetype_radar_ridgeplot(
     min_degree: int = 1,
     show: bool = True,
     save: str | None = None,
-) -> tuple[go.Figure, go.Figure]:
-    """Two standalone figures for archetype phenotype characterization.
+) -> go.Figure:
+    """Radar/spider plot for archetype phenotype characterization.
 
-    Returns a tuple of two independent figures:
-
-    **Figure 1 (radar)**: Radar/spider plot where each polygon represents a
-    feature and each angular spoke an archetype. Polygon vertices are
-    ``|vertex_coefficient|`` -- features shared across archetypes produce
-    round polygons; exclusive features produce spiky ones.
-
-    **Figure 2 (ridgeplot)**: Horizontal ridge-style violin grid. Rows =
-    features (top ``top_n`` per archetype, union). Each row shows one
-    violin per archetype, colored by archetype, representing the expression
-    distribution of that feature in cells dominated by that archetype
-    (top 20% by archetype weight).
+    Each polygon represents a feature and each angular spoke an archetype.
+    Polygon vertices are ``|vertex_coefficient|`` -- features shared across
+    archetypes produce round polygons; exclusive features produce spiky ones.
 
     Parameters
     ----------
     adata : AnnData
         Must contain regression results (run ``pc.tl.feature_simplex_regression``
-        first) and ``cell_archetype_weights`` in ``obsm``.
+        first).
     top_n : int
         Number of top features per archetype (by ``|vertex_coefficient|``)
         to include. The union across archetypes is displayed, truncated to
-        ``top_n`` total features for both figures.
+        ``top_n`` total features.
     feature_type : str
-        ``"genes"`` (uses ``adata.X``) or ``"pathways"`` (uses
-        ``adata.obsm["pathway_scores"]``).
+        ``"genes"`` or ``"pathways"``.
     min_degree : int
         When set to 2, only include features that have a significant
         degree-2 (interaction) coefficient (FDR q < 0.05 for at least one
         interaction term). Default 1 (no interaction filter).
     show : bool
-        Whether to display the figures interactively.
+        Whether to display the figure interactively.
     save : str or None
-        Path prefix to save figures. The radar plot is saved as
-        ``{save}_radar.{ext}`` and the ridgeplot as ``{save}_ridge.{ext}``.
-        If the path has an extension, it is split accordingly.
+        If provided, save figure to this path (format inferred from extension).
 
     Returns
     -------
-    tuple[go.Figure, go.Figure]
-        (radar_fig, ridge_fig) -- two independent plotly figures.
+    go.Figure
+        Radar plot figure.
     """
-    import os
-
-    import scipy.sparse as sp
-
     # ------------------------------------------------------------------
     # 1. Resolve regression result
     # ------------------------------------------------------------------
@@ -674,13 +677,6 @@ def archetype_radar_ridgeplot(
     coefs = np.asarray(reg["vertex_coefficients"])  # [n_features, K]
     feat_names = list(reg["feature_names"])
     K = coefs.shape[1]
-
-    if "cell_archetype_weights" not in adata.obsm:
-        raise ValueError(
-            "adata.obsm['cell_archetype_weights'] not found. "
-            "Run pc.tl.extract_archetype_weights() first."
-        )
-    weights = np.asarray(adata.obsm["cell_archetype_weights"])  # [n_cells, K]
 
     # ------------------------------------------------------------------
     # 2. Select top_n features per archetype (union), then truncate
@@ -707,22 +703,15 @@ def archetype_radar_ridgeplot(
     selected_idx = selected_idx[:top_n]
 
     if len(selected_idx) == 0:
-        # Return empty figures with annotation
-        radar_fig = go.Figure()
-        radar_fig.add_annotation(
+        # Return empty figure with annotation
+        fig = go.Figure()
+        fig.add_annotation(
             text="No features pass the filters.",
             xref="paper", yref="paper", x=0.5, y=0.5,
             showarrow=False, font=dict(size=14),
         )
-        apply_style(radar_fig, title="Radar -- no features")
-        ridge_fig = go.Figure()
-        ridge_fig.add_annotation(
-            text="No features pass the filters.",
-            xref="paper", yref="paper", x=0.5, y=0.5,
-            showarrow=False, font=dict(size=14),
-        )
-        apply_style(ridge_fig, title="Ridgeplot -- no features")
-        return radar_fig, ridge_fig
+        apply_style(fig, title="Radar -- no features")
+        return save_and_show(fig, save_path=save, show=show)
 
     sel_names = []
     for i in selected_idx:
@@ -739,18 +728,18 @@ def archetype_radar_ridgeplot(
     arch_labels = [f"A{k+1}" for k in range(K)]
 
     # ------------------------------------------------------------------
-    # 3. FIGURE 1: Standalone radar plot
+    # 3. Build radar plot
     # ------------------------------------------------------------------
     abs_coefs = np.abs(coefs[selected_idx])  # [n_sel, K]
     theta_labels = arch_labels + [arch_labels[0]]  # close polygon
 
-    radar_fig = go.Figure()
+    fig = go.Figure()
     for fi, (feat_idx, feat_label) in enumerate(zip(selected_idx, sel_names)):
         r_vals = abs_coefs[fi].tolist()
         r_vals_closed = r_vals + [r_vals[0]]
         color = CATEGORICAL_PALETTE[fi % len(CATEGORICAL_PALETTE)]
 
-        radar_fig.add_trace(
+        fig.add_trace(
             go.Scatterpolar(
                 r=r_vals_closed,
                 theta=theta_labels,
@@ -767,10 +756,10 @@ def archetype_radar_ridgeplot(
         )
 
     radar_size = max(450, 350 + n_features * 10)
-    apply_style(radar_fig, title="Archetype phenotype radar",
+    apply_style(fig, title="Archetype phenotype radar",
                 height=radar_size, width=radar_size)
     # Re-apply polar styling (apply_style resets to cartesian defaults)
-    radar_fig.update_layout(
+    fig.update_layout(
         polar=dict(
             radialaxis=dict(visible=True, gridcolor="#eee", linewidth=0),
             angularaxis=dict(linewidth=0, gridcolor="#eee"),
@@ -784,107 +773,7 @@ def archetype_radar_ridgeplot(
         margin=dict(l=60, r=60, t=50, b=40),
     )
 
-    # ------------------------------------------------------------------
-    # 4. FIGURE 2: Standalone horizontal ridgeplot
-    # ------------------------------------------------------------------
-    # Resolve expression / score matrix
-    if feature_type == "pathways":
-        if "pathway_scores" not in adata.obsm:
-            raise ValueError(
-                "adata.obsm['pathway_scores'] not found. "
-                "Run pc.pp.compute_pathway_scores() first."
-            )
-        pw_matrix = np.asarray(adata.obsm["pathway_scores"])
-        pw_names = list(adata.uns.get("pathway_scores_pathways", []))
-        pw_name_to_col = {n: i for i, n in enumerate(pw_names)}
-    else:
-        X = adata.X
-
-    ridge_fig = go.Figure()
-
-    # Horizontal violins: y = feature name, x = expression value
-    # One violin per archetype per feature, grouped by archetype
-    threshold_quantile = 0.80
-    for k in range(K):
-        threshold = np.quantile(weights[:, k], threshold_quantile)
-        cell_mask = weights[:, k] >= threshold
-        color = CATEGORICAL_PALETTE[k % len(CATEGORICAL_PALETTE)]
-
-        for fi, feat_idx in enumerate(selected_idx):
-            # Extract expression values for selected cells
-            if feature_type == "pathways":
-                orig_name = feat_names[feat_idx]
-                col = pw_name_to_col.get(orig_name)
-                if col is None:
-                    continue
-                vals = pw_matrix[cell_mask, col]
-            else:
-                col_slice = X[cell_mask, feat_idx]
-                if hasattr(col_slice, "toarray"):
-                    vals = np.asarray(col_slice.toarray()).ravel()
-                elif sp.issparse(col_slice):
-                    vals = np.asarray(col_slice.todense()).ravel()
-                else:
-                    vals = np.asarray(col_slice).ravel()
-
-            ridge_fig.add_trace(
-                go.Violin(
-                    y=[sel_names[fi]] * len(vals),
-                    x=vals,
-                    legendgroup=arch_labels[k],
-                    scalegroup=sel_names[fi],
-                    name=arch_labels[k],
-                    side="positive",
-                    orientation="h",
-                    line_color=color,
-                    fillcolor=_hex_to_rgba(color, 0.25),
-                    meanline_visible=True,
-                    showlegend=(fi == 0),  # Only show legend once per archetype
-                    offsetgroup=arch_labels[k],
-                    hovertemplate=(
-                        f"{arch_labels[k]} | {sel_names[fi]}"
-                        "<br>value=%{x:.3f}<extra></extra>"
-                    ),
-                    bandwidth=(
-                        max(0.01, float(np.std(vals) * 0.3))
-                        if len(vals) > 1 else 0.1
-                    ),
-                    points=False,
-                ),
-            )
-
-    ridge_height = max(400, n_features * 60 + 100)
-    apply_style(ridge_fig, title="Expression ridgeplot by archetype",
-                height=ridge_height, width=700)
-    ridge_fig.update_layout(
-        violinmode="group",
-        xaxis_title="Expression",
-        yaxis_title="",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="left",
-            x=0,
-            font=dict(size=10),
-        ),
-    )
-
-    # ------------------------------------------------------------------
-    # 5. Save and show
-    # ------------------------------------------------------------------
-    if save:
-        base, ext = os.path.splitext(save)
-        if not ext:
-            ext = ".png"
-        save_and_show(radar_fig, save_path=f"{base}_radar{ext}", show=False)
-        save_and_show(ridge_fig, save_path=f"{base}_ridge{ext}", show=False)
-
-    if show:
-        radar_fig.show()
-        ridge_fig.show()
-
-    return radar_fig, ridge_fig
+    return save_and_show(fig, save_path=save, show=show)
 
 
 def pattern_summary(

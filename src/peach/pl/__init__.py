@@ -34,7 +34,7 @@ from .regression import (
     vertex_radar,
     regression_volcano,
     archetype_regression_dotplot,
-    archetype_radar_ridgeplot,
+    archetype_radar,
     pattern_summary,
 )
 
@@ -100,7 +100,7 @@ __all__ = [
     "vertex_radar",
     "regression_volcano",
     "archetype_regression_dotplot",
-    "archetype_radar_ridgeplot",
+    "archetype_radar",
     "pattern_summary",
     # Ternary
     "ternary_facet",

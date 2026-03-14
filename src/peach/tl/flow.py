@@ -792,7 +792,8 @@ def flow_temporal_feature_graph(
     dict
         Keys: ``cross_matrices``, ``self_expansion``, ``gene_names``,
         ``timepoints``, ``temporal_centrality``, ``temporal_profile``,
-        ``top_early_genes``, ``top_late_genes``, ``top_bridge_genes``,
+        ``top_early_genes``, ``top_mid_early_genes``,
+        ``top_mid_late_genes``, ``top_late_genes``,
         ``n_timepoints``, ``n_top_genes``.
     """
     rng = np.random.default_rng(random_state)
@@ -864,10 +865,11 @@ def flow_temporal_feature_graph(
     # Overall temporal centrality: sum across all timepoints
     temporal_centrality = temporal_profile.sum(axis=0)  # [n_top]
 
-    # --- Phase-specific top genes ---
-    early_mask = timepoints < 0.3
-    late_mask = timepoints > 0.7
-    bridge_mask = (timepoints >= 0.3) & (timepoints <= 0.7)
+    # --- Phase-specific top genes (4 temporal bins) ---
+    early_mask = timepoints < 0.25
+    mid_early_mask = (timepoints >= 0.25) & (timepoints < 0.5)
+    mid_late_mask = (timepoints >= 0.5) & (timepoints < 0.75)
+    late_mask = timepoints >= 0.75
 
     def _top_genes_for_phase(phase_mask, k=10):
         if not phase_mask.any():
@@ -878,13 +880,15 @@ def flow_temporal_feature_graph(
         return list(gene_names_sub[idx])
 
     top_early = _top_genes_for_phase(early_mask)
+    top_mid_early = _top_genes_for_phase(mid_early_mask)
+    top_mid_late = _top_genes_for_phase(mid_late_mask)
     top_late = _top_genes_for_phase(late_mask)
-    top_bridge = _top_genes_for_phase(bridge_mask)
 
     print(f"Temporal feature graph complete.")
-    print(f"  Top early genes:  {top_early[:5]}")
-    print(f"  Top bridge genes: {top_bridge[:5]}")
-    print(f"  Top late genes:   {top_late[:5]}")
+    print(f"  Top early genes     (t<0.25):       {top_early[:5]}")
+    print(f"  Top mid-early genes (0.25<=t<0.5):  {top_mid_early[:5]}")
+    print(f"  Top mid-late genes  (0.5<=t<0.75):  {top_mid_late[:5]}")
+    print(f"  Top late genes      (t>=0.75):       {top_late[:5]}")
 
     return {
         "cross_matrices": cross_matrices,
@@ -894,8 +898,9 @@ def flow_temporal_feature_graph(
         "temporal_centrality": temporal_centrality,
         "temporal_profile": temporal_profile,
         "top_early_genes": top_early,
+        "top_mid_early_genes": top_mid_early,
+        "top_mid_late_genes": top_mid_late,
         "top_late_genes": top_late,
-        "top_bridge_genes": top_bridge,
         "n_timepoints": n_timepoints,
         "n_top_genes": n_top,
     }
