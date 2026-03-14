@@ -116,14 +116,25 @@ class TestArchetypeFeatureSimilarity:
         result = compute_feature_similarity(comparison_adata)
         assert result["spearman_matrix"][0, 1] > result["spearman_matrix"][0, 2]
 
-    def test_silhouette_scores(self, comparison_adata):
+    def test_n_significant_features(self, comparison_adata):
         from peach._core.utils.archetype_comparison import compute_feature_similarity
         import peach as pc
         pc.tl.feature_simplex_regression(comparison_adata, n_bootstrap=0)
         result = compute_feature_similarity(comparison_adata)
-        assert len(result["silhouette_per_archetype"]) == 4
-        assert -1.0 <= result["silhouette_overall"] <= 1.0
+        assert "n_significant_features" in result
+        assert result["n_significant_features"] >= 0
+        assert result["n_significant_features"] <= result["n_shared_features"]
+        # With planted strong signal, most features should be significant
+        assert result["n_significant_features"] > 0
 
+    def test_no_silhouette_fields(self, comparison_adata):
+        """Silhouette fields should no longer be returned."""
+        from peach._core.utils.archetype_comparison import compute_feature_similarity
+        import peach as pc
+        pc.tl.feature_simplex_regression(comparison_adata, n_bootstrap=0)
+        result = compute_feature_similarity(comparison_adata)
+        assert "silhouette_per_archetype" not in result
+        assert "silhouette_overall" not in result
 
     def test_spearman_fdr_present(self, comparison_adata):
         """Spearman p-values should include FDR-corrected version."""
@@ -201,7 +212,8 @@ class TestPublicAPI:
         pc.tl.feature_simplex_regression(comparison_adata, n_bootstrap=0)
         result = pc.tl.archetype_feature_similarity(comparison_adata)
         assert "spearman_matrix" in result
-        assert "silhouette_overall" in result
+        assert "n_significant_features" in result
+        assert "silhouette_overall" not in result
         assert "peach_archetype_feature_similarity" in comparison_adata.uns
 
     def test_archetype_contrasts_api(self, comparison_adata):
@@ -211,3 +223,52 @@ class TestPublicAPI:
         assert "pairs" in result
         assert "delta_beta" in result
         assert "peach_archetype_contrasts" in comparison_adata.uns
+
+
+class TestMMDUnbiased:
+    def test_mmd_unbiased_identical(self):
+        """MMD of identical distribution should be near zero."""
+        from peach._core.utils.flow_matching import compute_mmd
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((200, 5))
+        mmd = compute_mmd(X, X)
+        assert abs(mmd) < 0.05, f"Expected ~0, got {mmd}"
+
+    def test_mmd_unbiased_different(self):
+        """MMD of shifted distributions should be positive."""
+        from peach._core.utils.flow_matching import compute_mmd
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((200, 5))
+        Y = rng.standard_normal((200, 5)) + 3.0
+        mmd = compute_mmd(X, Y)
+        assert mmd > 0.1, f"Expected positive MMD, got {mmd}"
+
+
+class TestWeightedMMD:
+    def test_weighted_mmd_produces_kxk_matrix(self):
+        """Weighted MMD should produce K x K matrix."""
+        import peach as pc
+        rng = np.random.default_rng(42)
+        n, K = 300, 3
+        weights = rng.dirichlet([1] * K, size=n)
+        pca = rng.standard_normal((n, 10))
+        adata = AnnData(rng.standard_normal((n, 20)))
+        adata.obsm["cell_archetype_weights"] = weights
+        adata.obsm["X_pca"] = pca
+        result = pc.tl.archetype_mmd(adata, n_permutations=50)
+        mmd_matrix = np.asarray(result["mmd_matrix"])
+        assert mmd_matrix.shape == (K, K)
+
+    def test_weighted_mmd_diagonal_zero(self):
+        """Within-fit diagonal should be zero (same archetype vs itself)."""
+        import peach as pc
+        rng = np.random.default_rng(42)
+        n, K = 300, 3
+        weights = rng.dirichlet([1] * K, size=n)
+        pca = rng.standard_normal((n, 10))
+        adata = AnnData(rng.standard_normal((n, 20)))
+        adata.obsm["cell_archetype_weights"] = weights
+        adata.obsm["X_pca"] = pca
+        result = pc.tl.archetype_mmd(adata, n_permutations=0)
+        mmd_matrix = np.asarray(result["mmd_matrix"])
+        np.testing.assert_allclose(np.diag(mmd_matrix), 0.0, atol=1e-10)
