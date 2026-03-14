@@ -737,7 +737,7 @@ def flow_feature_graph(
 
     print(f"Feature graph complete. Top 5 hub genes: {top_hub_genes[:5]}")
 
-    return {
+    result_dict = {
         "adjacency_matrix": G_sparse,
         "gene_names": list(gene_names_sub),
         "gene_indices": top_idx,
@@ -750,6 +750,41 @@ def flow_feature_graph(
         "edge_threshold": float(threshold),
         "per_timepoint_jacobians": per_tp_jacobians,
     }
+
+    # Optional igraph construction
+    try:
+        import igraph as ig
+        g = ig.Graph.Weighted_Adjacency(
+            np.abs(G_sparse).tolist(), mode="directed"
+        )
+        g.vs["name"] = list(gene_names_sub)
+        result_dict["igraph"] = g
+    except ImportError:
+        result_dict["igraph"] = None
+
+    # Per-archetype hub genes via regression coefficient assignment
+    hub_genes_per_archetype = {}
+    reg = adata.uns.get("peach_simplex_regression") or adata.uns.get(
+        "peach_simplex_regression_genes"
+    )
+    if reg is not None:
+        coefs = np.asarray(reg["vertex_coefficients"])
+        gene_names_all = list(reg["feature_names"])
+        K = coefs.shape[1]
+        for k in range(K):
+            hub_genes_per_archetype[k] = []
+        for gene in top_hub_genes:
+            if gene in gene_names_all:
+                gi = gene_names_all.index(gene)
+                dominant_k = int(np.argmax(np.abs(coefs[gi])))
+                hub_genes_per_archetype[dominant_k].append(gene)
+    elif "cell_archetype_weights" in adata.obsm:
+        K = adata.obsm["cell_archetype_weights"].shape[1]
+        for k in range(K):
+            hub_genes_per_archetype[k] = top_hub_genes[:10]
+    result_dict["hub_genes_per_archetype"] = hub_genes_per_archetype
+
+    return result_dict
 
 
 def flow_temporal_feature_graph(

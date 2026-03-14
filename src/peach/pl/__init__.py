@@ -61,6 +61,7 @@ from .flow import (
     density_comparison,
     archetype_correspondence,
     soft_assignment_flow,
+    soft_assignment_heatmap,
     flow_topo_landscape,
 )
 
@@ -121,6 +122,7 @@ __all__ = [
     "density_comparison",
     "archetype_correspondence",
     "soft_assignment_flow",
+    "soft_assignment_heatmap",
     "flow_topo_landscape",
     # Archetype comparison
     "mmd_heatmap",

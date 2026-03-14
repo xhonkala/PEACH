@@ -891,6 +891,98 @@ def flow_topo_landscape(
 # soft_assignment_flow
 # ---------------------------------------------------------------------------
 
+def soft_assignment_heatmap(
+    adata: AnnData,
+    flow_result: dict,
+    *,
+    adata_b: AnnData | None = None,
+    pca_key: str = "X_pca",
+    n_neighbors: int = 10,
+    save_path: str | None = None,
+    show: bool = True,
+) -> go.Figure:
+    """Heatmap of soft archetype assignment correspondence between source and target.
+
+    Uses cKDTree to find nearest neighbors in PCA space between transported
+    source cells and target cells, then builds a K_source x K_target
+    correspondence matrix from archetype weights.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Source annotated data matrix with archetype weights in
+        ``adata.obsm['cell_archetype_weights']``.
+    flow_result : dict
+        Output of ``pc.tl.flow_within()`` or ``pc.tl.flow_between()``.
+    adata_b : AnnData or None
+        Separate target AnnData. If None, target cells come from ``adata``
+        using ``flow_result['target_mask']``.
+    pca_key : str
+        Key in ``adata.obsm`` for PCA coordinates.
+    n_neighbors : int
+        Number of nearest neighbors for soft matching.
+    save_path : str or None
+        If provided, save figure to this path.
+    show : bool
+        Whether to call ``fig.show()``.
+
+    Returns
+    -------
+    go.Figure
+    """
+    from scipy.spatial import cKDTree
+
+    transported = flow_result["transported"]
+
+    if adata_b is not None:
+        target_pca = adata_b.obsm[pca_key]
+        weights_target = np.asarray(adata_b.obsm["cell_archetype_weights"])
+        K_b = weights_target.shape[1]
+    else:
+        target_pca = adata.obsm[pca_key][flow_result["target_mask"]]
+        weights_all = np.asarray(adata.obsm["cell_archetype_weights"])
+        weights_target = weights_all[flow_result["target_mask"]]
+        K_b = weights_target.shape[1]
+
+    weights_source_all = np.asarray(adata.obsm["cell_archetype_weights"])
+    weights_source_sub = weights_source_all[flow_result["source_mask"]]
+    K_a = weights_source_sub.shape[1]
+
+    # Find nearest target neighbors for each transported cell
+    tree = cKDTree(target_pca)
+    _, nn_idx = tree.query(transported, k=n_neighbors)
+
+    # Build correspondence matrix: K_a x K_b
+    correspondence = np.zeros((K_a, K_b))
+    for i in range(len(transported)):
+        w_source = weights_source_sub[i]  # [K_a]
+        w_target_nn = weights_target[nn_idx[i]].mean(axis=0)  # [K_b]
+        correspondence += np.outer(w_source, w_target_nn)
+    correspondence /= len(transported)
+
+    # Normalize rows
+    row_sums = correspondence.sum(axis=1, keepdims=True)
+    correspondence = correspondence / np.where(row_sums > 0, row_sums, 1)
+
+    arch_a = [f"A{i+1} (source)" for i in range(K_a)]
+    arch_b = [f"A{j+1} (target)" for j in range(K_b)]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=correspondence,
+        x=arch_b,
+        y=arch_a,
+        colorscale="Blues",
+        text=np.round(correspondence, 2).astype(str),
+        texttemplate="%{text}",
+        textfont_size=10,
+    ))
+
+    apply_style(fig, title="Soft archetype assignment correspondence",
+                xaxis_title="Target archetypes", yaxis_title="Source archetypes")
+
+    return save_and_show(fig, save_path=save_path, show=show)
+
+
 def soft_assignment_flow(
     adata: AnnData,
     *,
