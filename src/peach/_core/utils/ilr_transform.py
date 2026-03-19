@@ -117,7 +117,8 @@ def inverse_ilr(ilr_coords):
     # ILR -> CLR: project back via V^T
     clr = ilr_coords @ V.T  # [n, K]
 
-    # CLR -> composition: exp and normalize
+    # CLR -> composition: exp and normalize (clip to prevent overflow)
+    clr = np.clip(clr, -500, 500)
     W = np.exp(clr)
     W = W / W.sum(axis=1, keepdims=True)
 

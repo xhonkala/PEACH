@@ -4,6 +4,47 @@ import numpy as np
 import pytest
 
 
+def _make_flow_fixture(n_cells=100, n_genes=50, K=3, return_model=True, seed=42):
+    """Create minimal AnnData + trained flow for testing."""
+    import anndata as ad
+    from peach._core.utils.flow_matching import FlowModel
+    import torch
+
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n_cells, n_genes)).astype(np.float32)
+    adata = ad.AnnData(X)
+    adata.var_names = [f"gene_{i}" for i in range(n_genes)]
+    adata.obsm["X_pca"] = rng.standard_normal((n_cells, 10)).astype(np.float32)
+    adata.obsm["cell_archetype_weights"] = rng.dirichlet(np.ones(K), n_cells).astype(np.float32)
+    adata.varm["PCs"] = rng.standard_normal((n_genes, 10)).astype(np.float32)
+    adata.obs["condition"] = ["source"] * (n_cells // 2) + ["target"] * (n_cells - n_cells // 2)
+
+    import peach as pc
+    flow_result = pc.tl.flow_within(
+        adata,
+        source={"condition": "source"},
+        target={"condition": "target"},
+        n_epochs=50,
+        hidden_dims=(32, 32),
+        return_model=return_model,
+        random_state=seed,
+    )
+    return adata, flow_result
+
+
+def _make_feature_graph_result(seed=42):
+    """Create a flow feature graph result for testing."""
+    import peach as pc
+    adata, flow_result = _make_flow_fixture(return_model=True, seed=seed)
+    model = flow_result["model"]
+    result = pc.tl.flow_feature_graph(
+        adata, flow_result, model,
+        n_top_genes=20, n_timepoints=5, n_eval_points=30,
+        random_state=seed,
+    )
+    return result
+
+
 def test_jacobian_vectorized_correct():
     """Vectorized Jacobian should produce finite, non-zero values."""
     from peach._core.utils.flow_matching import FlowModel
@@ -216,6 +257,124 @@ def test_bifurcation_scoring():
     assert bif["eigenvalue_real"].shape == (5, n, dim)
     assert bif["eigenvalue_imag"].shape == (5, n, dim)
     assert len(bif["timepoints"]) == 5
+
+
+def test_temporal_graph_archetype_pairs():
+    """archetype_pairs should filter source cells by top-2 weight membership."""
+    import anndata as ad
+    from peach.tl.flow import flow_within, flow_temporal_feature_graph
+
+    rng = np.random.default_rng(42)
+    n, dim, n_genes = 200, 5, 20
+    source = rng.standard_normal((n, dim)).astype(np.float32)
+    target = (rng.standard_normal((n, dim)) + 2.0).astype(np.float32)
+    adata = ad.AnnData(rng.standard_normal((n * 2, n_genes)))
+    adata.obsm["X_pca"] = np.vstack([source, target])
+    adata.obs["group"] = ["A"] * n + ["B"] * n
+    # Synthetic PCA loadings
+    adata.varm["PCs"] = rng.standard_normal((n_genes, dim)).astype(np.float32)
+    # Synthetic archetype weights (K=3): source cells get varying profiles
+    K = 3
+    raw_w = rng.dirichlet(np.ones(K), size=n * 2).astype(np.float32)
+    adata.obsm["cell_archetype_weights"] = raw_w
+
+    flow_result = flow_within(
+        adata, {"group": "A"}, {"group": "B"},
+        n_epochs=30, batch_size=64, return_model=True,
+    )
+    # Run with archetype_pairs — should not error
+    result = flow_temporal_feature_graph(
+        adata, flow_result, flow_result["model"],
+        n_top_genes=10, n_timepoints=5, n_eval_points=50,
+        archetype_pairs=[(0, 1)],
+    )
+    assert "cross_matrices" in result
+    assert result["cross_matrices"].shape[0] == 5
+    assert len(result["gene_names"]) <= 10
+
+    # Without archetype_pairs — should also work
+    result_all = flow_temporal_feature_graph(
+        adata, flow_result, flow_result["model"],
+        n_top_genes=10, n_timepoints=5, n_eval_points=50,
+    )
+    assert "cross_matrices" in result_all
+
+
+def test_centrality_matches_sparse_adjacency():
+    """out_centrality and in_centrality must be computed from the sparsified
+    adjacency_matrix, not the dense unthresholded matrix."""
+    # This test verifies internal consistency
+    result = _make_feature_graph_result()  # helper that calls flow_feature_graph
+
+    adj = np.abs(result["adjacency_matrix"])
+    expected_out = adj.sum(axis=1)
+    expected_in = adj.sum(axis=0)
+
+    np.testing.assert_array_almost_equal(result["out_centrality"], expected_out)
+    np.testing.assert_array_almost_equal(result["in_centrality"], expected_in)
+
+
+def test_gene_alignment_t_parameter_changes_output():
+    """Verify that different t values produce different alignment scores
+    when a model is available."""
+    import peach as pc
+
+    # Use the shared synthetic flow fixture
+    adata, flow_result = _make_flow_fixture(return_model=True)
+
+    result_t01 = pc.tl.flow_gene_alignment(adata, flow_result, t=0.1)
+    result_t09 = pc.tl.flow_gene_alignment(adata, flow_result, t=0.9)
+
+    # Different t values MUST produce different alignment scores
+    assert not np.allclose(
+        result_t01["alignment_scores"],
+        result_t09["alignment_scores"],
+        atol=1e-6,
+    ), "t parameter had no effect on alignment scores"
+
+    # Both should report instantaneous mode
+    assert result_t01["velocity_mode"] == "instantaneous"
+    assert result_t09["velocity_mode"] == "instantaneous"
+
+
+def test_gene_alignment_no_model_uses_displacement():
+    """Without a model in flow_result, t is ignored and displacement is used."""
+    import peach as pc
+
+    adata, flow_result = _make_flow_fixture(return_model=False)
+
+    result_default = pc.tl.flow_gene_alignment(adata, flow_result)
+    result_with_t = pc.tl.flow_gene_alignment(adata, flow_result, t=0.3)
+
+    # Without model, t has no effect (both use displacement)
+    np.testing.assert_array_equal(
+        result_default["alignment_scores"],
+        result_with_t["alignment_scores"],
+    )
+    assert result_default.get("velocity_mode") == "displacement"
+
+
+def test_feature_expansion_invariant_to_loading_scale():
+    """feature_expansion should depend on flow direction, not PCA loading magnitude."""
+    import peach as pc
+
+    adata, flow_result = _make_flow_fixture(return_model=True)
+    model = flow_result["model"]
+
+    # Compute feature expansion
+    jac_result = pc.tl.flow_jacobian(adata, flow_result, model)
+
+    # Scale PCA loadings by 10x — should NOT change feature_expansion
+    adata2 = adata.copy()
+    adata2.varm["PCs"] = adata.varm["PCs"] * 10.0
+    jac_result2 = pc.tl.flow_jacobian(adata2, flow_result, model)
+
+    np.testing.assert_allclose(
+        jac_result["feature_expansion"],
+        jac_result2["feature_expansion"],
+        atol=1e-6,
+        err_msg="feature_expansion should be invariant to PCA loading scale",
+    )
 
 
 def test_jacobian_det_nonzero_after_training():

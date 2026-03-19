@@ -211,6 +211,42 @@ class TestFlowModel:
         assert result.shape == (80, dim)
 
 
+class TestMMDDegenerate:
+    def test_mmd_single_cell_returns_nan(self):
+        """compute_mmd with < 2 points should return NaN, not 0."""
+        from peach._core.utils.flow_matching import compute_mmd
+        result = compute_mmd(np.zeros((1, 5)), np.ones((100, 5)))
+        assert np.isnan(result), f"Expected NaN for single-cell input, got {result}"
+
+    def test_mmd_empty_returns_nan(self):
+        """compute_mmd with 0 points should return NaN."""
+        from peach._core.utils.flow_matching import compute_mmd
+        result = compute_mmd(np.zeros((0, 5)), np.ones((100, 5)))
+        assert np.isnan(result), f"Expected NaN for empty input, got {result}"
+
+
+class TestOTCFMReproducibility:
+    def test_ot_cfm_reproducible(self):
+        """OT-CFM training should be reproducible with same random_state."""
+        pytest.importorskip("ot")
+        from peach._core.utils.flow_matching import FlowModel
+
+        source = np.random.randn(50, 5).astype(np.float32)
+        target = np.random.randn(50, 5).astype(np.float32) + 2
+
+        torch.manual_seed(42)
+        np.random.seed(99)  # pollute global state
+        m1 = FlowModel(5, hidden_dims=(32, 32), lr=1e-3)
+        losses1 = m1.train(source, target, n_epochs=20, batch_size=32, use_ot=True, random_state=42)
+
+        torch.manual_seed(42)
+        np.random.seed(77)  # different global state
+        m2 = FlowModel(5, hidden_dims=(32, 32), lr=1e-3)
+        losses2 = m2.train(source, target, n_epochs=20, batch_size=32, use_ot=True, random_state=42)
+
+        np.testing.assert_allclose(losses1, losses2, atol=1e-6)
+
+
 class TestMMD:
     def test_identical_distributions(self):
         """MMD between identical sets should be ~0."""

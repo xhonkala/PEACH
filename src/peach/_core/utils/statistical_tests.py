@@ -268,10 +268,12 @@ def robust_mannwhitneyu_test(
             # Add very small noise (1e-8 of data standard deviation)
             noise_scale = data_std * 1e-8
 
-            # Generate reproducible noise based on data content for consistency
-            np.random.seed(hash(feature_name) % 2**32)
-            noise1 = np.random.normal(0, noise_scale, len(group1))
-            noise2 = np.random.normal(0, noise_scale, len(group2))
+            # Use local RNG with deterministic seed (no global state mutation)
+            import hashlib
+            seed_val = int(hashlib.sha256(feature_name.encode()).hexdigest()[:8], 16)
+            local_rng = np.random.default_rng(seed_val)
+            noise1 = local_rng.normal(0, noise_scale, len(group1))
+            noise2 = local_rng.normal(0, noise_scale, len(group2))
 
             group1_jittered = group1 + noise1
             group2_jittered = group2 + noise2

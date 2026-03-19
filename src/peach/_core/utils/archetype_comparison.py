@@ -145,23 +145,26 @@ def compute_archetype_mmd(
                 n_a = len(pca_a)
                 n_b = len(pca_b)
                 if adata_b is None:
-                    # Within-fit: shuffle weight columns i and j
+                    # Within-fit: permute BOTH columns independently
                     null_mmds = np.empty(n_permutations)
                     for p in range(n_permutations):
-                        # Permute cell identities
-                        perm = rng.permutation(n_a)
+                        perm_i = rng.permutation(n_a)
+                        perm_j = rng.permutation(n_a)
                         null_mmds[p] = _weighted_mmd_pair(
-                            pca_a, weights_a[perm, i],
-                            pca_b, weights_b[:, j], bw
+                            pca_a, weights_a[perm_i, i],
+                            pca_b, weights_b[perm_j, j], bw
                         )
                 else:
-                    # Between-fit: permute cell identities between conditions
+                    # Between-fit permutation: can only permute
+                    # meaningfully when both i and j have real weight
+                    # columns in both fits.
+                    if i >= K_b or j >= K_a:
+                        pvalue_matrix[i, j] = float("nan")
+                        continue
+
                     combined_pca = np.vstack([pca_a, pca_b])
-                    combined_w_i = np.concatenate([weights_a[:, i], weights_b[:, i]
-                                                   if i < K_b else np.zeros(n_b)])
-                    combined_w_j = np.concatenate([weights_a[:, j]
-                                                   if j < K_a else np.zeros(n_a),
-                                                   weights_b[:, j]])
+                    combined_w_i = np.concatenate([weights_a[:, i], weights_b[:, i]])
+                    combined_w_j = np.concatenate([weights_a[:, j], weights_b[:, j]])
                     null_mmds = np.empty(n_permutations)
                     for p in range(n_permutations):
                         perm = rng.permutation(n_a + n_b)
@@ -233,10 +236,14 @@ def compute_feature_similarity(
         else:
             sig_mask_b = np.ones(len(names_b), dtype=bool)
 
+        # Pre-build index maps for O(1) lookup
+        idx_map_a = {name: i for i, name in enumerate(names_a)}
+        idx_map_b = {name: i for i, name in enumerate(names_b)}
+
         # Find shared features, then apply FDR filter from either fit
         shared_all = sorted(set(names_a) & set(names_b))
-        idx_a_all = [names_a.index(g) for g in shared_all]
-        idx_b_all = [names_b.index(g) for g in shared_all]
+        idx_a_all = [idx_map_a[g] for g in shared_all]
+        idx_b_all = [idx_map_b[g] for g in shared_all]
 
         # A feature passes if significant in either fit
         sig_shared = [
@@ -244,8 +251,8 @@ def compute_feature_similarity(
             for ia, ib in zip(idx_a_all, idx_b_all)
         ]
         shared = [g for g, s in zip(shared_all, sig_shared) if s]
-        idx_a = [names_a.index(g) for g in shared]
-        idx_b = [names_b.index(g) for g in shared]
+        idx_a = [idx_map_a[g] for g in shared]
+        idx_b = [idx_map_b[g] for g in shared]
         coefs_a_shared = coefs_a[idx_a]
         coefs_b_shared = coefs_b[idx_b]
         n_significant = len(shared)
@@ -327,7 +334,8 @@ def compute_wald_contrasts(
     else:
         from .simplex_regression import ols_fit, scheffe_design_matrix
         from .feature_utils import resolve_features
-        Y, _ = resolve_features(adata, None, feat_names)
+        feature_source = reg.get("feature_source")
+        Y, _ = resolve_features(adata, feature_source, feat_names)
         W, _ = scheffe_design_matrix(weights, degree=1)
         fit = ols_fit(W, Y, robust_se=robust_se, return_covariance=True)
         beta = fit["coefficients"]  # [n_features, K]

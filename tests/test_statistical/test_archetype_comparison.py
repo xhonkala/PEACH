@@ -2,6 +2,19 @@ import numpy as np
 import pytest
 
 
+def _make_adata_with_weights(rng=None, n_cells=200, K=3, n_genes=50):
+    """Create AnnData with weights and PCA for comparison tests."""
+    import anndata as ad
+    if rng is None:
+        rng = np.random.default_rng(42)
+    X = rng.standard_normal((n_cells, n_genes)).astype(np.float32)
+    adata = ad.AnnData(X)
+    adata.var_names = [f"gene_{i}" for i in range(n_genes)]
+    adata.obsm["X_pca"] = rng.standard_normal((n_cells, 10)).astype(np.float32)
+    adata.obsm["cell_archetype_weights"] = rng.dirichlet(np.ones(K), n_cells)
+    return adata
+
+
 class TestOlsFitCovariance:
     def test_returns_covariance_when_requested(self):
         from peach._core.utils.simplex_regression import ols_fit, scheffe_design_matrix
@@ -296,3 +309,65 @@ class TestWeightedMMD:
         result = pc.tl.archetype_mmd(adata, n_permutations=0)
         mmd_matrix = np.asarray(result["mmd_matrix"])
         np.testing.assert_allclose(np.diag(mmd_matrix), 0.0, atol=1e-10)
+
+
+class TestWaldContrastsFeatureSource:
+    def test_wald_contrasts_respects_feature_source(self):
+        """Wald contrasts must use the same feature matrix as the original regression."""
+        import peach as pc
+
+        adata = _make_adata_with_weights()
+        # Store a custom feature matrix in obsm
+        n_cells = adata.n_obs
+        rng = np.random.default_rng(99)
+        custom_features = rng.standard_normal((n_cells, 10)).astype(np.float32)
+        adata.obsm["test_features"] = custom_features
+
+        pc.tl.feature_simplex_regression(adata, feature_matrix="test_features", n_bootstrap=0)
+
+        # Wald contrasts should use the same feature matrix
+        result = pc.tl.archetype_contrasts(adata)
+        assert result["n_features"] == 10, (
+            f"Expected 10 features (from test_features), got {result['n_features']}"
+        )
+
+
+class TestMMDPermutationSymmetry:
+    def test_mmd_permutation_symmetric(self):
+        """Permuting (i,j) and (j,i) should give the same p-value distribution."""
+        from peach._core.utils.archetype_comparison import compute_archetype_mmd
+
+        rng = np.random.default_rng(42)
+        adata = _make_adata_with_weights(rng, n_cells=200, K=3)
+
+        # Should be symmetric for within-fit
+        mmd, pval = compute_archetype_mmd(adata, n_permutations=200, seed=42)
+
+        # p-value matrix should be symmetric
+        np.testing.assert_array_almost_equal(
+            pval, pval.T, decimal=1,
+            err_msg="Within-fit MMD p-values should be symmetric"
+        )
+
+
+class TestBetweenFitMMDMismatchedK:
+    def test_between_fit_mmd_mismatched_K(self):
+        """Between-fit MMD with different K: MMD valid everywhere, but p-values
+        only meaningful when both archetype indices exist in both fits."""
+        from peach._core.utils.archetype_comparison import compute_archetype_mmd
+
+        adata_a = _make_adata_with_weights(K=3)
+        adata_b = _make_adata_with_weights(K=5)
+
+        mmd, pval = compute_archetype_mmd(adata_a, adata_b, n_permutations=50)
+
+        assert mmd.shape == (3, 5)
+        # All MMD entries should be finite (comparison is always valid)
+        assert np.all(np.isfinite(mmd))
+        # p-values for i < K_a=3 and j < K_b=5 where i < K_b=5 and j < K_a=3:
+        # valid block is [0:3, 0:3]
+        assert np.all(np.isfinite(pval[:3, :3]))
+        # p-values outside the valid block should be NaN
+        assert np.all(np.isnan(pval[:3, 3:])), (
+            "p-values for j >= K_a should be NaN (no matching archetype in fit A)"
+        )

@@ -124,11 +124,18 @@ class FlowModel:
         'euler', 'midpoint', or 'heun3'.
     device : str
         ``'cpu'`` or ``'cuda'``.
+    random_state : int or None
+        If provided, seeds ``torch.manual_seed`` before network weight
+        initialization for full reproducibility.
     """
 
     def __init__(self, dim, hidden_dims=(128, 128, 128), lr=1e-3,
-                 solver_method="dopri5", device="cpu"):
+                 solver_method="dopri5", device="cpu", random_state=None):
         _check_flow_matching()
+
+        # Seed torch before weight initialization for reproducibility
+        if random_state is not None:
+            torch.manual_seed(random_state)
 
         self.dim = dim
         self.device = device
@@ -137,7 +144,7 @@ class FlowModel:
         self.optimizer = torch.optim.Adam(self.velocity_net.parameters(), lr=lr)
         self._losses = []
 
-    def train(self, source, target, n_epochs=1000, batch_size=256, use_ot=False):
+    def train(self, source, target, n_epochs=1000, batch_size=256, use_ot=False, random_state=None):
         """Train velocity field to transport source to target.
 
         Uses fb ``CondOTProbPath`` for conditional optimal transport path
@@ -158,6 +165,9 @@ class FlowModel:
             If True, use minibatch Sinkhorn optimal transport coupling
             to pair source and target samples within each epoch instead
             of random pairing. Requires the ``POT`` package.
+        random_state : int or None
+            Seed for reproducibility. Seeds both torch and numpy RNGs
+            used during training.
 
         Returns
         -------
@@ -167,6 +177,11 @@ class FlowModel:
         from flow_matching.path import CondOTProbPath
 
         prob_path = CondOTProbPath()
+
+        # Seed both RNGs for full reproducibility
+        if random_state is not None:
+            torch.manual_seed(random_state)
+        ot_rng = np.random.default_rng(random_state)
 
         source_t = torch.tensor(source, dtype=torch.float32, device=self.device)
         target_t = torch.tensor(target, dtype=torch.float32, device=self.device)
@@ -213,7 +228,7 @@ class FlowModel:
                 )
                 coupling_flat = coupling.ravel()
                 coupling_flat /= coupling_flat.sum()
-                pair_idx = np.random.choice(
+                pair_idx = ot_rng.choice(
                     len(x0) * len(x1), size=len(x0), p=coupling_flat
                 )
                 idx_i = pair_idx // len(x1)
@@ -397,7 +412,7 @@ def compute_mmd(X, Y, bandwidth=None, max_samples=5000):
 
     # Guard against degenerate inputs
     if len(X) < 2 or len(Y) < 2:
-        return 0.0
+        return float("nan")
 
     # Subsample large inputs to avoid O(n^2) kernel matrix OOM
     rng = np.random.default_rng(42)

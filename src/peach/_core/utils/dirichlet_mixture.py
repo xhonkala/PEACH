@@ -72,6 +72,18 @@ class DirichletMixture:
         W = np.clip(W, 1e-300, None)
         W = W / W.sum(axis=1, keepdims=True)
 
+        # Warn about vertex-heavy data
+        vertex_fraction = np.mean(np.any(W < 1e-6, axis=1))
+        if vertex_fraction > 0.1:
+            import warnings
+            warnings.warn(
+                f"{vertex_fraction:.0%} of cells are near simplex vertices "
+                f"(at least one weight < 1e-6). Dirichlet mixture fitting may "
+                f"be unstable for boundary-heavy data. Consider using "
+                f"model_type='gaussian' (GMM on ILR coordinates) instead.",
+                UserWarning,
+            )
+
         rng = np.random.default_rng(self.random_state)
         best_ll = -np.inf
         best_alphas = None
@@ -135,12 +147,15 @@ class DirichletMixture:
         converged = False
 
         for iteration in range(self.max_iter):
-            # E-step: compute responsibilities
-            log_resp = self._log_responsibilities(W, alphas, mix_weights)
-            resp = np.exp(log_resp)  # [n, n_components]
-
-            # Log-likelihood
-            ll = self._log_likelihood(W, alphas, mix_weights)
+            # E-step: compute responsibilities and log-likelihood together
+            log_joint = self._log_joint(W, alphas, mix_weights)  # [n, C]
+            log_joint_max = log_joint.max(axis=1, keepdims=True)
+            log_sum_exp = log_joint_max.squeeze() + np.log(
+                np.exp(log_joint - log_joint_max).sum(axis=1)
+            )
+            ll = log_sum_exp.sum()
+            log_resp = log_joint - log_sum_exp[:, np.newaxis]
+            resp = np.exp(log_resp)
 
             if abs(ll - prev_ll) < self.tol and iteration > 0:
                 converged = True
@@ -244,6 +259,23 @@ class DirichletMixture:
         log_p = -log_B + ((alpha - 1) * np.log(np.clip(W, 1e-300, None))).sum(axis=1)
         return log_p
 
+    def _log_joint(self, W, alphas, mix_weights):
+        """Log joint probabilities: log(pi_c * p(w|alpha_c)).
+
+        Returns
+        -------
+        np.ndarray [n, n_components]
+            Unnormalized log probabilities.
+        """
+        n = W.shape[0]
+        log_joint = np.zeros((n, self.n_components))
+        for c in range(self.n_components):
+            log_joint[:, c] = (
+                np.log(np.clip(mix_weights[c], 1e-300, None))
+                + self._log_dirichlet_pdf(W, alphas[c])
+            )
+        return log_joint
+
     def _log_responsibilities(self, W, alphas, mix_weights):
         """Compute log responsibilities (E-step).
 
@@ -252,29 +284,22 @@ class DirichletMixture:
         np.ndarray [n, n_components]
             Log posterior probabilities (normalized).
         """
-        n = W.shape[0]
-        log_resp = np.zeros((n, self.n_components))
-
-        for c in range(self.n_components):
-            log_resp[:, c] = np.log(np.clip(mix_weights[c], 1e-300, None)) + self._log_dirichlet_pdf(W, alphas[c])
+        log_joint = self._log_joint(W, alphas, mix_weights)
 
         # Log-sum-exp normalization
-        log_resp_max = log_resp.max(axis=1, keepdims=True)
-        log_resp_norm = log_resp - log_resp_max - np.log(
-            np.exp(log_resp - log_resp_max).sum(axis=1, keepdims=True)
+        log_resp_max = log_joint.max(axis=1, keepdims=True)
+        log_resp_norm = log_joint - log_resp_max - np.log(
+            np.exp(log_joint - log_resp_max).sum(axis=1, keepdims=True)
         )
         return log_resp_norm
 
     def _log_likelihood(self, W, alphas, mix_weights):
         """Compute total log-likelihood."""
-        n = W.shape[0]
-        log_probs = np.zeros((n, self.n_components))
-        for c in range(self.n_components):
-            log_probs[:, c] = np.log(np.clip(mix_weights[c], 1e-300, None)) + self._log_dirichlet_pdf(W, alphas[c])
+        log_joint = self._log_joint(W, alphas, mix_weights)
 
         # log-sum-exp per sample
-        max_log = log_probs.max(axis=1)
-        ll = max_log + np.log(np.exp(log_probs - max_log[:, None]).sum(axis=1))
+        max_log = log_joint.max(axis=1)
+        ll = max_log + np.log(np.exp(log_joint - max_log[:, None]).sum(axis=1))
         return ll.sum()
 
     def predict(self, W):

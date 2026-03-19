@@ -225,3 +225,60 @@ class TestClassifyAllFeatures:
         assert results[0]["details"]["reason"] == "nan_r2"
         assert results[1]["pattern"] == "flat"
         assert results[1]["details"]["reason"] == "nan_pvalue"
+
+
+class TestSEAwareClassification:
+    def test_exclusive_requires_significance_when_ses_provided(self):
+        """A large but noisy coefficient should NOT be classified as exclusive."""
+        result = classify_single_feature(
+            vertex_betas=np.array([10.0, 1.0, 0.5]),
+            r2=0.5,
+            f_pvalue_fdr=0.001,
+            vertex_ses=np.array([50.0, 0.1, 0.01]),  # SE on dominant is 50!
+        )
+        assert result["pattern"] != "archetype-exclusive", (
+            "Should not classify as exclusive when dominant coefficient SE is huge"
+        )
+
+    def test_exclusive_passes_when_se_is_small(self):
+        """A large coefficient with small SE should still be exclusive."""
+        result = classify_single_feature(
+            vertex_betas=np.array([10.0, 1.0, 0.5]),
+            r2=0.5,
+            f_pvalue_fdr=0.001,
+            vertex_ses=np.array([0.1, 0.1, 0.01]),  # SE is small
+        )
+        assert result["pattern"] == "archetype-exclusive"
+
+    def test_exclusive_without_ses_unchanged(self):
+        """Without SEs, exclusive classification works as before."""
+        result = classify_single_feature(
+            vertex_betas=np.array([10.0, 1.0, 0.5]),
+            r2=0.5,
+            f_pvalue_fdr=0.001,
+            vertex_ses=None,
+        )
+        assert result["pattern"] == "archetype-exclusive"
+
+    def test_classify_all_passes_ses_through(self):
+        """classify_all_features should pass vertex_ses to each feature."""
+        vertex_coefficients = np.array([
+            [10.0, 0.5, 0.3],   # would be exclusive, but SE is huge
+            [10.0, 0.5, 0.3],   # SE is small -> exclusive
+        ])
+        r_squared = np.array([0.8, 0.8])
+        f_pvalue_fdr = np.array([0.001, 0.001])
+        vertex_ses = np.array([
+            [50.0, 0.1, 0.01],  # huge SE on dominant
+            [0.1, 0.1, 0.01],   # small SE
+        ])
+
+        results = classify_all_features(
+            vertex_coefficients=vertex_coefficients,
+            r_squared=r_squared,
+            f_pvalue_fdr=f_pvalue_fdr,
+            vertex_ses=vertex_ses,
+        )
+
+        assert results[0]["pattern"] != "archetype-exclusive"
+        assert results[1]["pattern"] == "archetype-exclusive"

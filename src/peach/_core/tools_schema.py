@@ -1425,7 +1425,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         parameters=[
             Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA loadings"),
             Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("t", ParamType.FLOAT, "Time point to evaluate velocity", default=0.5),
+            Parameter("t", ParamType.FLOAT, "Time point for instantaneous velocity (None=displacement)", required=False, default=None),
             Parameter("n_top", ParamType.INTEGER, "Number of top aligned/opposed genes to report", default=50),
             Parameter(
                 "pca_loadings_key",
@@ -1440,6 +1440,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         ],
         returns="dict",
         returns_description="alignment_scores [n_genes], gene_names, top_aligned, top_opposed, t, "
+        "velocity_mode ('displacement' or 'instantaneous'), "
         "alignment_pvalues (optional), alignment_pvalues_fdr (optional), "
         "per_cell_alignment [n_cells, n_genes] (if per_cell=True)",
         requires=["PCs in adata.varm", "FlowWithinResult"],
@@ -1517,6 +1518,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter("n_top_genes", ParamType.INTEGER, "Number of top genes by PCA loading", default=200),
             Parameter("n_timepoints", ParamType.INTEGER, "Timepoints for temporal nodes", default=20),
             Parameter("n_eval_points", ParamType.INTEGER, "Points to evaluate Jacobian", default=300),
+            Parameter("archetype_pairs", ParamType.ARRAY, "Restrict to cells whose top-2 weights match these pairs", default=None),
             Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
         ],
         returns="dict",
