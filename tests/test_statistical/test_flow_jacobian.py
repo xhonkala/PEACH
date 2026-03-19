@@ -225,8 +225,20 @@ def test_per_cell_gene_alignment():
 
     result = flow_gene_alignment(adata, flow_result, per_cell=True)
     assert "per_cell_alignment" in result
-    assert result["per_cell_alignment"].shape == (50, n_genes)
-    assert "alignment_scores" in result
+    assert "per_cell_gene_names" in result
+    assert "per_cell_gene_indices" in result
+    n_top_feat = min(2500, n_genes)
+    assert result["per_cell_alignment"].shape == (50, n_top_feat)
+    assert len(result["per_cell_gene_names"]) == n_top_feat
+    assert len(result["per_cell_gene_indices"]) == n_top_feat
+
+    # Also test with explicit cap smaller than n_genes
+    result_capped = flow_gene_alignment(
+        adata, flow_result, per_cell=True, n_top_features=10
+    )
+    assert result_capped["per_cell_alignment"].shape == (50, 10)
+    assert len(result_capped["per_cell_gene_names"]) == 10
+    assert len(result_capped["per_cell_gene_indices"]) == 10
 
 
 def test_bifurcation_scoring():

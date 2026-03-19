@@ -1444,14 +1444,17 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
                 default=None,
             ),
             Parameter("n_permutations", ParamType.INTEGER, "Permutations for significance. 0 to skip", default=0),
-            Parameter("per_cell", ParamType.BOOLEAN, "Compute per-cell per-gene alignment scores", default=False),
+            Parameter("per_cell", ParamType.BOOLEAN, "Compute per-cell per-gene alignment scores (top n_top_features by |alignment_score|)", default=True),
+            Parameter("n_top_features", ParamType.INTEGER, "Max genes in per-cell matrix (by |alignment_score|)", default=2500),
+            Parameter("normalize", ParamType.BOOLEAN, "Normalize loadings to unit norm (cosine-like scores)", default=True),
             Parameter("random_state", ParamType.INTEGER, "Random seed for permutations", default=42),
         ],
         returns="dict",
         returns_description="alignment_scores [n_genes], gene_names, top_aligned, top_opposed, t, "
         "velocity_mode ('displacement' or 'instantaneous'), "
         "alignment_pvalues (optional), alignment_pvalues_fdr (optional), "
-        "per_cell_alignment [n_cells, n_genes] (if per_cell=True)",
+        "per_cell_alignment [n_source, n_top_feat] (if per_cell=True), "
+        "per_cell_gene_names, per_cell_gene_indices (if per_cell=True)",
         requires=["PCs in adata.varm", "FlowWithinResult"],
         modifies_adata=[],
     ),
@@ -1467,9 +1470,13 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter("evaluation_points", ParamType.ARRAY, "Points to evaluate at [n_points, dim]. None = subsample source", required=False, default=None),
             Parameter("pca_loadings_key", ParamType.STRING, "Key in adata.varm for PCA loadings", required=False, default=None),
             Parameter("aggregate", ParamType.STRING, "Aggregation: 'mean' or 'none'", default="mean"),
+            Parameter("per_cell_features", ParamType.BOOLEAN, "Compute per-cell feature expansion for top genes", default=True),
+            Parameter("n_top_features", ParamType.INTEGER, "Max genes in per-cell expansion matrix", default=2500),
         ],
         returns="dict",
-        returns_description="jacobian_det [n_points], mean_jacobian [dim, dim], feature_expansion [n_genes], t",
+        returns_description="jacobian_det [n_points], mean_jacobian [dim, dim], feature_expansion [n_genes], t, "
+        "per_cell_expansion [n_points, n_top_feat] (if per_cell_features=True), "
+        "per_cell_expansion_gene_names, per_cell_expansion_gene_indices (if per_cell_features=True)",
         requires=["FlowModel from flow_within(return_model=True)", "PCs in adata.varm (for feature_expansion)"],
         modifies_adata=[],
     ),

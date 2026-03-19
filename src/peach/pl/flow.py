@@ -578,7 +578,7 @@ def flow_topo_landscape(
     if features is None:
         from peach.tl.flow import flow_gene_alignment
 
-        align = flow_gene_alignment(adata, flow_result, n_permutations=0)
+        align = flow_gene_alignment(adata, flow_result, n_permutations=0, per_cell=False)
         scores = align["alignment_scores"]
         names = align["gene_names"]
         top_idx = np.argsort(np.abs(scores))[-n_features:][::-1]
