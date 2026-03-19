@@ -178,6 +178,9 @@ def feature_simplex_regression(
     # Store serializable summary at namespaced key + generic fallback
     serialized = result.to_serializable()
 
+    # Track the feature matrix source for downstream consumers (e.g. Wald contrasts)
+    serialized["feature_source"] = feature_matrix
+
     # Comprehensive degree comparison (Enhancement 4)
     if comprehensive_degree:
         serialized["degree_comparison"] = _comprehensive_degree_comparison(
@@ -453,8 +456,17 @@ def archetype_driver_regression(
     K = weights.shape[1]
     n_cells = adata.n_obs
 
-    # Default to pathway scores if available
+    # Default to pathway scores if available — warn about upcoming behavior change
     if feature_matrix is None and "pathway_scores" in adata.obsm:
+        import warnings
+        warnings.warn(
+            "archetype_driver_regression() auto-selects pathway_scores when "
+            "available. This will change in v0.6.0 to always default to adata.X. "
+            "Pass feature_matrix='pathway_scores' explicitly to keep current "
+            "behavior and silence this warning.",
+            FutureWarning,
+            stacklevel=2,
+        )
         feature_matrix = "pathway_scores"
 
     X_features, feat_names = resolve_features(adata, feature_matrix, feature_names)

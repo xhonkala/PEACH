@@ -187,3 +187,44 @@ class TestFTest:
         Y = rng.standard_normal((2, 5))
         with pytest.raises(ValueError, match="Underdetermined"):
             ols_fit(W, Y)
+
+
+class TestHC3Vectorized:
+    """Verify vectorized HC3 matches manual per-gene loop."""
+
+    def test_hc3_vectorized_matches_loop(self):
+        """Vectorized HC3 must produce identical results to manual loop."""
+        from peach._core.utils.simplex_regression import (
+            ols_fit, scheffe_design_matrix,
+        )
+        rng = np.random.default_rng(42)
+        n, K, n_features = 200, 4, 50
+        W_raw = rng.dirichlet(np.ones(K), n)
+        W_design, _ = scheffe_design_matrix(W_raw)
+        beta_true = rng.standard_normal((n_features, K))
+        Y = W_design @ beta_true.T + rng.standard_normal((n, n_features)) * 0.5
+
+        # Compute HC3 SEs via full regression
+        result = ols_fit(W_design, Y, robust_se=True)
+
+        # Verify shape, finite, and non-negative
+        assert result["standard_errors"].shape == (n_features, K)
+        assert np.all(np.isfinite(result["standard_errors"]))
+        assert np.all(result["standard_errors"] >= 0)
+
+        # Cross-check: manually compute HC3 for first 3 features via explicit loop
+        WtW_inv = np.linalg.solve(W_design.T @ W_design, np.eye(K))
+        H_diag = np.clip(np.sum((W_design @ WtW_inv) * W_design, axis=1), 0, 1 - 1e-10)
+        residuals = Y - W_design @ result["coefficients"].T
+        adjustment = 1.0 / (1 - H_diag)
+
+        for g in range(3):
+            e_adj = residuals[:, g] * adjustment
+            We = W_design * (e_adj ** 2)[:, np.newaxis]
+            meat = W_design.T @ We
+            sandwich = WtW_inv @ meat @ WtW_inv
+            se_loop = np.sqrt(np.maximum(np.diag(sandwich), 0))
+            np.testing.assert_allclose(
+                result["standard_errors"][g], se_loop, atol=1e-10,
+                err_msg=f"HC3 SE mismatch for feature {g}"
+            )

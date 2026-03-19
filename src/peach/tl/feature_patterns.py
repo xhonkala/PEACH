@@ -58,6 +58,9 @@ def classify_feature_patterns(
         if deg2 is not None:
             interaction_f_pvalue_fdr = np.asarray(deg2["incremental_p_fdr"])
 
+    # Pass SEs for SE-aware exclusive classification
+    vertex_ses = getattr(regression_result, "vertex_se", None)
+
     classifications = classify_all_features(
         vertex_coefficients=regression_result.vertex_coefficients,
         r_squared=regression_result.r_squared_degree1,
@@ -65,6 +68,7 @@ def classify_feature_patterns(
         interaction_f_pvalue_fdr=interaction_f_pvalue_fdr,
         fdr_threshold=fdr_threshold,
         exclusive_ratio=exclusive_ratio,
+        vertex_ses=vertex_ses,
     )
 
     # Count patterns

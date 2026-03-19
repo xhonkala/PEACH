@@ -151,7 +151,8 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False, retu
 
     # Compute beta: sparse-safe (W.T @ sparse_Y works in scipy)
     if is_sparse:
-        WtY = np.asarray((W.T @ Y).todense()) if sp.issparse(W.T @ Y) else W.T @ Y
+        WtY_raw = W.T @ Y
+        WtY = np.asarray(WtY_raw.todense()) if sp.issparse(WtY_raw) else WtY_raw
     else:
         Y_dense = np.asarray(Y)
         WtY = W.T @ Y_dense
@@ -290,7 +291,7 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False, retu
 
 
 def _hc3_standard_errors(W, residuals, WtW_inv, H_diag):
-    """HC3 heteroscedasticity-consistent standard errors.
+    """HC3 heteroscedasticity-consistent standard errors (vectorized).
 
     HC3 adjusts residuals by the leverage (hat matrix diagonal) to provide
     better finite-sample coverage than HC0/HC1. The sandwich estimator is:
@@ -298,6 +299,7 @@ def _hc3_standard_errors(W, residuals, WtW_inv, H_diag):
         Var(beta) = (W'W)^{-1} [ sum_i w_i w_i' e_i^2 / (1 - h_ii)^2 ] (W'W)^{-1}
 
     Only the hat matrix diagonal h_ii is computed, never the full n x n matrix.
+    Uses einsum to compute all features simultaneously instead of a Python loop.
 
     Parameters
     ----------
@@ -315,40 +317,33 @@ def _hc3_standard_errors(W, residuals, WtW_inv, H_diag):
     se : np.ndarray [n_features, p]
         HC3 standard errors for each coefficient of each feature.
     """
-    n, p = W.shape
-    n_features = residuals.shape[1]
-
     # HC3 adjustment factor: 1 / (1 - h_ii)
     # H_diag is pre-clipped to [0, 1-1e-10] by caller, so no inf here
     adjustment = 1.0 / (1 - H_diag)
 
-    se = np.empty((n_features, p))
-    for g in range(n_features):
-        # Adjusted residuals: e_i / (1 - h_ii)
-        e_adj = residuals[:, g] * adjustment
-        # Meat of the sandwich: W' diag(e_adj^2) W
-        We = W * (e_adj ** 2)[:, np.newaxis]
-        meat = W.T @ We
-        # Full sandwich: (W'W)^{-1} meat (W'W)^{-1}
-        sandwich = WtW_inv @ meat @ WtW_inv
-        se[g] = np.sqrt(np.maximum(np.diag(sandwich), 0))
+    # Adjusted residuals squared: [n, n_features]
+    e_adj_sq = (residuals * adjustment[:, np.newaxis]) ** 2
+
+    # Meat of sandwich for all features at once:
+    # meat[g, a, b] = sum_i e_adj_sq[i, g] * W[i, a] * W[i, b]
+    meat_all = np.einsum('ig,ia,ib->gab', e_adj_sq, W, W)  # [n_features, p, p]
+
+    # Sandwich: (W'W)^{-1} @ meat @ (W'W)^{-1}
+    sandwich_all = np.einsum('ab,gbc,cd->gad', WtW_inv, meat_all, WtW_inv)
+
+    # SE = sqrt(diag(sandwich))
+    se = np.sqrt(np.maximum(np.diagonal(sandwich_all, axis1=1, axis2=2), 0))
 
     return se
 
 
 def _hc3_covariance(W, residuals, WtW_inv, H_diag):
-    """Full HC3 sandwich covariance per feature.
+    """Full HC3 sandwich covariance per feature (vectorized).
 
     Returns list of [p, p] matrices, one per feature.
     """
-    n, p = W.shape
-    n_features = residuals.shape[1]
     adjustment = 1.0 / (1 - H_diag)
-    cov_list = []
-    for g in range(n_features):
-        e_adj = residuals[:, g] * adjustment
-        We = W * (e_adj ** 2)[:, np.newaxis]
-        meat = W.T @ We
-        sandwich = WtW_inv @ meat @ WtW_inv
-        cov_list.append(sandwich)
-    return cov_list
+    e_adj_sq = (residuals * adjustment[:, np.newaxis]) ** 2
+    meat_all = np.einsum('ig,ia,ib->gab', e_adj_sq, W, W)
+    sandwich_all = np.einsum('ab,gbc,cd->gad', WtW_inv, meat_all, WtW_inv)
+    return [sandwich_all[g] for g in range(sandwich_all.shape[0])]

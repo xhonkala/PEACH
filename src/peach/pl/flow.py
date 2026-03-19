@@ -1,5 +1,6 @@
 """Flow matching visualization."""
 
+import logging
 from itertools import combinations
 
 import numpy as np
@@ -7,6 +8,8 @@ import plotly.graph_objects as go
 from anndata import AnnData
 
 from peach._core.utils.feature_utils import resolve_regression_result
+
+logger = logging.getLogger(__name__)
 
 from ._style import (
     CATEGORICAL_PALETTE,
@@ -582,10 +585,8 @@ def flow_topo_landscape(
         features = [names[i] for i in top_idx]
 
     n_feat = len(features)
-    print(
-        f"Computing flow topology for {n_feat} features "
-        f"across {n_timepoints} timepoints..."
-    )
+    logger.info("Computing flow topology for %d features across %d timepoints",
+                n_feat, n_timepoints)
 
     # ------------------------------------------------------------------
     # 3. Resolve feature indices and expression source
@@ -825,7 +826,7 @@ def flow_topo_landscape(
                             zorder=3,
                         )
 
-        print(f"  Feature {fi + 1}/{n_feat}: {feat_name}")
+        logger.info("  Feature %d/%d: %s", fi + 1, n_feat, feat_name)
 
     # ------------------------------------------------------------------
     # 7. Labels and legend

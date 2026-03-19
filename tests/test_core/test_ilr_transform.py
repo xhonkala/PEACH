@@ -101,3 +101,11 @@ class TestILRTransform:
         assert ilr_coords.shape == (1, 3)
         W_back = inverse_ilr(ilr_coords)
         np.testing.assert_array_almost_equal(W, W_back, decimal=4)
+
+    def test_inverse_ilr_extreme_coordinates(self):
+        """Extreme ILR coordinates should produce valid simplex weights, not inf/nan."""
+        from peach._core.utils.ilr_transform import inverse_ilr
+        extreme = np.array([[100.0, -100.0], [-50.0, 200.0]])
+        result = inverse_ilr(extreme)
+        assert np.all(np.isfinite(result)), f"inverse_ilr produced non-finite values: {result}"
+        np.testing.assert_allclose(result.sum(axis=1), 1.0, atol=1e-10)

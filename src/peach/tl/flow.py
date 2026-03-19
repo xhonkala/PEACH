@@ -1,10 +1,14 @@
 """Flow matching public API: within-model, between-model, gene alignment, Jacobian."""
 
+import logging
+
 import numpy as np
 from anndata import AnnData
 
 from peach._core.utils.feature_utils import store_result
 from peach._core.utils.flow_matching import FlowModel, compute_mmd
+
+logger = logging.getLogger(__name__)
 
 
 def flow_within(
@@ -91,11 +95,12 @@ def flow_within(
 
     # Train flow model
     import torch
-    torch.manual_seed(random_state)
     model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr,
-                      solver_method=solver_method, device=device)
+                      solver_method=solver_method, device=device,
+                      random_state=random_state)
     losses = model.train(source_train, target_pca, n_epochs=n_epochs,
-                         batch_size=batch_size, use_ot=use_ot)
+                         batch_size=batch_size, use_ot=use_ot,
+                         random_state=random_state)
 
     # Transport full source (not just training subset)
     transported = model.transport(source_pca, n_steps=n_steps)
@@ -228,7 +233,7 @@ def flow_gene_alignment(
     adata: AnnData,
     flow_result: dict,
     *,
-    t: float = 0.5,
+    t: float | None = None,
     n_top: int = 50,
     pca_loadings_key: str | None = None,
     n_permutations: int = 0,
@@ -241,8 +246,12 @@ def flow_gene_alignment(
     ----------
     adata : AnnData
     flow_result : FlowWithinResult
-    t : float
-        Time point to evaluate velocity.
+    t : float or None
+        Time point to evaluate velocity. When ``t`` is not None and
+        ``flow_result`` contains a trained model (``return_model=True``
+        in ``flow_within``), the instantaneous velocity at time ``t``
+        is used. When ``t`` is None (default), full-trajectory
+        displacement is used (original behavior).
     n_top : int
         Top aligned/opposed genes to report.
     pca_loadings_key : str or None
@@ -261,9 +270,25 @@ def flow_gene_alignment(
     loadings = adata.varm[pca_loadings_key]  # [n_genes, n_PCs]
     gene_names = list(adata.var_names)
 
-    # Use the transported - source difference as mean velocity
+    # Compute velocity vector(s)
     source_pca = adata.obsm[flow_result["pca_key"]][flow_result["source_mask"]]
-    mean_velocity = (flow_result["transported"] - source_pca).mean(axis=0)  # [dim]
+    model = flow_result.get("model")
+
+    if t is not None and model is not None:
+        # Instantaneous velocity at time t via the trained model
+        mean_velocity = model.velocity_at(source_pca, t).mean(axis=0)
+        velocity_mode = "instantaneous"
+    else:
+        if t is not None and model is None:
+            import warnings
+            warnings.warn(
+                f"t={t} specified but flow_result has no model (call flow_within "
+                f"with return_model=True). Falling back to full-trajectory displacement.",
+                UserWarning,
+            )
+        # Full trajectory displacement (original behavior)
+        mean_velocity = (flow_result["transported"] - source_pca).mean(axis=0)
+        velocity_mode = "displacement"
 
     # Trim loadings to match PCA dims
     n_pcs = len(mean_velocity)
@@ -283,10 +308,14 @@ def flow_gene_alignment(
         "top_aligned": top_aligned,
         "top_opposed": top_opposed,
         "t": t,
+        "velocity_mode": velocity_mode,
     }
 
     if per_cell:
-        velocity_per_cell = flow_result["transported"] - source_pca  # [n_source, n_pcs]
+        if t is not None and model is not None:
+            velocity_per_cell = model.velocity_at(source_pca, t)
+        else:
+            velocity_per_cell = flow_result["transported"] - source_pca
         vel_norm = velocity_per_cell / (
             np.linalg.norm(velocity_per_cell, axis=1, keepdims=True) + 1e-10
         )
@@ -336,7 +365,10 @@ def flow_jacobian(
     adata : AnnData
     flow_result : FlowWithinResult
     flow_model : FlowModel
-        The trained FlowModel (not stored in adata).
+        The trained FlowModel. **Must** be the same model that produced
+        ``flow_result`` -- passing a mismatched model will produce silently
+        wrong results. Use ``flow_within(..., return_model=True)`` and
+        access via ``flow_result['model']``.
     t : float
     evaluation_points : np.ndarray or None
         Default: source cell positions.
@@ -370,11 +402,15 @@ def flow_jacobian(
         loadings = adata.varm[pca_loadings_key]
         n_pcs = mean_jac.shape[0]
         loadings_trimmed = loadings[:, :n_pcs]
+        # Normalize each gene's loading to unit norm for scale-invariant expansion
+        loading_norms = np.linalg.norm(loadings_trimmed, axis=1, keepdims=True)
+        loading_norms = np.maximum(loading_norms, 1e-10)
+        loadings_normalized = loadings_trimmed / loading_norms
         # For each gene, compute how its PCA direction is expanded/contracted
-        feature_expansion = np.array([
-            np.dot(loadings_trimmed[g], mean_jac @ loadings_trimmed[g])
-            for g in range(len(loadings_trimmed))
-        ])
+        # Vectorized: diag(L_norm @ J @ L_norm.T)
+        feature_expansion = np.einsum(
+            'gi,ij,gj->g', loadings_normalized, mean_jac, loadings_normalized
+        )
     else:
         feature_expansion = np.zeros(0)
 
@@ -392,11 +428,8 @@ def flow_jacobian(
 
 def flow_significance(
     adata: AnnData,
-    flow_result: dict | None = None,
+    flow_result: dict,
     *,
-    source: dict | None = None,
-    target: dict | None = None,
-    pca_key: str = "X_pca",
     n_permutations: int = 100,
     n_epochs_per_perm: int = 200,
     statistic: str = "mmd",
@@ -410,7 +443,21 @@ def flow_significance(
 ) -> dict:
     """Permutation test for flow significance.
 
-    Permutes condition labels, retrains flow per permutation.
+    Uses the original ``flow_result``'s MMD improvement as the observed
+    statistic, then retrains flows on permuted condition labels to build
+    a null distribution. This avoids retraining for the observed
+    statistic, which would produce a different (and inconsistent) MMD.
+
+    Parameters
+    ----------
+    adata : AnnData
+    flow_result : dict
+        Output of :func:`flow_within`. Must contain ``mmd_before`` and
+        ``mmd_after`` keys.
+    n_permutations : int
+        Number of label-permuted null models to train.
+    n_epochs_per_perm : int
+        Epochs per null model.
 
     Returns
     -------
@@ -418,25 +465,24 @@ def flow_significance(
     """
     import torch
 
-    if flow_result is not None:
-        source_mask = flow_result["source_mask"]
-        target_mask = flow_result["target_mask"]
-        pca_key = flow_result["pca_key"]
-    elif source is not None and target is not None:
-        source_mask = _build_mask(adata, source)
-        target_mask = _build_mask(adata, target)
-    else:
-        raise ValueError("Provide flow_result or source/target dicts.")
+    # Use the original flow result's MMD improvement (no retraining)
+    if "mmd_before" not in flow_result or "mmd_after" not in flow_result:
+        raise ValueError(
+            "flow_significance requires a flow_result dict with 'mmd_before' and "
+            "'mmd_after' keys (from flow_within). Pass the flow_result directly."
+        )
+    observed_improvement = flow_result["mmd_before"] - flow_result["mmd_after"]
+
+    source_mask = flow_result["source_mask"]
+    target_mask = flow_result["target_mask"]
+    pca_key = flow_result["pca_key"]
 
     pca = adata.obsm[pca_key]
     source_pca = pca[source_mask]
     target_pca = pca[target_mask]
     dim = source_pca.shape[1]
 
-    # Observed statistic
-    observed_mmd = compute_mmd(source_pca, target_pca)
-
-    # Null distribution
+    # Null distribution: permute labels, retrain, measure improvement
     rng = np.random.default_rng(random_state)
     combined = np.vstack([source_pca, target_pca])
     n_source = len(source_pca)
@@ -449,22 +495,14 @@ def flow_significance(
         perm_target = combined[perm[n_source:]]
 
         # Train short flow
-        torch.manual_seed(random_state + i)
         perm_model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr,
-                               solver_method=solver_method, device=device)
+                               solver_method=solver_method, device=device,
+                               random_state=random_state + i)
         perm_model.train(perm_source, perm_target, n_epochs=n_epochs_per_perm, batch_size=batch_size)
         perm_transported = perm_model.transport(perm_source, n_steps=n_steps)
 
         mmd_improvement = compute_mmd(perm_source, perm_target) - compute_mmd(perm_transported, perm_target)
         null_stats.append(mmd_improvement)
-
-    # Observed improvement
-    torch.manual_seed(random_state)
-    obs_model = FlowModel(dim, hidden_dims=hidden_dims, lr=lr,
-                          solver_method=solver_method, device=device)
-    obs_model.train(source_pca, target_pca, n_epochs=n_epochs_per_perm, batch_size=batch_size)
-    obs_transported = obs_model.transport(source_pca, n_steps=n_steps)
-    observed_improvement = observed_mmd - compute_mmd(obs_transported, target_pca)
 
     null_stats = np.array(null_stats)
     p_value = (np.sum(null_stats >= observed_improvement) + 1) / (n_permutations + 1)
@@ -498,7 +536,10 @@ def flow_bifurcation(
     flow_result : dict
         Output of :func:`flow_within`.
     flow_model : FlowModel
-        Trained flow model with ``.jacobian()`` and ``.transport()`` methods.
+        The trained FlowModel. **Must** be the same model that produced
+        ``flow_result`` -- passing a mismatched model will produce silently
+        wrong results. Use ``flow_within(..., return_model=True)`` and
+        access via ``flow_result['model']``.
     n_timepoints : int
         Number of timepoints to evaluate along the trajectory.
     evaluation_points : np.ndarray or None
@@ -547,25 +588,21 @@ def flow_bifurcation(
         # Compute Jacobian at these positions and this time
         jac = flow_model.jacobian(positions, float(t_val))  # [n_cells, dim, dim]
 
-        # Divergence = trace(J) per cell
-        for ci in range(n_cells):
-            divergence[ti, ci] = np.trace(jac[ci])
+        # Vectorized trace (no Python loop)
+        divergence[ti] = np.trace(jac, axis1=1, axis2=2)
 
-            # Eigenvalues
-            eigvals = np.linalg.eigvals(jac[ci])
-            eigenvalue_real[ti, ci] = eigvals.real
-            eigenvalue_imag[ti, ci] = eigvals.imag
+        # Vectorized eigenvalues (numpy batches over first dimension)
+        eigvals = np.linalg.eigvals(jac)  # [n_cells, dim]
+        eigenvalue_real[ti] = eigvals.real
+        eigenvalue_imag[ti] = eigvals.imag
 
     # Bifurcation score: max |divergence| along trajectory per cell
     bifurcation_score = np.max(np.abs(divergence), axis=0)  # [n_cells]
 
-    # Saddle points: timepoints with mixed-sign eigenvalue real parts
-    n_saddle_points = np.zeros(n_cells, dtype=int)
-    for ci in range(n_cells):
-        for ti in range(n_timepoints):
-            real_parts = eigenvalue_real[ti, ci]
-            if np.any(real_parts > 0) and np.any(real_parts < 0):
-                n_saddle_points[ci] += 1
+    # Vectorized saddle point detection
+    has_positive = np.any(eigenvalue_real > 0, axis=2)  # [n_timepoints, n_cells]
+    has_negative = np.any(eigenvalue_real < 0, axis=2)
+    n_saddle_points = np.sum(has_positive & has_negative, axis=0).astype(int)  # [n_cells]
 
     return {
         "divergence": divergence,
@@ -638,7 +675,10 @@ def flow_feature_graph(
         Output of :func:`flow_within` (must include ``source_mask``,
         ``pca_key``).
     flow_model : FlowModel
-        Trained flow model with ``.jacobian(points, t)`` method.
+        The trained FlowModel. **Must** be the same model that produced
+        ``flow_result`` -- passing a mismatched model will produce silently
+        wrong results. Use ``flow_within(..., return_model=True)`` and
+        access via ``flow_result['model']``.
     n_top_genes : int
         Number of top genes (by alignment score magnitude) to retain.
     n_timepoints : int
@@ -698,8 +738,8 @@ def flow_feature_graph(
     per_tp_jacobians = np.zeros((n_timepoints, n_pcs, n_pcs))
     G_per_tp = np.zeros((n_timepoints, n_top, n_top))
 
-    print(f"Computing Jacobians at {n_timepoints} timepoints "
-          f"({n_eval} evaluation points, {n_top} genes)...")
+    logger.info("Computing Jacobians at %d timepoints (%d eval points, %d genes)",
+                n_timepoints, n_eval, n_top)
 
     for ti, t_val in enumerate(timepoints):
         # Evaluate Jacobian at transported positions for this timepoint
@@ -711,7 +751,7 @@ def flow_feature_graph(
         # Project to gene space: G(t) = L_sub @ J_mean @ L_sub.T
         G_per_tp[ti] = L_sub @ J_mean @ L_sub.T
 
-        print(f"  timepoint {ti + 1}/{n_timepoints} (t={t_val:.3f}) done")
+        logger.debug("  timepoint %d/%d (t=%.3f) done", ti + 1, n_timepoints, t_val)
 
     # --- Integrate over time ---
     G_total = G_per_tp.mean(axis=0)  # [n_top, n_top]
@@ -726,16 +766,17 @@ def flow_feature_graph(
 
     G_sparse = np.where(abs_G >= threshold, G_total, 0.0)
 
-    # --- Centrality measures ---
-    out_centrality = abs_G.sum(axis=1)      # row sum: gene i drives others
-    in_centrality = abs_G.sum(axis=0)       # col sum: gene j is driven
+    # --- Centrality measures (from sparsified graph) ---
+    abs_G_sparse = np.abs(G_sparse)
+    out_centrality = abs_G_sparse.sum(axis=1)      # row sum: gene i drives others
+    in_centrality = abs_G_sparse.sum(axis=0)       # col sum: gene j is driven
     flow_centrality = out_centrality * in_centrality
 
     # Top hub genes
     hub_idx = np.argsort(flow_centrality)[-20:][::-1]
     top_hub_genes = list(gene_names_sub[hub_idx])
 
-    print(f"Feature graph complete. Top 5 hub genes: {top_hub_genes[:5]}")
+    logger.info("Feature graph complete. Top 5 hub genes: %s", top_hub_genes[:5])
 
     result_dict = {
         "adjacency_matrix": G_sparse,
@@ -795,6 +836,7 @@ def flow_temporal_feature_graph(
     n_top_genes: int = 200,
     n_timepoints: int = 20,
     n_eval_points: int = 300,
+    archetype_pairs: list | None = None,
     random_state: int = 42,
 ) -> dict:
     """Temporal feature graph with spatiotemporal nodes.
@@ -812,13 +854,20 @@ def flow_temporal_feature_graph(
     flow_result : dict
         Output of :func:`flow_within`.
     flow_model : FlowModel
-        Trained flow model.
+        The trained FlowModel. **Must** be the same model that produced
+        ``flow_result`` -- passing a mismatched model will produce silently
+        wrong results. Use ``flow_within(..., return_model=True)`` and
+        access via ``flow_result['model']``.
     n_top_genes : int
         Number of top genes (by alignment score magnitude) to retain.
     n_timepoints : int
         Number of evenly spaced timepoints in [0, 1].
     n_eval_points : int
         Number of source cells to subsample for Jacobian computation.
+    archetype_pairs : list of tuple[int, int] or None
+        If provided, restrict evaluation to source cells whose two highest
+        archetype weights correspond to one of the given pairs.  Requires
+        ``adata.obsm['cell_archetype_weights']``.
     random_state : int
         Seed for reproducible subsampling.
 
@@ -851,8 +900,35 @@ def flow_temporal_feature_graph(
     n_pcs = adata.obsm[pca_key].shape[1]
     L_sub = loadings[top_idx, :n_pcs]  # [n_top, n_pcs]
 
-    # --- Subsample source cells ---
-    source_pca = adata.obsm[pca_key][flow_result["source_mask"]]
+    # --- Subsample source cells (optionally filtered by archetype pairs) ---
+    source_mask = flow_result["source_mask"]
+    source_pca = adata.obsm[pca_key][source_mask]
+
+    if archetype_pairs is not None:
+        if "cell_archetype_weights" not in adata.obsm:
+            raise ValueError(
+                "archetype_pairs requires adata.obsm['cell_archetype_weights']"
+            )
+        weights_source = np.asarray(
+            adata.obsm["cell_archetype_weights"][source_mask]
+        )
+        # For each cell, find its top-2 archetypes by weight
+        top2 = np.argsort(weights_source, axis=1)[:, -2:]  # [n_source, 2]
+        top2_sets = [frozenset(row) for row in top2]
+        pair_sets = [frozenset(p) for p in archetype_pairs]
+        keep = np.array([t2 in pair_sets for t2 in top2_sets])
+        if keep.sum() < 10:
+            import warnings
+            warnings.warn(
+                f"Only {keep.sum()} source cells match archetype_pairs "
+                f"{archetype_pairs}; using all source cells instead.",
+                UserWarning,
+            )
+        else:
+            source_pca = source_pca[keep]
+            logger.info("archetype_pairs filter: %d/%d source cells retained",
+                        keep.sum(), len(keep))
+
     n_source = len(source_pca)
     n_eval = min(n_eval_points, n_source)
     eval_idx = rng.choice(n_source, size=n_eval, replace=False)
@@ -870,8 +946,8 @@ def flow_temporal_feature_graph(
     cross_matrices = np.zeros((n_timepoints, n_top, n_top))
     self_expansion = np.zeros((n_timepoints, n_top))
 
-    print(f"Computing temporal feature graph at {n_timepoints} timepoints "
-          f"({n_eval} evaluation points, {n_top} genes)...")
+    logger.info("Computing temporal feature graph at %d timepoints (%d eval points, %d genes)",
+                n_timepoints, n_eval, n_top)
 
     for ti, t_val in enumerate(timepoints):
         # Evaluate Jacobian at transported positions for this timepoint
@@ -884,7 +960,7 @@ def flow_temporal_feature_graph(
         cross_matrices[ti] = G_t
         self_expansion[ti] = np.diag(G_t)
 
-        print(f"  timepoint {ti + 1}/{n_timepoints} (t={t_val:.3f}) done")
+        logger.debug("  timepoint %d/%d (t=%.3f) done", ti + 1, n_timepoints, t_val)
 
     # --- Temporal importance profile ---
     # Per-gene importance at each timepoint: |self-expansion| + mean |cross-terms|
@@ -919,11 +995,11 @@ def flow_temporal_feature_graph(
     top_mid_late = _top_genes_for_phase(mid_late_mask)
     top_late = _top_genes_for_phase(late_mask)
 
-    print(f"Temporal feature graph complete.")
-    print(f"  Top early genes     (t<0.25):       {top_early[:5]}")
-    print(f"  Top mid-early genes (0.25<=t<0.5):  {top_mid_early[:5]}")
-    print(f"  Top mid-late genes  (0.5<=t<0.75):  {top_mid_late[:5]}")
-    print(f"  Top late genes      (t>=0.75):       {top_late[:5]}")
+    logger.info("Temporal feature graph complete.")
+    logger.info("  Top early genes     (t<0.25):       %s", top_early[:5])
+    logger.info("  Top mid-early genes (0.25<=t<0.5):  %s", top_mid_early[:5])
+    logger.info("  Top mid-late genes  (0.5<=t<0.75):  %s", top_mid_late[:5])
+    logger.info("  Top late genes      (t>=0.75):       %s", top_late[:5])
 
     return {
         "cross_matrices": cross_matrices,

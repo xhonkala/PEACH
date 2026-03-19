@@ -172,10 +172,16 @@ class TestFlowSignificance:
         """Permutation test returns p_value and null distribution."""
         import peach as pc
 
-        result = pc.tl.flow_significance(
+        flow_result = pc.tl.flow_within(
             flow_adata,
             source={"treatment": "Base"},
             target={"treatment": "PD1"},
+            n_epochs=50,
+            hidden_dims=(16, 16),
+        )
+        result = pc.tl.flow_significance(
+            flow_adata,
+            flow_result,
             n_permutations=5,
             n_epochs_per_perm=20,
             hidden_dims=(16, 16),
@@ -191,10 +197,16 @@ class TestFlowSignificance:
         """Well-separated conditions should have small p-value (or at least observed > null mean)."""
         import peach as pc
 
-        result = pc.tl.flow_significance(
+        flow_result = pc.tl.flow_within(
             flow_adata,
             source={"treatment": "Base"},
             target={"treatment": "PD1"},
+            n_epochs=200,
+            hidden_dims=(32, 32),
+        )
+        result = pc.tl.flow_significance(
+            flow_adata,
+            flow_result,
             n_permutations=9,
             n_epochs_per_perm=50,
             hidden_dims=(32, 32),
@@ -202,3 +214,26 @@ class TestFlowSignificance:
         )
         # Observed MMD should be larger than typical null values
         assert result["observed_stat"] > np.mean(result["null_distribution"])
+
+    def test_flow_significance_uses_original_mmd(self, flow_adata):
+        """flow_significance should use the original flow_result's MMD,
+        not retrain a new model."""
+        import peach as pc
+
+        flow_result = pc.tl.flow_within(
+            flow_adata,
+            source={"treatment": "Base"},
+            target={"treatment": "PD1"},
+            n_epochs=50,
+            hidden_dims=(32, 32),
+        )
+        sig = pc.tl.flow_significance(
+            flow_adata, flow_result, n_permutations=5, n_epochs_per_perm=50
+        )
+
+        # The observed stat should match flow_result's actual improvement
+        expected_improvement = flow_result["mmd_before"] - flow_result["mmd_after"]
+        assert abs(sig["observed_stat"] - expected_improvement) < 1e-10, (
+            f"Expected observed_stat={expected_improvement}, got {sig['observed_stat']}. "
+            "flow_significance should use the original model's MMD, not retrain."
+        )
