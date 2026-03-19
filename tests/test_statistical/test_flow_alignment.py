@@ -349,3 +349,134 @@ class TestPCATruncationSensitivity:
         assert np.all(idx >= 0), "Negative gene index found"
         assert np.all(idx < 60), f"Gene index out of bounds: max={idx.max()}"
         assert len(idx) == 30
+
+
+@pytest.mark.slow
+class TestBiologicalValidationHSC:
+    """Validate alignment on real HSC CMP->Mono transition.
+
+    Requires hsc_10k.h5ad in ~/Desktop/peach/data/.
+    Run with: pytest -m slow
+    """
+
+    @pytest.fixture(scope="class")
+    def hsc_flow(self):
+        """Load HSC data, ensure PCA, train CMP->Mono flow."""
+        import os
+        import peach as pc
+
+        data_path = os.path.expanduser("~/Desktop/peach/data/hsc_10k.h5ad")
+        if not os.path.exists(data_path):
+            pytest.skip(f"HSC data not found at {data_path}")
+
+        adata = pc.pp.load_data(data_path)
+
+        # Ensure PCA exists
+        if "X_pca" not in adata.obsm:
+            import scanpy as sc
+            sc.pp.normalize_total(adata)
+            sc.pp.log1p(adata)
+            sc.pp.highly_variable_genes(adata, n_top_genes=2000)
+            sc.pp.pca(adata, n_comps=50)
+
+        # Find cell type column
+        celltype_col = None
+        for col in ["cell_type", "celltype", "CellType", "label"]:
+            if col in adata.obs.columns:
+                celltype_col = col
+                break
+        if celltype_col is None:
+            pytest.skip("No cell type column found in HSC data")
+
+        cell_types = adata.obs[celltype_col].unique()
+        cmp_type = next((ct for ct in cell_types if "CMP" in str(ct)), None)
+        mono_type = next((ct for ct in cell_types if "Mono" in str(ct)), None)
+        if cmp_type is None or mono_type is None:
+            pytest.skip(f"Need CMP and Mono cell types, found: {list(cell_types)}")
+
+        flow_result = pc.tl.flow_within(
+            adata,
+            source={celltype_col: cmp_type},
+            target={celltype_col: mono_type},
+            n_epochs=500,
+            hidden_dims=(128, 128, 128),
+            return_model=True,
+            random_state=42,
+        )
+
+        return adata, flow_result
+
+    def test_myeloid_tfs_top_aligned(self, hsc_flow):
+        """Canonical myeloid TFs should appear in top 100 aligned genes."""
+        from peach.tl.flow import flow_gene_alignment
+
+        adata, flow_result = hsc_flow
+        result = flow_gene_alignment(
+            adata, flow_result, normalize=True, per_cell=False, n_top=100
+        )
+
+        top_aligned = set(result["top_aligned"])
+        myeloid_tfs = {"SPI1", "CEBPA", "CEBPB", "CSF1R", "IRF8"}
+        present_myeloid = myeloid_tfs & set(adata.var_names)
+        found = present_myeloid & top_aligned
+
+        print(f"Myeloid TFs in dataset: {present_myeloid}")
+        print(f"Myeloid TFs in top 100 aligned: {found}")
+        print(f"Top 10 aligned: {result['top_aligned'][:10]}")
+
+        assert len(found) >= 2, (
+            f"Expected >= 2 myeloid TFs in top 100 aligned, found {len(found)}: {found}. "
+            f"Present in data: {present_myeloid}. Top 10: {result['top_aligned'][:10]}"
+        )
+
+    def test_erythroid_markers_top_opposed(self, hsc_flow):
+        """Erythroid markers should appear in top 100 opposed genes."""
+        from peach.tl.flow import flow_gene_alignment
+
+        adata, flow_result = hsc_flow
+        result = flow_gene_alignment(
+            adata, flow_result, normalize=True, per_cell=False, n_top=100
+        )
+
+        top_opposed = set(result["top_opposed"])
+        erythroid_markers = {"GATA1", "KLF1", "EPOR", "HBB", "HBA1"}
+        present_ery = erythroid_markers & set(adata.var_names)
+        found = present_ery & top_opposed
+
+        print(f"Erythroid markers in dataset: {present_ery}")
+        print(f"Erythroid markers in top 100 opposed: {found}")
+        print(f"Top 10 opposed: {result['top_opposed'][:10]}")
+
+        assert len(found) >= 1, (
+            f"Expected >= 1 erythroid marker in top 100 opposed, found {len(found)}: {found}. "
+            f"Present in data: {present_ery}. Top 10: {result['top_opposed'][:10]}"
+        )
+
+    def test_jacobian_expansion_concordance(self, hsc_flow):
+        """Jacobian expansion scores should positively correlate with alignment."""
+        from peach.tl.flow import flow_gene_alignment, flow_jacobian
+        from scipy.stats import spearmanr
+
+        adata, flow_result = hsc_flow
+        model = flow_result["model"]
+
+        align_result = flow_gene_alignment(
+            adata, flow_result, normalize=True, per_cell=False
+        )
+        jac_result = flow_jacobian(
+            adata, flow_result, model, per_cell_features=False
+        )
+
+        alignment = align_result["alignment_scores"]
+        expansion = jac_result["feature_expansion"]
+
+        if len(expansion) == 0:
+            pytest.skip("No feature expansion (PCA loadings missing)")
+
+        rho, pval = spearmanr(alignment, expansion)
+        print(f"Alignment vs expansion Spearman: rho={rho:.4f}, p={pval:.2e}")
+
+        assert rho > 0, (
+            f"Alignment and Jacobian expansion should be positively correlated: "
+            f"Spearman={rho:.4f}, p={pval:.2e}"
+        )
