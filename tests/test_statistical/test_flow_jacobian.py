@@ -402,3 +402,91 @@ def test_jacobian_det_nonzero_after_training():
     dets = np.linalg.det(jac)
     assert not np.allclose(dets, 0, atol=1e-6), f"Jacobian dets all ~0: {dets}"
     assert np.all(np.isfinite(dets))
+
+
+def test_per_cell_jacobian_expansion_shape():
+    """flow_jacobian with per_cell_features=True returns correct shape."""
+    import peach as pc
+
+    adata, flow_result = _make_flow_fixture(n_genes=50, return_model=True)
+    model = flow_result["model"]
+
+    result = pc.tl.flow_jacobian(adata, flow_result, model, per_cell_features=True)
+
+    assert "per_cell_expansion" in result
+    assert "per_cell_expansion_gene_names" in result
+    assert "per_cell_expansion_gene_indices" in result
+
+    n_source = flow_result["source_mask"].sum()
+    n_top_feat = min(2500, 50)  # 50 genes in fixture
+    assert result["per_cell_expansion"].shape == (n_source, n_top_feat)
+    assert len(result["per_cell_expansion_gene_names"]) == n_top_feat
+    assert np.all(np.isfinite(result["per_cell_expansion"]))
+
+
+def test_per_cell_expansion_mean_matches_aggregated():
+    """Mean of per-cell expansion should approximate aggregated feature_expansion."""
+    import peach as pc
+    from scipy.stats import spearmanr
+
+    adata, flow_result = _make_flow_fixture(n_genes=30, return_model=True)
+    model = flow_result["model"]
+
+    result = pc.tl.flow_jacobian(
+        adata, flow_result, model,
+        per_cell_features=True, n_top_features=30,  # all genes
+    )
+
+    agg = result["feature_expansion"]
+    pc_mean = result["per_cell_expansion"].mean(axis=0)
+    pc_idx = result["per_cell_expansion_gene_indices"]
+
+    # Not exact (mean of quadratic forms != quadratic form of mean),
+    # but should be correlated
+    rho, _ = spearmanr(agg[pc_idx], pc_mean)
+    assert rho > 0.8, (
+        f"Per-cell expansion mean should correlate with aggregated: Spearman={rho:.4f}"
+    )
+
+
+def test_per_cell_expansion_disabled():
+    """per_cell_features=False should not include per-cell keys."""
+    import peach as pc
+
+    adata, flow_result = _make_flow_fixture(return_model=True)
+    model = flow_result["model"]
+
+    result = pc.tl.flow_jacobian(
+        adata, flow_result, model, per_cell_features=False
+    )
+    assert "per_cell_expansion" not in result
+    assert "per_cell_expansion_gene_names" not in result
+    # Aggregated feature_expansion should still be present
+    assert "feature_expansion" in result
+
+
+def test_per_cell_expansion_invariant_to_loading_scale():
+    """Per-cell expansion should not change when loadings are scaled."""
+    import peach as pc
+
+    adata, flow_result = _make_flow_fixture(n_genes=30, return_model=True)
+    model = flow_result["model"]
+
+    result1 = pc.tl.flow_jacobian(
+        adata, flow_result, model,
+        per_cell_features=True, n_top_features=30,
+    )
+
+    adata2 = adata.copy()
+    adata2.varm["PCs"] = adata.varm["PCs"] * 10.0
+    result2 = pc.tl.flow_jacobian(
+        adata2, flow_result, model,
+        per_cell_features=True, n_top_features=30,
+    )
+
+    np.testing.assert_allclose(
+        result1["per_cell_expansion"],
+        result2["per_cell_expansion"],
+        atol=1e-5,
+        err_msg="Per-cell expansion should be invariant to loading scale",
+    )
