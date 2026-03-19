@@ -371,13 +371,14 @@ class TestBiologicalValidationHSC:
 
         adata = pc.pp.load_data(data_path)
 
-        # Ensure PCA exists
-        if "X_pca" not in adata.obsm:
+        # Ensure PCA with loadings exists (need varm['PCs'] for alignment)
+        if "PCs" not in adata.varm:
             import scanpy as sc
-            sc.pp.normalize_total(adata)
-            sc.pp.log1p(adata)
-            sc.pp.highly_variable_genes(adata, n_top_genes=2000)
-            sc.pp.pca(adata, n_comps=50)
+            if "log1p" not in adata.uns.get("log1p", {}):
+                sc.pp.normalize_total(adata)
+                sc.pp.log1p(adata)
+            sc.pp.highly_variable_genes(adata, n_top_genes=2000, subset=True)
+            sc.pp.pca(adata, n_comps=50)  # stores X_pca + PCs in varm
 
         # Find cell type column
         celltype_col = None
@@ -389,8 +390,19 @@ class TestBiologicalValidationHSC:
             pytest.skip("No cell type column found in HSC data")
 
         cell_types = adata.obs[celltype_col].unique()
-        cmp_type = next((ct for ct in cell_types if "CMP" in str(ct)), None)
-        mono_type = next((ct for ct in cell_types if "Mono" in str(ct)), None)
+        # Match CMP/Mono by abbreviation or full ontology name
+        cmp_patterns = ["CMP", "common myeloid progenitor"]
+        mono_patterns = ["Mono", "monocyte"]
+        cmp_type = next(
+            (ct for ct in cell_types
+             if any(p.lower() in str(ct).lower() for p in cmp_patterns)),
+            None,
+        )
+        mono_type = next(
+            (ct for ct in cell_types
+             if any(p.lower() in str(ct).lower() for p in mono_patterns)),
+            None,
+        )
         if cmp_type is None or mono_type is None:
             pytest.skip(f"Need CMP and Mono cell types, found: {list(cell_types)}")
 
@@ -406,6 +418,16 @@ class TestBiologicalValidationHSC:
 
         return adata, flow_result
 
+    @staticmethod
+    def _resolve_gene_names(adata, gene_ids):
+        """Map var_names (possibly Ensembl IDs) to gene symbols if available."""
+        # Try common gene symbol columns
+        for col in ["feature_name", "gene_symbols", "gene_name", "symbol"]:
+            if col in adata.var.columns:
+                id_to_sym = dict(zip(adata.var_names, adata.var[col]))
+                return [id_to_sym.get(g, g) for g in gene_ids]
+        return list(gene_ids)  # already symbols
+
     def test_myeloid_tfs_top_aligned(self, hsc_flow):
         """Canonical myeloid TFs should appear in top 100 aligned genes."""
         from peach.tl.flow import flow_gene_alignment
@@ -415,22 +437,36 @@ class TestBiologicalValidationHSC:
             adata, flow_result, normalize=True, per_cell=False, n_top=100
         )
 
-        top_aligned = set(result["top_aligned"])
-        myeloid_tfs = {"SPI1", "CEBPA", "CEBPB", "CSF1R", "IRF8"}
-        present_myeloid = myeloid_tfs & set(adata.var_names)
-        found = present_myeloid & top_aligned
+        top_aligned_symbols = set(self._resolve_gene_names(adata, result["top_aligned"]))
+        all_symbols = set(self._resolve_gene_names(adata, adata.var_names))
+        # Monocyte effector genes + TFs — TFs often filtered by HVG, so include
+        # effector markers that survive HVG filtering
+        monocyte_markers = {
+            # TFs (may be filtered by HVG)
+            "SPI1", "CEBPA", "CEBPB", "IRF8",
+            # Effector genes (survive HVG, canonical monocyte markers)
+            "FCN1", "CD14", "S100A8", "S100A9", "S100A12", "VCAN", "MNDA",
+            "CST3", "LYZ", "MS4A6A",
+        }
+        present = monocyte_markers & all_symbols
+        found = present & top_aligned_symbols
 
-        print(f"Myeloid TFs in dataset: {present_myeloid}")
-        print(f"Myeloid TFs in top 100 aligned: {found}")
-        print(f"Top 10 aligned: {result['top_aligned'][:10]}")
+        top10_symbols = self._resolve_gene_names(adata, result["top_aligned"][:10])
+        print(f"Monocyte markers in dataset: {present}")
+        print(f"Monocyte markers in top 100 aligned: {found}")
+        print(f"Top 10 aligned: {top10_symbols}")
 
-        assert len(found) >= 2, (
-            f"Expected >= 2 myeloid TFs in top 100 aligned, found {len(found)}: {found}. "
-            f"Present in data: {present_myeloid}. Top 10: {result['top_aligned'][:10]}"
+        assert len(found) >= 3, (
+            f"Expected >= 3 monocyte markers in top 100 aligned, found {len(found)}: {found}. "
+            f"Present in data: {present}. Top 10: {top10_symbols}"
         )
 
-    def test_erythroid_markers_top_opposed(self, hsc_flow):
-        """Erythroid markers should appear in top 100 opposed genes."""
+    def test_progenitor_markers_top_opposed(self, hsc_flow):
+        """HSC/progenitor markers should appear in top 100 opposed genes.
+
+        CMP→Mono flow: opposed direction = progenitor/stem state, NOT erythroid
+        (erythroid is a different lineage branch).
+        """
         from peach.tl.flow import flow_gene_alignment
 
         adata, flow_result = hsc_flow
@@ -438,18 +474,24 @@ class TestBiologicalValidationHSC:
             adata, flow_result, normalize=True, per_cell=False, n_top=100
         )
 
-        top_opposed = set(result["top_opposed"])
-        erythroid_markers = {"GATA1", "KLF1", "EPOR", "HBB", "HBA1"}
-        present_ery = erythroid_markers & set(adata.var_names)
-        found = present_ery & top_opposed
+        top_opposed_symbols = set(self._resolve_gene_names(adata, result["top_opposed"]))
+        all_symbols = set(self._resolve_gene_names(adata, adata.var_names))
+        # HSC/progenitor markers expected in the opposed (source) direction
+        progenitor_markers = {
+            "SPINK2", "HOPX", "ERG", "CDK6", "CRHBP", "AVP", "BEX1",
+            "PRSS57", "FSTL1", "MDK",
+        }
+        present = progenitor_markers & all_symbols
+        found = present & top_opposed_symbols
 
-        print(f"Erythroid markers in dataset: {present_ery}")
-        print(f"Erythroid markers in top 100 opposed: {found}")
-        print(f"Top 10 opposed: {result['top_opposed'][:10]}")
+        top10_symbols = self._resolve_gene_names(adata, result["top_opposed"][:10])
+        print(f"Progenitor markers in dataset: {present}")
+        print(f"Progenitor markers in top 100 opposed: {found}")
+        print(f"Top 10 opposed: {top10_symbols}")
 
-        assert len(found) >= 1, (
-            f"Expected >= 1 erythroid marker in top 100 opposed, found {len(found)}: {found}. "
-            f"Present in data: {present_ery}. Top 10: {result['top_opposed'][:10]}"
+        assert len(found) >= 2, (
+            f"Expected >= 2 progenitor markers in top 100 opposed, found {len(found)}: {found}. "
+            f"Present in data: {present}. Top 10: {top10_symbols}"
         )
 
     def test_jacobian_expansion_concordance(self, hsc_flow):
