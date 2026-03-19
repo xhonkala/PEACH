@@ -72,8 +72,9 @@ print(f"Mono: {{adata_mono.shape}}")""")
 md("""\
 ## 1. Flow Matching (CMP -> Mono)
 
-Conditional optimal transport with linear interpolation paths.
-Learns a velocity field v(x, t) mapping CMP distribution to Monocyte distribution.""")
+Conditional flow matching with optional Sinkhorn OT coupling (`use_ot=True`)
+and adaptive ODE integration (`dopri5` default). Learns a velocity field v(x, t)
+mapping the CMP distribution to the Monocyte distribution.""")
 
 # flow_within expects source=dict and target=dict that filter on obs columns.
 # After concat, cell_type distinguishes "common myeloid progenitor" vs
@@ -98,6 +99,7 @@ flow_result = pc.tl.flow_within(
     target={"cell_type": "CD14-positive monocyte"},
     pca_key="X_pca", n_epochs=FLOW_EPOCHS,
     return_model=True,
+    holdout_fraction=0.1,
 )
 elapsed = time.time() - t1
 
@@ -106,8 +108,10 @@ source_mask = flow_result["source_mask"]
 
 mmd_before = flow_result.get("mmd_before", "?")
 mmd_after = flow_result.get("mmd_after", "?")
+holdout_mmd = flow_result.get("holdout_mmd", "N/A")
 print(f"Done ({elapsed:.1f}s): MMD {mmd_before:.4f} -> {mmd_after:.4f} "
-      f"({100*(1-mmd_after/mmd_before):.1f}% reduction)")""")
+      f"({100*(1-mmd_after/mmd_before):.1f}% reduction)")
+print(f"Holdout MMD: {holdout_mmd}")""")
 
 # ===========================================================================
 # 2. FLOW VISUALIZATIONS
@@ -438,6 +442,65 @@ if cellrank is not None:
     except Exception as e:
         print(f"CellRank failed: {e}")""")
 
+
+# ===========================================================================
+# 9. PER-CELL GENE ALIGNMENT
+# ===========================================================================
+md("""\
+## 9. Per-Cell Gene Alignment
+
+Instead of a single global alignment score per gene, compute per-cell alignment
+by correlating each cell's velocity direction with PCA loadings. Reveals spatial
+heterogeneity in gene-level flow contributions.""")
+
+code("""\
+t1 = time.time()
+percell_align = pc.tl.flow_gene_alignment(
+    adata_combined, flow_result,
+    per_cell=True, random_state=42,
+)
+elapsed = time.time() - t1
+
+pc_scores = percell_align["per_cell_alignment"]
+print(f"Per-cell alignment: {pc_scores.shape} ({elapsed:.1f}s)")
+print(f"  (n_source_cells x n_top_features)")
+
+# Top genes by variance across cells (heterogeneous alignment)
+var_scores = np.var(pc_scores, axis=0)
+gene_names_pc = percell_align["per_cell_gene_names"]
+top_var = np.argsort(var_scores)[-10:][::-1]
+print(f"\\nTop 10 genes by alignment variance (spatially heterogeneous):")
+for i in top_var:
+    print(f"  {gene_names_pc[i]:20s} var={var_scores[i]:.4f} "
+          f"mean={pc_scores[:, i].mean():.4f}")""")
+
+# ===========================================================================
+# 10. BIFURCATION SCORING
+# ===========================================================================
+md("""\
+## 10. Bifurcation Scoring
+
+Eigenvalue decomposition of the Jacobian at multiple timepoints identifies
+where the flow field transitions from convergent to divergent — potential
+bifurcation points where cell fate decisions occur.""")
+
+code("""\
+t1 = time.time()
+bif = pc.tl.flow_bifurcation(
+    adata_combined, flow_result, model,
+    n_timepoints=10,
+)
+elapsed = time.time() - t1
+
+print(f"Bifurcation analysis ({elapsed:.1f}s):")
+print(f"  Timepoints: {len(bif['timepoints'])}")
+print(f"  Per-cell scores: {bif['bifurcation_score'].shape}")
+print(f"  Saddle points detected: {bif['n_saddle_points']}")
+
+# Divergence profile over time
+div_mean = bif["divergence"].mean(axis=1)
+for i, t_val in enumerate(bif["timepoints"]):
+    print(f"  t={t_val:.2f}: mean_divergence={div_mean[i]:.4f}")""")
 
 # ===========================================================================
 # WRITE

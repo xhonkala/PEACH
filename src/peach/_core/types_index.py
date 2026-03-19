@@ -422,7 +422,9 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "velocity_mode ('displacement' or 'instantaneous')",
             "alignment_pvalues [n_genes] (if n_permutations > 0)",
             "alignment_pvalues_fdr [n_genes] (if n_permutations > 0)",
-            "per_cell_alignment [n_cells, n_genes] (if per_cell=True)",
+            "per_cell_alignment [n_source, n_top_feat] (if per_cell=True, default)",
+            "per_cell_gene_names [n_top_feat] (if per_cell=True)",
+            "per_cell_gene_indices [n_top_feat] (if per_cell=True)",
         ],
     ),
     "tl.flow_jacobian": (
@@ -434,6 +436,9 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "feature_expansion [n_genes]",
             "mean_jacobian [dim, dim]",
             "t (evaluation time)",
+            "per_cell_expansion [n_points, n_top_feat] (if per_cell_features=True, default)",
+            "per_cell_expansion_gene_names [n_top_feat] (if per_cell_features=True)",
+            "per_cell_expansion_gene_indices [n_top_feat] (if per_cell_features=True)",
         ],
     ),
     "tl.flow_significance": ("dict", ["p_value", "observed_stat", "null_distribution"]),
@@ -990,7 +995,9 @@ FUNCTION_PARAMS = {
         "n_top": ("int", 50),
         "pca_loadings_key": ("str|None", None),
         "n_permutations": ("int", 0),
-        "per_cell": ("bool", False),  # per-cell per-gene alignment scores
+        "per_cell": ("bool", True),  # per-cell per-gene alignment scores (top n_top_features)
+        "n_top_features": ("int", 2500),  # max genes in per-cell matrix
+        "normalize": ("bool", True),  # normalize loadings to unit norm
         "random_state": ("int", 42),
     },
     "tl.flow_jacobian": {
@@ -1001,6 +1008,8 @@ FUNCTION_PARAMS = {
         "evaluation_points": ("ndarray|None", None),
         "pca_loadings_key": ("str|None", None),
         "aggregate": ("str", "mean"),
+        "per_cell_features": ("bool", True),  # per-cell feature expansion
+        "n_top_features": ("int", 2500),  # max genes in per-cell expansion
     },
     "tl.flow_significance": {
         "adata": ("AnnData", REQUIRED),

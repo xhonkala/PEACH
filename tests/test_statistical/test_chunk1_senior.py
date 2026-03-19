@@ -328,7 +328,8 @@ class TestPerCellWithT:
         result = pc.tl.flow_gene_alignment(adata, fr, t=0.5, per_cell=True)
         n_source = fr["source_mask"].sum()
         n_genes = adata.n_vars
-        assert result["per_cell_alignment"].shape == (n_source, n_genes)
+        n_top_feat = min(2500, n_genes)
+        assert result["per_cell_alignment"].shape == (n_source, n_top_feat)
         assert result["velocity_mode"] == "instantaneous"
 
     def test_per_cell_displacement_shape(self):
@@ -339,7 +340,8 @@ class TestPerCellWithT:
         result = pc.tl.flow_gene_alignment(adata, fr, t=None, per_cell=True)
         n_source = fr["source_mask"].sum()
         n_genes = adata.n_vars
-        assert result["per_cell_alignment"].shape == (n_source, n_genes)
+        n_top_feat = min(2500, n_genes)
+        assert result["per_cell_alignment"].shape == (n_source, n_top_feat)
         assert result["velocity_mode"] == "displacement"
 
     def test_per_cell_values_in_minus1_plus1(self):

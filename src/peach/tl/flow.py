@@ -237,7 +237,9 @@ def flow_gene_alignment(
     n_top: int = 50,
     pca_loadings_key: str | None = None,
     n_permutations: int = 0,
-    per_cell: bool = False,
+    per_cell: bool = True,
+    n_top_features: int = 2500,
+    normalize: bool = True,
     random_state: int = 42,
 ) -> dict:
     """Compute gene alignment with flow velocity.
@@ -256,10 +258,23 @@ def flow_gene_alignment(
         Top aligned/opposed genes to report.
     pca_loadings_key : str or None
         Key in adata.varm for PCA loadings. Default: 'PCs'.
+    n_permutations : int
+        Number of permutations for null distribution. Default: 0 (disabled).
     per_cell : bool
-        If True, also compute per-cell per-gene alignment scores.
-        Returns an additional key ``'per_cell_alignment'`` with shape
-        ``[n_source, n_genes]``.
+        If True, also compute per-cell per-gene alignment scores for the top
+        ``n_top_features`` genes (by absolute aggregated score). Returns
+        additional keys ``'per_cell_alignment'`` with shape
+        ``[n_source, n_top_features]``, ``'per_cell_gene_names'``, and
+        ``'per_cell_gene_indices'``. Default: True.
+    n_top_features : int
+        Maximum number of genes to include in the per-cell alignment matrix.
+        Genes are selected by absolute aggregated alignment score. Default: 2500.
+    normalize : bool
+        If True, use cosine similarity (normalize both loadings and velocity
+        to unit vectors) for alignment scores. If False, use raw dot products.
+        Default: True.
+    random_state : int
+        Random seed for permutation tests. Default: 42.
     """
     # Get PCA loadings
     if pca_loadings_key is None:
@@ -294,8 +309,15 @@ def flow_gene_alignment(
     n_pcs = len(mean_velocity)
     loadings_trimmed = loadings[:, :n_pcs]
 
-    # Alignment: dot product of each gene's loading with mean velocity
-    alignment_scores = loadings_trimmed @ mean_velocity  # [n_genes]
+    # Normalize loadings for direction-only alignment (cosine-like)
+    vel_norm_agg = None  # defined unconditionally for permutation null safety
+    if normalize:
+        loading_norms = np.linalg.norm(loadings_trimmed, axis=1, keepdims=True)
+        loadings_for_agg = loadings_trimmed / np.maximum(loading_norms, 1e-10)
+        vel_norm_agg = mean_velocity / (np.linalg.norm(mean_velocity) + 1e-10)
+        alignment_scores = loadings_for_agg @ vel_norm_agg  # [n_genes]
+    else:
+        alignment_scores = loadings_trimmed @ mean_velocity  # [n_genes] — raw dot product
 
     # Top aligned/opposed
     sorted_idx = np.argsort(alignment_scores)
@@ -312,25 +334,41 @@ def flow_gene_alignment(
     }
 
     if per_cell:
+        # Select top genes by aggregated alignment score
+        n_top_feat = min(n_top_features, len(gene_names))
+        top_feat_idx = np.argsort(np.abs(alignment_scores))[-n_top_feat:][::-1]
+        top_feat_idx = np.sort(top_feat_idx)  # restore original ordering
+        top_feat_names = [gene_names[i] for i in top_feat_idx]
+        loadings_top = loadings_trimmed[top_feat_idx]  # [n_top_feat, n_pcs]
+
         if t is not None and model is not None:
             velocity_per_cell = model.velocity_at(source_pca, t)
         else:
             velocity_per_cell = flow_result["transported"] - source_pca
-        vel_norm = velocity_per_cell / (
+
+        # Always normalize per-cell (cosine similarity)
+        vel_norm_pc = velocity_per_cell / (
             np.linalg.norm(velocity_per_cell, axis=1, keepdims=True) + 1e-10
         )
-        load_norm = loadings_trimmed / (
-            np.linalg.norm(loadings_trimmed, axis=1, keepdims=True) + 1e-10
+        load_norm_pc = loadings_top / (
+            np.linalg.norm(loadings_top, axis=1, keepdims=True) + 1e-10
         )
-        per_cell_alignment = vel_norm @ load_norm.T  # [n_source, n_genes]
+        per_cell_alignment = vel_norm_pc @ load_norm_pc.T  # [n_source, n_top_feat]
         result["per_cell_alignment"] = per_cell_alignment
+        result["per_cell_gene_names"] = top_feat_names
+        result["per_cell_gene_indices"] = top_feat_idx
 
     if n_permutations > 0:
         rng = np.random.default_rng(random_state)
         null_scores = np.zeros((n_permutations, len(alignment_scores)))
         for i in range(n_permutations):
             perm_loadings = loadings_trimmed[rng.permutation(len(loadings_trimmed))]
-            null_scores[i] = perm_loadings @ mean_velocity
+            if normalize:
+                perm_norms = np.linalg.norm(perm_loadings, axis=1, keepdims=True)
+                perm_loadings_norm = perm_loadings / np.maximum(perm_norms, 1e-10)
+                null_scores[i] = perm_loadings_norm @ vel_norm_agg
+            else:
+                null_scores[i] = perm_loadings @ mean_velocity
 
         pvalues = np.array([
             (np.sum(np.abs(null_scores[:, g]) >= np.abs(alignment_scores[g])) + 1)
@@ -357,6 +395,8 @@ def flow_jacobian(
     evaluation_points: np.ndarray | None = None,
     pca_loadings_key: str | None = None,
     aggregate: str = "mean",
+    per_cell_features: bool = True,
+    n_top_features: int = 2500,
 ) -> dict:
     """Compute Jacobian of the flow velocity field.
 
@@ -370,11 +410,23 @@ def flow_jacobian(
         wrong results. Use ``flow_within(..., return_model=True)`` and
         access via ``flow_result['model']``.
     t : float
+        Time point at which to evaluate the Jacobian. Default: 0.5.
     evaluation_points : np.ndarray or None
-        Default: source cell positions.
+        Points at which to evaluate the Jacobian. Default: source cell positions.
     pca_loadings_key : str or None
+        Key in adata.varm for PCA loadings. Default: 'PCs'.
     aggregate : str
-        'mean', 'median', or None (per-cell).
+        Aggregation method for mean Jacobian: 'mean', 'median', or None (per-cell).
+        Default: 'mean'.
+    per_cell_features : bool
+        If True and PCA loadings are available, compute per-cell per-gene expansion
+        for the top ``n_top_features`` genes. Returns additional keys
+        ``'per_cell_expansion'`` with shape ``[n_points, n_top_features]``,
+        ``'per_cell_expansion_gene_names'``, and
+        ``'per_cell_expansion_gene_indices'``. Default: True.
+    n_top_features : int
+        Maximum number of genes to include in the per-cell expansion matrix.
+        Genes are selected by absolute aggregated feature expansion. Default: 2500.
     """
     if evaluation_points is None:
         evaluation_points = adata.obsm[flow_result["pca_key"]][flow_result["source_mask"]]
@@ -411,6 +463,21 @@ def flow_jacobian(
         feature_expansion = np.einsum(
             'gi,ij,gj->g', loadings_normalized, mean_jac, loadings_normalized
         )
+
+        # Per-cell feature expansion for top genes
+        if per_cell_features:
+            n_top_feat = min(n_top_features, loadings.shape[0])
+            top_feat_idx = np.argsort(np.abs(feature_expansion))[-n_top_feat:][::-1]
+            top_feat_idx = np.sort(top_feat_idx)
+            L_top = loadings_normalized[top_feat_idx]  # [n_top_feat, n_pcs]
+
+            # Per-cell quadratic form: L_g^T J_c L_g for each cell c, gene g
+            per_cell_exp = np.einsum(
+                'gi,cij,gj->cg', L_top, jac, L_top
+            )  # [n_points, n_top_feat]
+
+            gene_names_all = list(adata.var_names) if hasattr(adata, 'var_names') else []
+            top_feat_names = [gene_names_all[i] for i in top_feat_idx] if gene_names_all else []
     else:
         feature_expansion = np.zeros(0)
 
@@ -422,6 +489,11 @@ def flow_jacobian(
         "mean_jacobian": mean_jac,
         "t": t,
     }
+
+    if pca_loadings_key in adata.varm and per_cell_features:
+        result["per_cell_expansion"] = per_cell_exp
+        result["per_cell_expansion_gene_names"] = top_feat_names
+        result["per_cell_expansion_gene_indices"] = top_feat_idx
 
     return result
 
@@ -708,7 +780,7 @@ def flow_feature_graph(
     gene_names = np.array(adata.var_names)
 
     # --- Pre-filter to top genes by alignment score ---
-    alignment = flow_gene_alignment(adata, flow_result)
+    alignment = flow_gene_alignment(adata, flow_result, per_cell=False)
     scores = np.abs(alignment["alignment_scores"])
     n_top = min(n_top_genes, len(scores))
     top_idx = np.argsort(scores)[-n_top:][::-1]  # descending by |score|
@@ -889,7 +961,7 @@ def flow_temporal_feature_graph(
     gene_names = np.array(adata.var_names)
 
     # --- Pre-filter to top genes by alignment score ---
-    alignment = flow_gene_alignment(adata, flow_result)
+    alignment = flow_gene_alignment(adata, flow_result, per_cell=False)
     scores = np.abs(alignment["alignment_scores"])
     n_top = min(n_top_genes, len(scores))
     top_idx = np.argsort(scores)[-n_top:][::-1]
