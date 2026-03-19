@@ -339,6 +339,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "permutation_pvalue, permutation_pvalue_fdr [n_features] (optional)",
             "vertex_ci_lower, vertex_ci_upper (optional)",
             "degree_comparison (optional, when comprehensive_degree=True)",
+            "feature_source (str|None, tracks the feature_matrix argument)",
         ],
     ),
     "tl.gene_simplex_regression": ("dict (serialized SimplexRegressionResult)", ["Convenience for adata.X"]),
@@ -392,6 +393,8 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
             "gmm_components (optional)",
         ],
     ),
+    # NOTE: FlowWithinResult / FlowBetweenResult are schema labels, not Pydantic
+    # classes. These functions return plain dicts following the documented schema.
     "tl.flow_within": (
         "FlowWithinResult",
         [
@@ -416,6 +419,7 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         [
             "alignment_scores [n_genes]",
             "top_aligned, top_opposed [n_top]",
+            "velocity_mode ('displacement' or 'instantaneous')",
             "alignment_pvalues [n_genes] (if n_permutations > 0)",
             "alignment_pvalues_fdr [n_genes] (if n_permutations > 0)",
             "per_cell_alignment [n_cells, n_genes] (if per_cell=True)",
@@ -425,11 +429,14 @@ FUNCTION_RETURNS: dict[str, tuple[str, list[str]]] = {
         "FlowJacobianResult",
         [
             "jacobian_det [n_points]",
+            "jac_logdet [n_points] (log of absolute determinant)",
+            "jac_det_sign [n_points] (sign of determinant)",
             "feature_expansion [n_genes]",
             "mean_jacobian [dim, dim]",
+            "t (evaluation time)",
         ],
     ),
-    "tl.flow_significance": ("dict", ["p_value, observed_stat, null_distribution"]),
+    "tl.flow_significance": ("dict", ["p_value", "observed_stat", "null_distribution"]),
     "tl.flow_bifurcation": (
         "dict",
         [
@@ -890,6 +897,8 @@ FUNCTION_PARAMS = {
         "n_bootstrap": ("int", 1000),
         "robust_se": ("bool", True),
         "store_residuals": ("bool", True),
+        "comprehensive_degree": ("bool", False),
+        "store_to_adata": ("bool", True),
         "copy": ("bool", False),
     },
     "tl.gene_simplex_regression": {
@@ -977,7 +986,7 @@ FUNCTION_PARAMS = {
     "tl.flow_gene_alignment": {
         "adata": ("AnnData", REQUIRED),
         "flow_result": ("FlowWithinResult", REQUIRED),
-        "t": ("float", 0.5),
+        "t": ("float|None", None),
         "n_top": ("int", 50),
         "pca_loadings_key": ("str|None", None),
         "n_permutations": ("int", 0),
@@ -995,18 +1004,11 @@ FUNCTION_PARAMS = {
     },
     "tl.flow_significance": {
         "adata": ("AnnData", REQUIRED),
-        "flow_result": ("FlowWithinResult|None", None),
-        "source": ("dict|None", None),
-        "target": ("dict|None", None),
-        "pca_key": ("str", "X_pca"),
+        "flow_result": ("dict", REQUIRED),
         "n_permutations": ("int", 100),
         "n_epochs_per_perm": ("int", 200),
         "statistic": ("str", "mmd"),
-        "hidden_dims": ("tuple", (128, 128, 128)),
-        "lr": ("float", 1e-3),
-        "batch_size": ("int", 256),
-        "n_steps": ("int", 50),
-        "device": ("str", "cpu"),
+        "solver_method": ("str", "dopri5"),
         "random_state": ("int", 42),
     },
     "tl.flow_bifurcation": {
@@ -1033,6 +1035,7 @@ FUNCTION_PARAMS = {
         "n_top_genes": ("int", 200),
         "n_timepoints": ("int", 20),
         "n_eval_points": ("int", 300),
+        "archetype_pairs": ("list[tuple[int,int]]|None", None),
         "random_state": ("int", 42),
     },
     "tl.archetype_pair_enrichment": {

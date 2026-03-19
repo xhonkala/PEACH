@@ -19,6 +19,14 @@ Key Concepts:
     - Session state maintains loaded datasets in ADATA_REGISTRY
     - Results are stored back in the AnnData object (adata.obs, adata.obsm, adata.uns)
 
+NOTE ON adata_key vs adata
+--------------------------
+Schema entries use ``adata_key`` (ParamType.ADATA_REF) referencing AnnData objects
+by name in a PeachSession registry. The actual Python API functions accept ``adata``
+(an AnnData instance) directly. When using schemas programmatically via PeachSession,
+call ``session.get_adata(adata_key)`` to resolve the reference before passing to
+the function. When calling functions directly, ignore adata_key and pass adata.
+
 Version: 0.5.0
 """
 
@@ -1168,6 +1176,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 heteroscedasticity-consistent SEs", default=True),
             Parameter("store_residuals", ParamType.BOOLEAN, "Store residuals in adata.obsm", default=True),
             Parameter("comprehensive_degree", ParamType.BOOLEAN, "Run degree 2..K-1 fits with incremental F-tests", default=False),
+            Parameter("store_to_adata", ParamType.BOOLEAN, "Store results in adata.uns", default=True),
             Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
         ],
         returns="dict (serialized SimplexRegressionResult)",
@@ -1526,6 +1535,25 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         "temporal_centrality [n_top], temporal_profile [n_top, 4], "
         "top_early_genes, top_mid_early_genes, top_mid_late_genes, top_late_genes",
         requires=["PCs in adata.varm", "FlowModel from flow_within(return_model=True)"],
+        modifies_adata=[],
+    ),
+    "tl.flow_significance": ToolSchema(
+        name="tl.flow_significance",
+        description="Permutation test for flow significance. Uses the original flow_result's "
+        "MMD improvement as the observed statistic, then retrains flows on permuted "
+        "condition labels to build a null distribution.",
+        parameters=[
+            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
+            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within(). Must contain mmd_before and mmd_after"),
+            Parameter("n_permutations", ParamType.INTEGER, "Number of label-permuted null models to train", default=100),
+            Parameter("n_epochs_per_perm", ParamType.INTEGER, "Epochs per null model", default=200),
+            Parameter("statistic", ParamType.STRING, "Test statistic to use", default="mmd"),
+            Parameter("solver_method", ParamType.STRING, "ODE solver: 'euler', 'midpoint', 'heun3', 'dopri5'", default="dopri5"),
+            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
+        ],
+        returns="dict",
+        returns_description="p_value, observed_stat, null_distribution",
+        requires=["FlowWithinResult from flow_within()"],
         modifies_adata=[],
     ),
     # =========================================================================
