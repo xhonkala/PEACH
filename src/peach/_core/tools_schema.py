@@ -1267,8 +1267,8 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
             Parameter(
                 "model_type",
                 ParamType.STRING,
-                "Mixture model type: 'gaussian' (GMM in ILR space) or 'dirichlet'",
-                default="gaussian",
+                "Mixture model type: 'dirichlet' (on simplex) or 'gaussian' (GMM in ILR space)",
+                default="dirichlet",
                 enum=["gaussian", "dirichlet"],
             ),
             Parameter(

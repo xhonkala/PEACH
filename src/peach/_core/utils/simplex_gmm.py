@@ -56,7 +56,7 @@ def fit_simplex_gmm(
     ilr_epsilon=1e-3,
     reassignment_confidence=0.0,
     model_selection="bic",
-    model_type="gaussian",
+    model_type="dirichlet",
 ):
     """Fit mixture model to archetype weights with model selection and stability analysis.
 
@@ -87,8 +87,8 @@ def fit_simplex_gmm(
         Criterion for selecting optimal n_components. 'bic' or 'icl'.
         ICL = BIC + 2*entropy(posterior), which penalizes overlapping clusters.
     model_type : str
-        'gaussian' (default): GMM in ILR-transformed space.
-        'dirichlet': Dirichlet mixture directly on the simplex.
+        'dirichlet' (default): Dirichlet mixture directly on the simplex.
+        'gaussian': GMM in ILR-transformed space.
 
     Returns
     -------

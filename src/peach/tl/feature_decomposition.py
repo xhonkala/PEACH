@@ -9,7 +9,7 @@ from peach._core.utils.feature_utils import (
     store_result,
 )
 from peach._core.utils.simplex_gmm import fit_simplex_gmm, characterize_components
-from peach._core.types import GMMResult
+from peach._core.types import MixtureResult
 
 
 def feature_simplex_decomposition(
@@ -19,7 +19,7 @@ def feature_simplex_decomposition(
     feature_names=None,
     n_components_range=None,
     model_selection: str = "bic",
-    model_type: str = "gaussian",
+    model_type: str = "dirichlet",
     covariance_type: str = "full",
     n_initializations: int = 20,
     stability_threshold: float = 0.7,
@@ -53,8 +53,8 @@ def feature_simplex_decomposition(
         'bic' or 'icl'. ICL = BIC + 2*entropy(posterior), which penalizes
         overlapping clusters more heavily.
     model_type : str
-        'gaussian' (default): GMM in ILR-transformed space.
-        'dirichlet': Dirichlet mixture directly on the simplex.
+        'dirichlet' (default): Dirichlet mixture directly on the simplex.
+        'gaussian': GMM in ILR-transformed space.
     covariance_type : str
         sklearn GMM covariance type. One of 'full', 'tied', 'diag', 'spherical'.
         Only used when model_type='gaussian'.
@@ -110,7 +110,7 @@ def feature_simplex_decomposition(
             gmm_result["n_components_stable"],
         )
 
-    result_obj = GMMResult(
+    result_obj = MixtureResult(
         n_components_optimal=gmm_result["n_components_optimal"],
         n_components_stable=gmm_result["n_components_stable"],
         component_assignments=gmm_result["component_assignments"],
@@ -127,7 +127,7 @@ def feature_simplex_decomposition(
     # Serialize to plain dict (PEACH convention: public API returns dicts)
     serialized = result_obj.to_serializable()
 
-    # Add fields not in GMMResult Pydantic model
+    # Add fields not in MixtureResult Pydantic model
     serialized["icl_values"] = gmm_result.get("icl_values")
     serialized["model_type"] = gmm_result.get("model_type")
 

@@ -1387,7 +1387,7 @@ USE_GET_FOR: set[str] = {
     "interaction_ci_lower",
     "interaction_ci_upper",
     "degree_comparison",
-    # v0.5.0: GMMResult optional fields
+    # v0.5.0: MixtureResult optional fields
     "component_feature_profiles",
     # v0.5.0: FlowWithinResult optional fields
     "holdout_mmd",
@@ -1398,7 +1398,7 @@ USE_GET_FOR: set[str] = {
     # v0.5.0: FlowFeatureGraphResult optional fields
     "igraph",
     "hub_genes_per_archetype",
-    # v0.5.0: GMMResult optional fields
+    # v0.5.0: MixtureResult optional fields
     "icl_values",
     "model_type",
 }

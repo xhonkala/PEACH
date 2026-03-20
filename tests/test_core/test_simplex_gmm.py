@@ -167,12 +167,23 @@ class TestFitSimplexGMM:
         from sklearn.mixture import GaussianMixture
 
         weights, K = two_cluster_weights
+        # Test Gaussian path explicitly
         result = fit_simplex_gmm(
             weights,
             n_components_range=(2, 4),
             n_initializations=3,
+            model_type="gaussian",
         )
         assert isinstance(result["gmm_model"], GaussianMixture)
+
+        # Default (dirichlet) should also return a model
+        from peach._core.utils.dirichlet_mixture import DirichletMixture
+        result_d = fit_simplex_gmm(
+            weights,
+            n_components_range=(2, 4),
+            n_initializations=3,
+        )
+        assert isinstance(result_d["gmm_model"], DirichletMixture)
 
     def test_three_cluster_recovery(self, three_cluster_weights):
         """3 planted clusters near 3 archetypes are recovered."""

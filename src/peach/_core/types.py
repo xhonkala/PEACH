@@ -3627,24 +3627,26 @@ class FlowJacobianResult(BaseModel):
     t: float
 
 
-class GMMResult(BaseModel):
-    """Result of GMM decomposition in ILR-transformed weight space.
+class MixtureResult(BaseModel):
+    """Result of mixture model decomposition in archetype weight space.
 
     Decomposes the cell population into sub-populations that occupy distinct
-    regions of the archetype weight simplex. Components are selected by BIC
-    and filtered by multi-initialization stability analysis.
+    regions of the archetype weight simplex. Supports both Gaussian mixture
+    (in ILR space) and Dirichlet mixture (directly on the simplex). Components
+    are selected by BIC/ICL and filtered by multi-initialization stability
+    analysis.
 
     Attributes
     ----------
     n_components_optimal : int
-        BIC-selected number of components.
+        BIC/ICL-selected number of components.
     n_components_stable : int
         Number of components after stability filtering.
     component_assignments : np.ndarray [n_cells]
         Cluster labels for stable components. Cells from unstable
         components are reassigned to the nearest stable component.
     component_simplex_means : np.ndarray [n_stable, K]
-        Centroids mapped back to the weight simplex (rows sum to 1).
+        Centroids on the weight simplex (rows sum to 1).
     component_archetype_map : np.ndarray [n_stable]
         Index of the nearest archetype for each component centroid.
     component_stability_scores : np.ndarray [n_stable]
@@ -3681,3 +3683,7 @@ class GMMResult(BaseModel):
             else:
                 d[field_name] = value
         return d
+
+
+# Backward compatibility alias
+GMMResult = MixtureResult
