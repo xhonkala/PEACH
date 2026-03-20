@@ -666,7 +666,7 @@ for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
 code("""\
 for name in ["CMP", "Mono"]:
     gmm = gmm_results[name]
-    print(f"\\n=== {name} GMMResult ===")
+    print(f"\\n=== {name} MixtureResult ===")
     print(f"  keys: {sorted(gmm.keys())}")
     for k, v in sorted(gmm.items()):
         if isinstance(v, np.ndarray):
