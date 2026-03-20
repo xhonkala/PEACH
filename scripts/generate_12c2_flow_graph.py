@@ -136,7 +136,27 @@ flow_c = graph_c["flow_centrality"]
 print("Top 20 hub genes (by flow centrality = out * in):")
 for g in graph_c["top_hub_genes"]:
     i = gene_names.index(g)
-    print(f"  {g:20s}  out={out_c[i]:.4f}  in={in_c[i]:.4f}  flow={flow_c[i]:.4f}")""")
+    print(f"  {g:20s}  out={out_c[i]:.4f}  in={in_c[i]:.4f}  flow={flow_c[i]:.4f}")
+
+# igraph graph object (if igraph is installed)
+ig_graph = graph_c.get("igraph")
+if ig_graph is not None:
+    print(f"\\nigraph graph: {ig_graph.vcount()} vertices, {ig_graph.ecount()} edges")
+    pr = ig_graph.pagerank()
+    btw = ig_graph.betweenness()
+    top_pr = sorted(range(len(pr)), key=lambda i: -pr[i])[:10]
+    print("Top 10 by PageRank:")
+    for i in top_pr:
+        print(f"  {ig_graph.vs[i]['name']:20s} PR={pr[i]:.4f} btw={btw[i]:.1f}")
+else:
+    print("\\nigraph not installed — skipping graph metrics")
+
+# Hub genes per archetype
+hub_per_arch = graph_c.get("hub_genes_per_archetype", {})
+if hub_per_arch:
+    print(f"\\nHub genes per archetype:")
+    for k, genes in sorted(hub_per_arch.items()):
+        print(f"  A{k}: {genes[:10]}")""")
 
 # ===========================================================================
 # 2b. STATIC GRAPH VISUALIZATION
@@ -190,8 +210,9 @@ fig.show()""")
 md("""\
 ## 3. Temporal Feature Graph (Approach A)
 
-Same Jacobian computation but retaining temporal structure. Identifies early
-mediators (t < 0.3), bridge genes (0.3-0.7), and late mediators (t > 0.7).""")
+Same Jacobian computation but retaining temporal structure. Uses 4 temporal
+bins (early t<0.25, mid-early, mid-late, late t≥0.75) to identify phase-specific
+mediators. Can be restricted to specific archetype pairs via `archetype_pairs`.""")
 
 code("""\
 t1 = time.time()
@@ -208,17 +229,42 @@ print(f"Temporal graph: {len(graph_a['gene_names'])} genes x "
 print(f"Cross matrices: {graph_a['cross_matrices'].shape}")
 print(f"Self expansion: {graph_a['self_expansion'].shape}")""")
 
+md("""\
+### Archetype-Pair Focused Temporal Graph
+
+Restrict temporal analysis to cells transitioning between specific archetype
+pairs. Here we focus on (A0, A1) — cells whose top two weight allocations are
+to archetypes 0 and 1.""")
+
 code("""\
-# Phase-specific genes
-print("\\nTop 10 EARLY genes (t < 0.3):")
+t1 = time.time()
+graph_a_pair = pc.tl.flow_temporal_feature_graph(
+    adata_combined, flow_result, model,
+    n_top_genes=200,
+    n_timepoints=20,
+    n_eval_points=300,
+    archetype_pairs=[(0, 1)],
+)
+elapsed = time.time() - t1
+print(f"Pair-focused graph ({elapsed:.1f}s): {len(graph_a_pair['gene_names'])} genes")
+print(f"  Top early (A0-A1): {graph_a_pair['top_early_genes'][:5]}")
+print(f"  Top late  (A0-A1): {graph_a_pair['top_late_genes'][:5]}")""")
+
+code("""\
+# Phase-specific genes (4 temporal bins)
+print("\\nTop 10 EARLY genes (t < 0.25):")
 for g in graph_a["top_early_genes"]:
     print(f"  {g}")
 
-print("\\nTop 10 BRIDGE genes (0.3 < t < 0.7):")
-for g in graph_a["top_bridge_genes"]:
+print("\\nTop 10 MID-EARLY genes (0.25 <= t < 0.5):")
+for g in graph_a["top_mid_early_genes"]:
     print(f"  {g}")
 
-print("\\nTop 10 LATE genes (t > 0.7):")
+print("\\nTop 10 MID-LATE genes (0.5 <= t < 0.75):")
+for g in graph_a["top_mid_late_genes"]:
+    print(f"  {g}")
+
+print("\\nTop 10 LATE genes (t >= 0.75):")
 for g in graph_a["top_late_genes"]:
     print(f"  {g}")""")
 
@@ -284,8 +330,8 @@ fig.show()""")
 
 code("""\
 # Compare early vs late: scatter plot
-early_mask = timepoints < 0.3
-late_mask = timepoints > 0.7
+early_mask = timepoints < 0.25
+late_mask = timepoints >= 0.75
 
 early_importance = profile[early_mask].mean(axis=0) if early_mask.any() else np.zeros(len(t_gene_names))
 late_importance = profile[late_mask].mean(axis=0) if late_mask.any() else np.zeros(len(t_gene_names))
@@ -305,8 +351,8 @@ fig.add_shape(type="line", x0=0, x1=max(early_importance.max(), late_importance.
               line=dict(dash="dash", color="gray"))
 fig.update_layout(
     title="Early vs Late Gene Importance",
-    xaxis_title="Early importance (t < 0.3)",
-    yaxis_title="Late importance (t > 0.7)",
+    xaxis_title="Early importance (t < 0.25)",
+    yaxis_title="Late importance (t ≥ 0.75)",
     width=700, height=600,
 )
 fig.show()""")
@@ -324,7 +370,7 @@ for key transition regulators.""")
 code("""\
 from peach._core.utils.feature_utils import resolve_regression_result
 
-reg = resolve_regression_result(adata_cmp, prefer="genes")
+reg = resolve_regression_result(adata_cmp, feature_type="genes")
 reg_r2 = np.asarray(reg["r_squared_degree1"])
 reg_names = list(reg["feature_names"])
 
@@ -342,18 +388,18 @@ for g in graph_c["top_hub_genes"][:20]:
     print(f"{g:20s} {flow_c[fc_idx]:16.4f} {r2:14.4f}")""")
 
 # ===========================================================================
-# 5. NEW VISUALIZATIONS
+# 5. ADDITIONAL VISUALIZATIONS
 # ===========================================================================
 md("""\
-## 5. New Visualizations
+## 5. Additional Visualizations
 
-Testing the three new viz functions: radar-ridgeplot, GMM neighborhood graph,
-and soft assignment flow.""")
+Archetype radar, GMM neighborhood graph, soft assignment flow, and
+soft assignment heatmap.""")
 
 code("""\
-# Radar-ridgeplot for CMP archetypes
-print("--- CMP Radar-Ridgeplot ---")
-_ = pc.pl.archetype_radar_ridgeplot(adata_cmp, top_n=8, show=True)""")
+# Archetype radar for CMP archetypes
+print("--- CMP Archetype Radar ---")
+_ = pc.pl.archetype_radar(adata_cmp, top_n=8, show=True)""")
 
 code("""\
 # GMM component neighborhood graph
@@ -364,6 +410,11 @@ code("""\
 # Soft assignment feature flow
 print("--- CMP Soft Assignment Flow ---")
 _ = pc.pl.soft_assignment_flow(adata_cmp, top_n=10, show=True)""")
+
+code("""\
+# Soft assignment heatmap (between-fit correspondence)
+print("--- Soft Assignment Heatmap (CMP -> Mono) ---")
+_ = pc.pl.soft_assignment_heatmap(adata_cmp, flow_result, adata_b=adata_mono, show=True)""")
 
 # ===========================================================================
 # 6. FLOW TOPO LANDSCAPE

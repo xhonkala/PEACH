@@ -63,8 +63,9 @@ print(f"Mono: {{adata_mono.shape}}")""")
 md("""\
 ## 1. GMM Decomposition Overview
 
-Fit in ILR-transformed weight space (K-1 dimensions). BIC selects optimal number
-of components; stability filtering removes unreliable components.""")
+Fit in ILR-transformed weight space (K-1 dimensions). Model selection via BIC
+(default) or ICL (penalizes overlap). Pairwise NMI stability filtering removes
+unreliable components. Optional Dirichlet mixture model via `model_type="dirichlet"`.""")
 
 code("""\
 for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
@@ -233,7 +234,7 @@ code("""\
 from peach._core.utils.feature_utils import resolve_regression_result
 
 for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
-    global_reg = resolve_regression_result(ad_obj, prefer="genes")
+    global_reg = resolve_regression_result(ad_obj, feature_type="genes")
     global_r2 = np.asarray(global_reg["r_squared_degree1"])
     global_names = global_reg["feature_names"]
 
