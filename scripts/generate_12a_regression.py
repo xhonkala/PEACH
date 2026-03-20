@@ -73,7 +73,7 @@ code("""\
 from peach._core.utils.feature_utils import resolve_regression_result
 
 for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
-    reg = resolve_regression_result(ad_obj, prefer="genes")
+    reg = resolve_regression_result(ad_obj, feature_type="genes")
     coefs = np.asarray(reg["vertex_coefficients"])
     vertex_pvals_fdr = np.asarray(reg["vertex_pvalues_fdr"])
     r2_d1 = np.asarray(reg["r_squared_degree1"])
@@ -110,7 +110,7 @@ and cubic (degree 3) terms.""")
 
 code("""\
 for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
-    reg = resolve_regression_result(ad_obj, prefer="genes")
+    reg = resolve_regression_result(ad_obj, feature_type="genes")
     deg_comp = reg.get("degree_comparison")
     if deg_comp is None:
         print(f"{name}: no degree comparison available")
@@ -139,7 +139,7 @@ Same Scheffe regression on pathway activity scores instead of raw gene expressio
 
 code("""\
 for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
-    pw_reg = resolve_regression_result(ad_obj, prefer="pathways")
+    pw_reg = resolve_regression_result(ad_obj, feature_type="pathways")
     if pw_reg is None:
         print(f"{name}: no pathway regression found")
         continue
@@ -219,11 +219,11 @@ for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
 md("""\
 ## 4. Pattern Classification
 
-Features classified by their simplex regression profile:
-- **flat**: R² < 0.05 or low coefficient variation
-- **exclusive**: one archetype dominates (max β / 2nd β ≥ 2)
-- **monotonic**: ordered gradient across archetypes (|ρ| > 0.9)
-- **gradient**: multi-archetype enrichment""")
+Features classified using FDR-corrected p-values from simplex regression:
+- **flat**: F-test FDR > 0.05 (model not significant)
+- **archetype-exclusive**: significant + dominant vertex (max|β| / 2nd ≥ 2)
+- **interaction**: partial F-test (degree-2 vs degree-1) significant
+- **structured**: significant but no dominant pattern""")
 
 code("""\
 for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
@@ -235,7 +235,15 @@ for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
     n_total = pat["n_features"]
     print(f"\\n{name}:")
     for ptype, pcount in sorted(counts.items(), key=lambda x: -x[1]):
-        print(f"  {ptype:25s} {pcount:5d} ({100*pcount/n_total:5.1f}%)")""")
+        print(f"  {ptype:25s} {pcount:5d} ({100*pcount/n_total:5.1f}%)
+
+    # Archetype-feature association map
+    arch_feats = pat.get("archetype_features", {})
+    if arch_feats:
+        print(f"\\n  Archetype-feature associations:")
+        for k in sorted(arch_feats.keys()):
+            genes = arch_feats[k]
+            print(f"    A{k}: {len(genes)} features — {genes[:5]}{'...' if len(genes)>5 else ''}")""")
 
 # ===========================================================================
 # 5. ARCHETYPE COMPARISON
@@ -265,20 +273,24 @@ for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
     sim = ad_obj.uns.get("peach_archetype_feature_similarity")
     if sim is None:
         sim = pc.tl.archetype_feature_similarity(ad_obj)
-    print(f"{name} silhouette: {sim['silhouette_overall']:.3f}")
-
+    rho_mat = np.asarray(sim["spearman_rho_matrix"])
     fdr_mat = sim.get("spearman_pvalue_fdr_matrix")
     if fdr_mat is not None:
-        n_sig_pairs = int(np.sum(np.asarray(fdr_mat) < ALPHA))
+        fdr_mat = np.asarray(fdr_mat)
+        n_sig_pairs = int(np.sum(fdr_mat < ALPHA))
         n_total_pairs = fdr_mat.size
-        print(f"  Spearman FDR < 0.05: {n_sig_pairs}/{n_total_pairs} pairs")""")
+        print(f"{name}: Spearman FDR < 0.05: {n_sig_pairs}/{n_total_pairs} pairs")
+        print(f"  ρ range: [{rho_mat.min():.3f}, {rho_mat.max():.3f}]")
+    else:
+        print(f"{name}: Spearman ρ range: [{rho_mat.min():.3f}, {rho_mat.max():.3f}]")""")
 
 code("""\
 # Between-fit comparison (CMP vs Mono)
 mmd_between = pc.tl.archetype_mmd(adata_cmp, adata_b=adata_mono, n_permutations=50)
 sim_between = pc.tl.archetype_feature_similarity(adata_cmp, adata_b=adata_mono)
 print(f"Between-fit MMD matrix:\\n{np.array2string(np.asarray(mmd_between['mmd_matrix']), precision=4)}")
-print(f"Between-fit silhouette: {sim_between['silhouette_overall']:.3f}")""")
+rho_between = np.asarray(sim_between["spearman_rho_matrix"])
+print(f"Between-fit Spearman ρ range: [{rho_between.min():.3f}, {rho_between.max():.3f}]")""")
 
 code("""\
 # Comparison visualizations
@@ -337,16 +349,16 @@ code("""\
 from scipy.stats import spearmanr
 from peach._core.utils.feature_utils import resolve_regression_result
 
-reg_cmp = resolve_regression_result(adata_cmp, prefer="genes")
-reg_mono = resolve_regression_result(adata_mono, prefer="genes")
+reg_cmp = resolve_regression_result(adata_cmp, feature_type="genes")
+reg_mono = resolve_regression_result(adata_mono, feature_type="genes")
 
 r2_cmp = np.asarray(reg_cmp["r_squared_degree1"])
 r2_mono = np.asarray(reg_mono["r_squared_degree1"])
 rho, pval = spearmanr(r2_cmp, r2_mono)
 print(f"Gene R² concordance: ρ={rho:.4f} (p={pval:.2e})")
 
-pw_cmp = resolve_regression_result(adata_cmp, prefer="pathways")
-pw_mono = resolve_regression_result(adata_mono, prefer="pathways")
+pw_cmp = resolve_regression_result(adata_cmp, feature_type="pathways")
+pw_mono = resolve_regression_result(adata_mono, feature_type="pathways")
 if pw_cmp is not None and pw_mono is not None:
     pw_r2_cmp = np.asarray(pw_cmp["r_squared_degree1"])
     pw_r2_mono = np.asarray(pw_mono["r_squared_degree1"])
@@ -359,22 +371,18 @@ if pw_cmp is not None and pw_mono is not None:
 md("""\
 ## 8. Archetype Phenotype Visualization
 
-Radar-ridgeplot: radar shows feature coefficient profiles across archetypes,
-violins show expression distributions in archetype-dominant cells.""")
+Radar plot: each polygon represents a feature, each spoke an archetype.
+Spiky polygons = archetype-exclusive; round polygons = shared across archetypes.""")
 
 code("""\
 for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
-    print(f"\\n--- {name}: Gene Radar-Ridgeplot ---")
-    figs = pc.pl.archetype_radar_ridgeplot(ad_obj, top_n=8, show=True)
-    if isinstance(figs, tuple):
-        print(f"  Radar + Ridge: {len(figs)} figures")""")
+    print(f"\\n--- {name}: Gene Radar ---")
+    _ = pc.pl.archetype_radar(ad_obj, top_n=8, show=True)""")
 
 code("""\
 for name, ad_obj in [("CMP", adata_cmp), ("Mono", adata_mono)]:
-    print(f"\\n--- {name}: Pathway Radar-Ridgeplot ---")
-    figs = pc.pl.archetype_radar_ridgeplot(ad_obj, top_n=5, feature_type="pathways", show=True)
-    if isinstance(figs, tuple):
-        print(f"  Radar + Ridge: {len(figs)} figures")""")
+    print(f"\\n--- {name}: Pathway Radar ---")
+    _ = pc.pl.archetype_radar(ad_obj, top_n=5, feature_type="pathways", show=True)""")
 
 # ===========================================================================
 # 9. SOFT ASSIGNMENT FEATURE FLOW
