@@ -54,16 +54,22 @@ def _add_top_labels(
         extra = [i for i in by_pval if i not in sig_indices][:remaining_n]
         label_indices = np.array(list(sig_indices) + extra, dtype=int)
 
-    for i in label_indices:
+    for idx_pos, i in enumerate(label_indices):
+        # Alternate y-shift to reduce label overlap
+        y_jitter = 10 + (idx_pos % 3) * 8  # 10, 18, 26 pixel cycling
         fig.add_annotation(
             x=delta[i],
             y=neg_log_p[i],
             text=names[i],
-            showarrow=False,
+            showarrow=True,
+            arrowhead=0,
+            arrowwidth=0.5,
+            arrowcolor="#999",
+            ax=0,
+            ay=-y_jitter,
             xref=xref,
             yref=yref,
             font=dict(size=font_size, color="#333"),
-            yshift=7,
             xanchor="center",
             textangle=textangle,
         )
@@ -271,7 +277,7 @@ def contrast_volcano_grid(
                             n_labels=n_labels, fdr_threshold=fdr_threshold,
                             xref=f"x{idx+1}" if idx > 0 else "x",
                             yref=f"y{idx+1}" if idx > 0 else "y",
-                            font_size=6, textangle=-45)
+                            font_size=10, textangle=-30)
 
     apply_style(fig, title="Pairwise Wald Contrasts")
     grid_width = min(800, 270 * n_cols)
