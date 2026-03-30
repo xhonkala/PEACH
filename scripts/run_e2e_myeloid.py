@@ -2070,6 +2070,11 @@ def step12_between_dose_flow(adata, dose_adatas, report):
             fig_sa = pc.pl.soft_assignment_heatmap(adata, fr, show=False)
             html += safe_plotly_html(report, fig_sa,
                                     f"Soft assignment heatmap (Rows: source archetypes, Columns: target archetypes): {pair_key}")
+            html += report.text(
+                "Soft assignment correspondence: source cells are transported via the learned flow field, "
+                "then matched to their k-nearest target neighbors in PCA space. Entry [i,j] shows "
+                "the fraction of source archetype i's transported mass landing near target archetype j. "
+                "Uniform rows = diffuse transitions; concentrated rows = canalization to specific target archetypes.")
         except Exception as e:
             html += error_html(f"Soft assignment heatmap ({pair_key}) failed: {e}")
 
@@ -2173,6 +2178,9 @@ def step13_sinkhorn_flow(adata, flow_results, report):
     html += report.text("Gene-flow alignment: cosine similarity between each gene's PCA loading vector "
                         "and the mean flow velocity. Positive = gene expression increases along the flow "
                         "direction. Negative = expression decreases. Scores are direction-only (normalized).")
+    html += report.text(
+        "Null: permutation of gene-to-PCA-loading assignments. Tests whether a specific gene's "
+        "alignment with the flow field is stronger than expected for a random gene-loading pairing.")
     for pair_key, fr in flow_results.items():
         _flow_label = pair_key.replace("_to_", " \u2192 ")
         html += f"<h4>Flow: {_flow_label}</h4>"
@@ -2180,6 +2188,14 @@ def step13_sinkhorn_flow(adata, flow_results, report):
         try:
             align = pc.tl.flow_gene_alignment(adata, fr, n_top=30, per_cell=False)
             alignment_results[pair_key] = align
+
+            # Significance filtering
+            align_pvals = align.get("alignment_pvalues")
+            if align_pvals is not None:
+                raw_p = np.asarray(align_pvals)
+                sig_mask = raw_p < 0.05
+                n_raw_sig = int(sig_mask.sum())
+                html += report.text(f"Genes with raw p < 0.05: {n_raw_sig} / {len(raw_p)}")
 
             fig_bar = pc.pl.gene_alignment_barplot(adata, align, n_top=20, show=False)
             html += safe_plotly_html(report, fig_bar, f"Gene alignment: {pair_key}")
@@ -2207,6 +2223,10 @@ def step13_sinkhorn_flow(adata, flow_results, report):
                 mean_delta = delta_expr.mean(axis=0)
 
                 # Top genes by expression change along flow
+                html += report.text(
+                    "Gene expression delta: PCA-reconstructed expression change computed as "
+                    "(PCA loadings) \u00d7 (\u0394 PCA coordinates) between transported and source positions. "
+                    "Units are log-normalized expression change.")
                 sorted_idx = np.argsort(np.abs(mean_delta))[::-1]
                 pw_rows = []
                 for rank, gi in enumerate(sorted_idx[:20]):
@@ -2302,14 +2322,43 @@ def step14_jacobian(adata, flow_results, alignment_results, report):
                                 "contraction (converging). Evaluated at t=0.5 (midpoint of learned flow).")
             if len(expansion) > 0:
                 gene_names = list(adata.var_names)
-                sorted_exp = np.argsort(expansion)
-                top_expand = sorted_exp[-15:][::-1]
-                top_contract = sorted_exp[:15]
+
+                # Significance diagnostics
+                exp_pvals = jac.get("expansion_pvalues")
+                exp_fdr = jac.get("expansion_pvalues_fdr")
+                n_raw_sig = 0
+
+                if exp_pvals is not None:
+                    raw_p = np.asarray(exp_pvals)
+                    n_raw_sig = int((raw_p < 0.05).sum())
+                    html += report.text(f"Genes with raw p < 0.05: {n_raw_sig} / {len(raw_p)}")
+
+                if exp_fdr is not None:
+                    fdr_p = np.asarray(exp_fdr)
+                    n_fdr_sig = int((fdr_p < 0.05).sum())
+                    html += report.text(f"Genes with FDR q < 0.05: {n_fdr_sig} / {len(fdr_p)}")
+                    if n_fdr_sig == 0 and n_raw_sig > 0:
+                        html += report.text(
+                            "<em>Note: no genes survive FDR correction. Showing raw-p significant genes below.</em>")
+
+                # Filter to significant genes when p-values are available
+                if exp_pvals is not None and n_raw_sig > 0:
+                    sig_mask = np.asarray(exp_pvals) < 0.05
+                    expansion_display = np.where(sig_mask, expansion, np.nan)
+                    sorted_exp = np.argsort(expansion_display)
+                    # Remove NaN (non-significant) entries from sorted indices
+                    sorted_exp = [gi for gi in sorted_exp if not np.isnan(expansion_display[gi])]
+                else:
+                    sorted_exp = list(np.argsort(expansion))
+
+                top_expand = sorted_exp[-15:][::-1] if len(sorted_exp) >= 15 else sorted_exp[::-1]
+                top_contract = sorted_exp[:15] if len(sorted_exp) >= 15 else sorted_exp
                 exp_rows = []
                 for gi in top_expand:
                     exp_rows.append({"Gene": gene_names[gi], "Expansion": f"{expansion[gi]:.4f}", "Direction": "expanding"})
                 for gi in top_contract:
-                    exp_rows.append({"Gene": gene_names[gi], "Expansion": f"{expansion[gi]:.4f}", "Direction": "contracting"})
+                    if gi not in top_expand:
+                        exp_rows.append({"Gene": gene_names[gi], "Expansion": f"{expansion[gi]:.4f}", "Direction": "contracting"})
                 html += report.df_to_html(pd.DataFrame(exp_rows),
                                           caption=f"Top expanded/contracted genes: {pair_key}")
 
