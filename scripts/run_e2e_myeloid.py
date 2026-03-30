@@ -2491,6 +2491,12 @@ def step15_gene_deep_dive(adata, flow_results, jac_results, report):
         break  # Only first pair to save time
 
     # Per-cell expansion violin for top genes from first Jacobian
+    log.info(f"Violin plots: {len(jac_results)} Jacobian results available")
+    for pair_key, jac in jac_results.items():
+        per_cell = jac.get("per_cell_expansion")
+        gene_names = jac.get("per_cell_expansion_gene_names", [])
+        log.info(f"  {pair_key}: per_cell={'present' if per_cell is not None else 'MISSING'}, "
+                 f"n_genes={len(gene_names)}")
     for pair_key, jac in jac_results.items():
         per_cell = jac.get("per_cell_expansion")
         gene_names = jac.get("per_cell_expansion_gene_names", [])
@@ -2584,6 +2590,26 @@ def step16_per_response(adata, report):
     if reg_rows:
         html += report.df_to_html(pd.DataFrame(reg_rows), caption="Per-response regression summary")
 
+    # Exclusive dotplots per response group
+    for resp, sub in response_adatas.items():
+        try:
+            fig_dot = pc.pl.archetype_regression_dotplot(
+                sub, top_n=10, exclusive_only=True, show=False)
+            html += safe_plotly_html(report, fig_dot,
+                                     f"Exclusive features: pCR={resp}")
+        except Exception as e:
+            html += error_html(f"Dotplot pCR={resp} failed: {e}")
+
+        if "pathway_scores" in sub.obsm:
+            try:
+                fig_pw = pc.pl.archetype_regression_dotplot(
+                    sub, top_n=10, exclusive_only=True,
+                    feature_type="pathways", show=False)
+                html += safe_plotly_html(report, fig_pw,
+                                         f"Exclusive pathways: pCR={resp}")
+            except Exception as e:
+                html += error_html(f"Pathway dotplot pCR={resp} failed: {e}")
+
     # Archetype overlay: R vs NR side by side
     if len(response_adatas) >= 2:
         try:
@@ -2599,6 +2625,18 @@ def step16_per_response(adata, report):
                     ax.set_xlabel("Arch coord 1")
                     ax.set_ylabel("Arch coord 2")
                     ax.spines[["top", "right"]].set_visible(False)
+                    # Add archetype vertex markers and expand limits
+                    arch_pos = sub.uns.get("archetype_coordinates")
+                    if arch_pos is not None:
+                        arch_pos = np.asarray(arch_pos)
+                        if arch_pos.ndim == 2 and arch_pos.shape[1] >= 2:
+                            ax.scatter(arch_pos[:, 0], arch_pos[:, 1], s=80, c="red",
+                                       marker="^", zorder=5, edgecolors="black", linewidth=0.5)
+                            all_pts = np.vstack([coords[:, :2], arch_pos[:, :2]])
+                            margin = 0.1 * np.ptp(all_pts, axis=0)
+                            margin = np.maximum(margin, 0.1)
+                            ax.set_xlim(all_pts[:, 0].min() - margin[0], all_pts[:, 0].max() + margin[0])
+                            ax.set_ylim(all_pts[:, 1].min() - margin[1], all_pts[:, 1].max() + margin[1])
             fig.suptitle("R vs NR archetypal space", y=1.02)
             fig.tight_layout()
             html += report.fig_to_img(fig, caption="Per-response archetypal space")
@@ -2703,6 +2741,25 @@ def step17_per_response_per_dose(adata, report):
                 if reg is not None:
                     reg_rows.append(_reg_summary_row(reg, label))
                     group_r2[(dose, resp)] = np.asarray(reg["r_squared_degree1"])
+
+                # Exclusive dotplot
+                try:
+                    fig_dot = pc.pl.archetype_regression_dotplot(
+                        sub, top_n=10, exclusive_only=True, show=False)
+                    html += safe_plotly_html(report, fig_dot,
+                                             f"Exclusive features: {label}")
+                except Exception as e_dot:
+                    html += error_html(f"Dotplot {label} failed: {e_dot}")
+
+                if "pathway_scores" in sub.obsm:
+                    try:
+                        fig_pw = pc.pl.archetype_regression_dotplot(
+                            sub, top_n=10, exclusive_only=True,
+                            feature_type="pathways", show=False)
+                        html += safe_plotly_html(report, fig_pw,
+                                                 f"Exclusive pathways: {label}")
+                    except Exception as e_pw:
+                        html += error_html(f"Pathway dotplot {label} failed: {e_pw}")
 
             except Exception as e:
                 html += error_html(f"{label} failed: {e}")
