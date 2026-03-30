@@ -1839,6 +1839,21 @@ def step10_per_dose_models(adata, report):
             best_hp = best["hyperparameters"]
             best_K = best_hp["n_archetypes"]
             best_hd = best_hp.get("hidden_dims", [128, 256])
+
+            # CV search QC
+            try:
+                cv_rows = []
+                for r in ranked[:5]:
+                    hp = r["hyperparameters"]
+                    cv_rows.append({
+                        "K": hp["n_archetypes"],
+                        "Hidden": str(hp.get("hidden_dims", "?")),
+                        "Mean R\u00b2": f"{r['metric_value']:.4f}",
+                    })
+                html += report.df_to_html(pd.DataFrame(cv_rows),
+                                          caption=f"{dose}: top 5 CV configurations")
+            except Exception:
+                pass
         except Exception as e:
             html += error_html(f"{dose}: CV search failed ({e}), using K=5 fallback.")
             best_K, best_hd = 5, [128, 256]
@@ -1870,6 +1885,18 @@ def step10_per_dose_models(adata, report):
                 coords = sub.obsm.get("archetype_coordinates")
                 if coords is not None and coords.shape[1] >= 2:
                     ax.scatter(coords[:, 0], coords[:, 1], s=2, alpha=0.3, c="#0072B2")
+                    # Mark archetype vertices and expand limits
+                    arch_pos = sub.uns.get("archetype_coordinates")
+                    if arch_pos is not None:
+                        arch_pos = np.asarray(arch_pos)
+                        if arch_pos.ndim == 2 and arch_pos.shape[1] >= 2:
+                            ax.scatter(arch_pos[:, 0], arch_pos[:, 1], s=80, c="red",
+                                       marker="^", zorder=5, edgecolors="black", linewidth=0.5)
+                            all_pts = np.vstack([coords[:, :2], arch_pos[:, :2]])
+                            margin = 0.1 * np.ptp(all_pts, axis=0)
+                            margin = np.maximum(margin, 0.1)
+                            ax.set_xlim(all_pts[:, 0].min() - margin[0], all_pts[:, 0].max() + margin[0])
+                            ax.set_ylim(all_pts[:, 1].min() - margin[1], all_pts[:, 1].max() + margin[1])
                     ax.set_title(f"{dose} (K={sub.obsm['cell_archetype_weights'].shape[1]})")
                     ax.set_xlabel("Arch coord 1")
                     ax.set_ylabel("Arch coord 2")
@@ -1913,6 +1940,17 @@ def step11_per_dose_regression(dose_adatas, report):
     if summary_rows:
         html += report.df_to_html(pd.DataFrame(summary_rows),
                                   caption="Per-dose regression summary")
+
+    # Per-dose exclusive dotplots
+    for dose, sub in dose_adatas.items():
+        if "peach_simplex_regression" not in sub.uns:
+            continue
+        try:
+            fig_dot = pc.pl.archetype_regression_dotplot(sub, top_n=10, exclusive_only=True, show=False)
+            html += report.plotly_to_div(fig_dot,
+                                         caption=f"{dose}: archetype-exclusive top features (|beta| size, -log10p color)")
+        except Exception as e:
+            html += error_html(f"{dose}: dotplot failed: {e}")
 
     # Cross-dose feature stability (Spearman of R2 vectors)
     dose_labels = list(dose_regs.keys())
