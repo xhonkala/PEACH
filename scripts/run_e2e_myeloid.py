@@ -1129,60 +1129,122 @@ def step5_wald_contrasts(adata, report, gene_reg):
 
 
 def step6_within_fit_comparisons(adata, report):
-    """Step 6: Within-fit MMD and feature similarity."""
+    """Step 6: Flow-based within-fit pairwise comparison + feature similarity."""
     import peach as pc
 
     html = ""
 
-    # MMD
-    log.info("Computing within-fit MMD...")
+    # Get archetype labels
+    if "archetypes" not in adata.obs.columns:
+        html += error_html("No 'archetypes' column — skipping within-fit comparisons.")
+        report.add_section("Within-Fit Comparisons", html, step_num=6)
+        return None
+
+    arch_labels = sorted([a for a in adata.obs["archetypes"].unique()
+                          if a != "no_archetype" and not pd.isna(a)])
+    K = len(arch_labels)
+    html += report.text(f"Pairwise flow comparison for {K} archetypes: {', '.join(arch_labels)}")
+
+    # Pairwise flow_within between archetype groups
+    flow_pairs = []
+    for i in range(K):
+        for j in range(i + 1, K):
+            flow_pairs.append((arch_labels[i], arch_labels[j]))
+
+    flow_rows = []
+    for src_label, tgt_label in flow_pairs:
+        n_src = int((adata.obs["archetypes"] == src_label).sum())
+        n_tgt = int((adata.obs["archetypes"] == tgt_label).sum())
+
+        if n_src < 50 or n_tgt < 50:
+            flow_rows.append({
+                "Source": src_label, "Target": tgt_label,
+                "N_source": n_src, "N_target": n_tgt,
+                "MMD_before": float("nan"), "MMD_after": float("nan"),
+                "MMD_reduction": float("nan"),
+                "Status": "Skipped (<50 cells)",
+            })
+            continue
+
+        log.info(f"  Flow: {src_label} -> {tgt_label} ({n_src} -> {n_tgt} cells)...")
+        try:
+            fr = pc.tl.flow_within(
+                adata,
+                source={"archetypes": src_label},
+                target={"archetypes": tgt_label},
+                n_epochs=200,
+                hidden_dims=(128, 128),
+                batch_size=min(128, min(n_src, n_tgt) // 2),
+                return_model=False,
+                name=f"wf_{src_label}_to_{tgt_label}",
+            )
+            mmd_b = fr["mmd_before"]
+            mmd_a = fr["mmd_after"]
+            reduction = 1 - mmd_a / max(mmd_b, 1e-10)
+            flow_rows.append({
+                "Source": src_label, "Target": tgt_label,
+                "N_source": n_src, "N_target": n_tgt,
+                "MMD_before": round(mmd_b, 4), "MMD_after": round(mmd_a, 4),
+                "MMD_reduction": round(reduction, 4),
+                "Status": "OK",
+            })
+        except Exception as e:
+            log.warning(f"Flow {src_label}->{tgt_label} failed: {e}")
+            flow_rows.append({
+                "Source": src_label, "Target": tgt_label,
+                "N_source": n_src, "N_target": n_tgt,
+                "MMD_before": float("nan"), "MMD_after": float("nan"),
+                "MMD_reduction": float("nan"),
+                "Status": f"Failed: {e}",
+            })
+
+    flow_df = pd.DataFrame(flow_rows)
+    html += report.df_to_html(flow_df, caption="Pairwise flow-based archetype comparison")
+
+    # Build K×K similarity matrix (MMD reduction)
+    sim_matrix = np.full((K, K), np.nan)
+    for _, row in flow_df.iterrows():
+        if row["Status"] == "OK":
+            i = arch_labels.index(row["Source"])
+            j = arch_labels.index(row["Target"])
+            val = row["MMD_reduction"]
+            sim_matrix[i, j] = val
+            sim_matrix[j, i] = val
+    np.fill_diagonal(sim_matrix, 1.0)
+
+    # Heatmap
     try:
-        mmd_result = pc.tl.archetype_mmd(adata)
-        mmd_matrix = np.asarray(mmd_result["mmd_matrix"])
-        K = mmd_matrix.shape[0]
-        html += report.text(f"MMD matrix: {K}x{K} archetypes.")
-
-        fig_mmd = pc.pl.mmd_heatmap(adata, show=False)
-        html += safe_plotly_html(report, fig_mmd, "Within-fit MMD heatmap")
+        import plotly.graph_objects as go
+        arch_short = [f"A{i+1}" for i in range(K)]
+        fig = go.Figure(data=go.Heatmap(
+            z=sim_matrix, x=arch_short, y=arch_short,
+            colorscale="Blues",
+            text=np.where(np.isnan(sim_matrix), "", np.round(sim_matrix, 3).astype(str)),
+            texttemplate="%{text}", textfont_size=10,
+        ))
+        fig.update_layout(title="Flow-based archetype similarity (MMD reduction)",
+                          xaxis_title="Target", yaxis_title="Source",
+                          width=500, height=450)
+        html += safe_plotly_html(report, fig,
+                                 "Flow-based similarity: higher = more similar phenotype after transport")
     except Exception as e:
-        html += error_html(f"MMD computation/plot failed: {e}")
+        html += error_html(f"Flow similarity heatmap failed: {e}")
 
-    # Feature similarity
+    # Feature similarity (Spearman on regression coefficients) — keep existing
     log.info("Computing within-fit feature similarity...")
     try:
         sim_result = pc.tl.archetype_feature_similarity(adata)
-        spearman = np.asarray(sim_result["spearman_matrix"])
-        n_shared = sim_result.get("n_shared_features", "?")
         n_sig_feat = sim_result.get("n_significant_features", "?")
-        html += metric_grid([
-            metric_card(n_shared, "Shared features"),
-            metric_card(n_sig_feat, "Significant features used"),
-        ])
+        html += report.text(f"Spearman \u03c1 computed on {n_sig_feat} FDR-significant (q<0.05) "
+                            "vertex \u03b2 coefficients from simplex regression.")
 
         fig_sim = pc.pl.feature_similarity_heatmap(adata, show=False)
-        html += safe_plotly_html(report, fig_sim, "Feature similarity (Spearman) heatmap")
-        html += report.text("Feature similarity: Spearman ρ computed on FDR-significant (q<0.05) "
-                            "vertex β coefficients from simplex regression. Higher ρ = archetypes "
-                            "share similar gene-archetype associations.")
+        html += safe_plotly_html(report, fig_sim, "Feature similarity (Spearman \u03c1) heatmap")
     except Exception as e:
         html += error_html(f"Feature similarity failed: {e}")
 
-    # Summary table
-    try:
-        arch_labels = [f"A{i+1}" for i in range(K)]
-        rows = []
-        for i in range(K):
-            for j in range(i + 1, K):
-                row = {"Pair": f"A{i+1} vs A{j+1}", "MMD": f"{mmd_matrix[i, j]:.4f}"}
-                if "spearman" in dir():
-                    row["Spearman r"] = f"{spearman[i, j]:.4f}"
-                rows.append(row)
-        if rows:
-            html += report.df_to_html(pd.DataFrame(rows), caption="Pairwise comparison summary")
-    except Exception:
-        pass
-
-    report.add_section("Within-Fit Comparisons (MMD & Feature Similarity)", html, step_num=6)
+    report.add_section("Within-Fit Comparisons (Flow + Feature Similarity)", html, step_num=6)
+    return flow_df
 
 
 def step7_driver_regression(adata, report):
@@ -2510,6 +2572,7 @@ def main():
 
     # Storage for cross-step results
     gene_reg = None
+    flow_comparison_df = None
 
     # -- Step 1 --------------------------------------------------------------
     t0 = time.time()
@@ -2582,11 +2645,11 @@ def main():
     # -- Step 6 --------------------------------------------------------------
     t0 = time.time()
     try:
-        step6_within_fit_comparisons(adata, report)
+        flow_comparison_df = step6_within_fit_comparisons(adata, report)
         log.info(f"Step 6 done in {time.time() - t0:.1f}s")
     except Exception as e:
         log.error(f"Step 6 failed: {e}", exc_info=True)
-        report.add_section("Within-Fit Comparisons (MMD & Feature Similarity)",
+        report.add_section("Within-Fit Comparisons (Flow + Feature Similarity)",
                            error_html(f"Step 6 failed: {e}"), step_num=6)
 
     # Save checkpoint
