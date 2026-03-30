@@ -1300,20 +1300,26 @@ def visualize_archetypal_space_3d_single(
         y_range = fixed_ranges.get("y", [pca_coords[:, 1].min(), pca_coords[:, 1].max()])
         z_range = fixed_ranges.get("z", [pca_coords[:, 2].min(), pca_coords[:, 2].max()])
     elif auto_scale:
-        # Use 1st and 99th percentiles with margin
-        def get_axis_range(coords, axis_idx, margin_factor=0.75):
+        # Use 1st and 99th percentiles with margin, including archetype positions
+        def get_axis_range(coords, axis_idx, margin_factor=0.75, extra_points=None):
             percentiles = np.percentile(coords[:, axis_idx], [1, 99])
-            margin = (percentiles[1] - percentiles[0]) * margin_factor
-            return [percentiles[0] - margin, percentiles[1] + margin]
+            lo, hi = percentiles[0], percentiles[1]
+            # Expand to include archetype vertices if they fall outside
+            if extra_points is not None and len(extra_points) > 0:
+                lo = min(lo, extra_points[:, axis_idx].min())
+                hi = max(hi, extra_points[:, axis_idx].max())
+            margin = (hi - lo) * margin_factor
+            return [lo - margin, hi + margin]
 
-        x_range = get_axis_range(pca_coords, 0)
-        y_range = get_axis_range(pca_coords, 1)
-        z_range = get_axis_range(pca_coords, 2)
+        x_range = get_axis_range(pca_coords, 0, extra_points=archetype_coords)
+        y_range = get_axis_range(pca_coords, 1, extra_points=archetype_coords)
+        z_range = get_axis_range(pca_coords, 2, extra_points=archetype_coords)
     else:
-        # Use full data range
-        x_range = [pca_coords[:, 0].min(), pca_coords[:, 0].max()]
-        y_range = [pca_coords[:, 1].min(), pca_coords[:, 1].max()]
-        z_range = [pca_coords[:, 2].min(), pca_coords[:, 2].max()]
+        # Use full data range including archetype positions
+        combined = np.vstack([pca_coords, archetype_coords])
+        x_range = [combined[:, 0].min(), combined[:, 0].max()]
+        y_range = [combined[:, 1].min(), combined[:, 1].max()]
+        z_range = [combined[:, 2].min(), combined[:, 2].max()]
 
     # Initialize figure
     fig = go.Figure()
