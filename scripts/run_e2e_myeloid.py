@@ -917,6 +917,10 @@ def step5_wald_contrasts(adata, report, gene_reg):
 
     log.info("Computing Wald contrasts...")
     contrast_result = pc.tl.archetype_contrasts(adata)
+    # contrast_volcano_grid looks for 'peach_archetype_contrasts' (no _genes suffix),
+    # but archetype_contrasts stores under 'peach_archetype_contrasts_genes'.
+    # Mirror the result so the plot function can find it.
+    adata.uns["peach_archetype_contrasts"] = contrast_result
 
     pairs = contrast_result.get("pairs", [])
     feature_names = list(contrast_result.get("feature_names", []))
@@ -969,7 +973,7 @@ def step5_wald_contrasts(adata, report, gene_reg):
         pair_label = f"A{j+1}-A{k+1}"
         for feat_idx in range(len(feature_names)):
             if pvals[feat_idx] < 0.05:
-                direction = "+" if delta[feat_idx] > 0 else "-"
+                direction = f"Up in A{j+1}" if delta[feat_idx] > 0 else f"Up in A{k+1}"
                 top_rows.append({
                     "Feature": feature_names[feat_idx],
                     "Pair": f"A{j+1} vs A{k+1}",
@@ -993,6 +997,8 @@ def step5_wald_contrasts(adata, report, gene_reg):
         html += report.text("No significant contrasts at FDR < 0.05.")
 
     # Multi-pair confusion matrix: genes significant in ≥2 pairs
+    n_multi = sum(1 for d in gene_pair_directions.values() if len(d) >= 2)
+    log.info(f"Multi-pair genes (significant in ≥2 pairs): {n_multi}")
     multi_genes = {
         gene: directions
         for gene, directions in gene_pair_directions.items()
@@ -1014,7 +1020,7 @@ def step5_wald_contrasts(adata, report, gene_reg):
             conf_df,
             caption=(
                 f"Multi-pair contrast direction matrix ({len(multi_genes)} genes significant in ≥2 pairs; "
-                "+ = up in first archetype, - = down)"
+                "direction = which archetype has higher expression)"
             ),
         )
     else:
@@ -1096,7 +1102,7 @@ def step5_wald_contrasts(adata, report, gene_reg):
                 j, k = pair if isinstance(pair, (list, tuple)) else (pair[0], pair[1])
                 for feat_idx in range(len(pw_feature_names)):
                     if pw_pvals[feat_idx] < 0.05:
-                        direction = "+" if pw_delta[feat_idx] > 0 else "-"
+                        direction = f"Up in A{j+1}" if pw_delta[feat_idx] > 0 else f"Up in A{k+1}"
                         pw_top_rows.append({
                             "Pathway": pw_feature_names[feat_idx],
                             "Pair": f"A{j+1} vs A{k+1}",
@@ -1114,7 +1120,7 @@ def step5_wald_contrasts(adata, report, gene_reg):
                 pw_top_df["FDR q"] = pw_top_df["FDR q"].apply(fmt_pval)
                 html += report.df_to_html(
                     pw_top_df,
-                    caption="Top 30 significant pathway contrasts (grouped by Direction, sorted by |delta-beta|)",
+                    caption="Top 30 significant pathway contrasts (grouped by direction, sorted by |delta-beta|)",
                 )
             else:
                 html += report.text("No significant pathway contrasts at FDR < 0.05.")
