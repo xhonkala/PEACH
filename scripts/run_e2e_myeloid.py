@@ -591,7 +591,7 @@ def step3_simplex_regression(adata, report):
 
     # Archetype radar
     try:
-        fig_radar = pc.pl.archetype_radar(adata, top_n=8, show=False)
+        fig_radar = pc.pl.archetype_radar(adata, top_n=8, order_by_similarity=True, show=False)
         html += safe_plotly_html(report, fig_radar, "Archetype radar (top features)")
     except Exception as e:
         html += error_html(f"Archetype radar failed: {e}")
@@ -629,7 +629,7 @@ def step3_simplex_regression(adata, report):
     except Exception as e:
         html += error_html(f"Pattern classification failed: {e}")
 
-    # Cooperative vs tradeoff classification for interaction terms
+    # Interaction term reclassification
     try:
         int_coefs = gene_reg.get("interaction_coefficients")
         int_pairs = gene_reg.get("interaction_pairs", [])
@@ -641,56 +641,104 @@ def step3_simplex_regression(adata, report):
             int_coefs = np.asarray(int_coefs)
             int_fdr = np.asarray(int_fdr)
 
-            coop_rows = []
+            interaction_rows = []
             for feat_idx in range(len(feat_names)):
                 for pair_idx, (j, k) in enumerate(int_pairs):
                     if int_fdr[feat_idx, pair_idx] < 0.05:
+                        gamma = int_coefs[feat_idx, pair_idx]
                         beta_j = vertex_coefs[feat_idx, j]
                         beta_k = vertex_coefs[feat_idx, k]
-                        if np.sign(beta_j) == np.sign(beta_k):
-                            itype = "cooperative"
+
+                        # Classify vertex relationship
+                        median_abs = np.median(np.abs(vertex_coefs[feat_idx]))
+                        j_high = abs(beta_j) > median_abs
+                        k_high = abs(beta_k) > median_abs
+                        same_sign = (np.sign(beta_j) == np.sign(beta_k)
+                                     and beta_j != 0 and beta_k != 0)
+
+                        if j_high and k_high and same_sign:
+                            pair_type = "cooperative"
+                        elif (j_high and not k_high) or (not j_high and k_high):
+                            pair_type = "tradeoff"
+                        elif not j_high and not k_high and abs(gamma) > median_abs:
+                            pair_type = "transition-enriched"
                         else:
-                            itype = "tradeoff"
-                        coop_rows.append({
+                            pair_type = "gradient"
+
+                        transition = "rising" if gamma > 0 else "falling"
+
+                        interaction_rows.append({
                             "Feature": feat_names[feat_idx],
-                            "Pair": f"({j},{k})",
-                            "Type": itype,
+                            "Pair": f"A{j+1}-A{k+1}",
+                            "Type": pair_type,
+                            "Transition": transition,
                             "beta_j": f"{beta_j:.3f}",
                             "beta_k": f"{beta_k:.3f}",
-                            "int_coef": f"{int_coefs[feat_idx, pair_idx]:.3f}",
+                            "gamma": f"{gamma:.3f}",
                             "FDR q": fmt_pval(int_fdr[feat_idx, pair_idx]),
                         })
 
-            if coop_rows:
-                coop_df = pd.DataFrame(coop_rows)
-                n_coop = (coop_df["Type"] == "cooperative").sum()
-                n_trade = (coop_df["Type"] == "tradeoff").sum()
-                html += metric_grid([
-                    metric_card(len(coop_rows), "Significant interactions"),
-                    metric_card(n_coop, "Cooperative"),
-                    metric_card(n_trade, "Tradeoff"),
-                ])
-                html += report.text("Interaction coefficients (\u03b2_int): the product term w_j\u00b7w_k in the Sch\u00e9ffe "
-                                    "polynomial. Positive \u03b2_int = synergistic effect (gene upregulated when cell has "
-                                    "high weight on both archetypes). Negative \u03b2_int = antagonistic (gene suppressed "
-                                    "in the blending zone). Cooperative: same-sign vertex \u03b2 values. "
-                                    "Tradeoff: opposite-sign vertex \u03b2 values.")
-                html += report.df_to_html(
-                    coop_df.head(30),
-                    caption="Top significant 2nd-degree interactions (cooperative vs tradeoff)",
-                )
-                # Group by type
-                if "Type" in coop_df.columns:
-                    for itype in ["tradeoff", "cooperative"]:
-                        sub = coop_df[coop_df["Type"] == itype].head(15)
-                        if len(sub) > 0:
-                            html += report.df_to_html(sub, caption=f"Top {itype} interactions (by |β|)")
+            if interaction_rows:
+                int_df = pd.DataFrame(interaction_rows)
+                type_counts = int_df["Type"].value_counts()
+                cards = [metric_card(len(interaction_rows), "Significant interactions")]
+                for t in ["tradeoff", "cooperative", "transition-enriched", "gradient"]:
+                    cards.append(metric_card(int(type_counts.get(t, 0)), t.capitalize()))
+                html += metric_grid(cards)
+
+                html += report.text(
+                    "Interaction classification: <b>Cooperative</b> = high at both archetypes "
+                    "(shared program). <b>Tradeoff</b> = high at one, low at other (distinguishes "
+                    "archetypes). <b>Transition-enriched</b> = peaks in blending zone. "
+                    "<b>Gradient</b> = moderate signal. Transition direction: rising (\u03b3>0) = gene "
+                    "increases along edge; falling (\u03b3<0) = gene decreases.")
+
+                for itype in ["tradeoff", "cooperative", "transition-enriched", "gradient"]:
+                    sub = int_df[int_df["Type"] == itype].head(20)
+                    if len(sub) > 0:
+                        html += report.df_to_html(sub, caption=f"Top {itype} interactions")
             else:
                 html += report.text("No significant interaction terms at FDR < 0.05.")
         else:
             html += report.text("Interaction terms not available in regression results.")
     except Exception as e:
-        html += error_html(f"Cooperative/tradeoff classification failed: {e}")
+        html += error_html(f"Interaction classification failed: {e}")
+
+    # Mutual exclusivity: pairwise tradeoff accounting
+    try:
+        if int_coefs is not None and len(int_pairs) > 0 and int_fdr is not None:
+            me_rows = []
+            for pair_idx, (j, k) in enumerate(int_pairs):
+                for feat_idx in range(len(feat_names)):
+                    if int_fdr[feat_idx, pair_idx] >= 0.05:
+                        continue
+                    beta_j = vertex_coefs[feat_idx, j]
+                    beta_k = vertex_coefs[feat_idx, k]
+                    median_abs = np.median(np.abs(vertex_coefs[feat_idx]))
+                    # Tradeoff: one high, one low
+                    if (abs(beta_j) > median_abs) != (abs(beta_k) > median_abs):
+                        high_arch = f"A{j+1}" if abs(beta_j) > abs(beta_k) else f"A{k+1}"
+                        low_arch = f"A{k+1}" if abs(beta_j) > abs(beta_k) else f"A{j+1}"
+                        me_rows.append({
+                            "archetype_high": high_arch,
+                            "archetype_low": low_arch,
+                            "gene": feat_names[feat_idx],
+                            "direction": f"{high_arch}\u2192{low_arch}",
+                            "beta_high": f"{max(abs(beta_j), abs(beta_k)):.3f}",
+                            "beta_low": f"{min(abs(beta_j), abs(beta_k)):.3f}",
+                            "gamma": f"{int_coefs[feat_idx, pair_idx]:.3f}",
+                            "fdr": fmt_pval(int_fdr[feat_idx, pair_idx]),
+                        })
+
+            if me_rows:
+                me_df = pd.DataFrame(me_rows)
+                pair_summary = me_df.groupby(["archetype_high", "archetype_low"]).size().reset_index(name="n_genes")
+                html += report.df_to_html(pair_summary,
+                                          caption="Mutual exclusivity: tradeoff gene counts per archetype pair")
+                html += report.df_to_html(me_df.head(40),
+                                          caption="Mutual exclusivity: tradeoff genes (top 40)")
+    except Exception as e:
+        html += error_html(f"Mutual exclusivity table failed: {e}")
 
     # Pathway simplex regression (if pathway scores exist)
     if "pathway_scores" in adata.obsm:
@@ -739,6 +787,26 @@ def step3_simplex_regression(adata, report):
             except Exception as e:
                 html += error_html(f"Pathway coefficient heatmap failed: {e}")
                 plt.close("all")
+
+            # Pathway regression dotplot (exclusive pathways)
+            try:
+                fig_pw_dot = pc.pl.archetype_regression_dotplot(
+                    adata, top_n=10, exclusive_only=True,
+                    feature_type="pathways", show=False)
+                html += safe_plotly_html(report, fig_pw_dot,
+                                         "Pathway regression dotplot (exclusive pathways)")
+            except Exception as e:
+                html += error_html(f"Pathway dotplot failed: {e}")
+
+            # Pathway radar
+            try:
+                fig_pw_radar = pc.pl.archetype_radar(
+                    adata, top_n=8, feature_type="pathways",
+                    order_by_similarity=True, show=False)
+                html += safe_plotly_html(report, fig_pw_radar,
+                                         "Pathway radar (similarity-ordered)")
+            except Exception as e:
+                html += error_html(f"Pathway radar failed: {e}")
 
             # Pattern classification summary for pathways
             # Stash gene patterns to avoid overwrite
