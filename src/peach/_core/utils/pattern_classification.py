@@ -3,6 +3,65 @@
 import numpy as np
 
 
+def _classify_interaction_detail(vertex_betas, interaction_betas, interaction_pairs,
+                                  interaction_pvalues_fdr, fdr_threshold):
+    """Sub-classify significant interaction terms by vertex + edge relationship.
+
+    For each significant interaction pair (j, k):
+    - Cooperative: beta_j and beta_k both high relative to other vertices
+    - Tradeoff: beta_j high, beta_k low (or vice versa)
+    - Transition-enriched: peaks in blending zone (modest vertices, large gamma)
+    - Gradient: other significant interaction patterns
+
+    Returns list of per-pair classification dicts.
+    """
+    if interaction_betas is None or interaction_pairs is None:
+        return []
+
+    betas = np.asarray(vertex_betas)
+    int_betas = np.asarray(interaction_betas)
+    median_abs_beta = np.median(np.abs(betas))
+
+    detail = []
+    for pair_idx, (j, k) in enumerate(interaction_pairs):
+        # Skip non-significant pairs
+        if interaction_pvalues_fdr is not None:
+            if pair_idx < len(interaction_pvalues_fdr) and interaction_pvalues_fdr[pair_idx] >= fdr_threshold:
+                continue
+
+        gamma = float(int_betas[pair_idx]) if pair_idx < len(int_betas) else 0.0
+        beta_j = float(betas[j])
+        beta_k = float(betas[k])
+
+        # Classify the vertex relationship
+        j_high = abs(beta_j) > median_abs_beta
+        k_high = abs(beta_k) > median_abs_beta
+        same_sign = (np.sign(beta_j) == np.sign(beta_k)
+                     and beta_j != 0 and beta_k != 0)
+
+        if j_high and k_high and same_sign:
+            pair_type = "cooperative"
+        elif (j_high and not k_high) or (not j_high and k_high):
+            pair_type = "tradeoff"
+        elif not j_high and not k_high and abs(gamma) > median_abs_beta:
+            pair_type = "transition-enriched"
+        else:
+            pair_type = "gradient"
+
+        transition = "rising" if gamma > 0 else "falling"
+
+        detail.append({
+            "pair": (int(j), int(k)),
+            "pair_type": pair_type,
+            "transition": transition,
+            "gamma": gamma,
+            "beta_j": beta_j,
+            "beta_k": beta_k,
+        })
+
+    return detail
+
+
 def classify_single_feature(
     vertex_betas,
     r2,
@@ -11,6 +70,9 @@ def classify_single_feature(
     fdr_threshold=0.05,
     exclusive_ratio=2.0,
     vertex_ses=None,
+    interaction_betas=None,
+    interaction_pairs=None,
+    interaction_pvalues_fdr=None,
 ):
     """Classify a single feature into a biological pattern type.
 
@@ -32,6 +94,12 @@ def classify_single_feature(
         Standard errors per archetype. When provided, the dominant
         coefficient must satisfy ``|beta| > 2 * SE`` to be classified
         as exclusive.
+    interaction_betas : array-like or None, shape [n_pairs]
+        Per-pair interaction (gamma) coefficients.
+    interaction_pairs : list of (j, k) tuples or None
+        Archetype index pairs corresponding to interaction_betas.
+    interaction_pvalues_fdr : array-like or None, shape [n_pairs]
+        FDR-corrected p-values per interaction pair.
     """
     # NaN guard
     if np.isnan(r2):
@@ -63,10 +131,17 @@ def classify_single_feature(
 
     # Rule 3: interaction
     if interaction_f_pvalue_fdr is not None and interaction_f_pvalue_fdr < fdr_threshold:
+        interaction_detail = _classify_interaction_detail(
+            vertex_betas, interaction_betas, interaction_pairs,
+            interaction_pvalues_fdr, fdr_threshold
+        )
         return {
             "pattern": "interaction",
             "r2": float(r2),
-            "details": {"dominant_archetype": int(np.argmax(abs_betas))},
+            "details": {
+                "dominant_archetype": int(np.argmax(abs_betas)),
+                "interaction_detail": interaction_detail,
+            },
         }
 
     # Rule 4: structured fallback
@@ -85,6 +160,9 @@ def classify_all_features(
     fdr_threshold=0.05,
     exclusive_ratio=2.0,
     vertex_ses=None,
+    interaction_coefficients=None,
+    interaction_pairs=None,
+    interaction_pvalues_fdr=None,
 ):
     """Classify all features into biological pattern types.
 
@@ -99,6 +177,12 @@ def classify_all_features(
     vertex_ses : array-like or None, shape [n_features, K]
         Standard errors per feature per archetype. Passed to
         ``classify_single_feature`` for SE-aware exclusive filtering.
+    interaction_coefficients : array-like or None, shape [n_features, n_pairs]
+        Per-pair interaction (gamma) coefficients for each feature.
+    interaction_pairs : list of (j, k) tuples or None
+        Archetype index pairs corresponding to columns of interaction_coefficients.
+    interaction_pvalues_fdr : array-like or None, shape [n_features, n_pairs]
+        FDR-corrected p-values per interaction pair per feature.
     """
     n_features = len(r_squared)
     results = []
@@ -109,6 +193,16 @@ def classify_all_features(
             else None
         )
         feat_ses = vertex_ses[i] if vertex_ses is not None else None
+        feat_int_betas = (
+            interaction_coefficients[i]
+            if interaction_coefficients is not None
+            else None
+        )
+        feat_int_pvals = (
+            interaction_pvalues_fdr[i]
+            if interaction_pvalues_fdr is not None
+            else None
+        )
         results.append(
             classify_single_feature(
                 vertex_coefficients[i],
@@ -118,6 +212,9 @@ def classify_all_features(
                 fdr_threshold=fdr_threshold,
                 exclusive_ratio=exclusive_ratio,
                 vertex_ses=feat_ses,
+                interaction_betas=feat_int_betas,
+                interaction_pairs=interaction_pairs,
+                interaction_pvalues_fdr=feat_int_pvals,
             )
         )
     return results
