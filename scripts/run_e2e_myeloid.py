@@ -585,7 +585,8 @@ def step3_simplex_regression(adata, report):
     # Archetype regression dotplot
     try:
         fig_dot = pc.pl.archetype_regression_dotplot(adata, top_n=10, show=False)
-        html += safe_plotly_html(report, fig_dot, "Archetype regression dotplot (top 10 per archetype)")
+        html += safe_plotly_html(report, fig_dot,
+                                 "Gene regression dotplot (top 10 per archetype, ranked by |β|)")
     except Exception as e:
         html += error_html(f"Regression dotplot failed: {e}")
 
@@ -663,9 +664,9 @@ def step3_simplex_regression(adata, report):
                         elif not j_high and not k_high and abs(gamma) > median_abs:
                             pair_type = "transition-enriched"
                         else:
-                            pair_type = "gradient"
+                            pair_type = "structured"
 
-                        transition = "rising" if gamma > 0 else "falling"
+                        transition = f"rising (A{j+1}\u2192A{k+1})" if gamma > 0 else f"falling (A{j+1}\u2192A{k+1})"
 
                         interaction_rows.append({
                             "Feature": feat_names[feat_idx],
@@ -674,7 +675,7 @@ def step3_simplex_regression(adata, report):
                             "Transition": transition,
                             "beta_j": f"{beta_j:.3f}",
                             "beta_k": f"{beta_k:.3f}",
-                            "gamma": f"{gamma:.3f}",
+                            "Edge \u03b3": f"{gamma:.3f}",
                             "FDR q": fmt_pval(int_fdr[feat_idx, pair_idx]),
                         })
 
@@ -682,18 +683,19 @@ def step3_simplex_regression(adata, report):
                 int_df = pd.DataFrame(interaction_rows)
                 type_counts = int_df["Type"].value_counts()
                 cards = [metric_card(len(interaction_rows), "Significant interactions")]
-                for t in ["tradeoff", "cooperative", "transition-enriched", "gradient"]:
+                for t in ["tradeoff", "cooperative", "transition-enriched", "structured"]:
                     cards.append(metric_card(int(type_counts.get(t, 0)), t.capitalize()))
                 html += metric_grid(cards)
 
                 html += report.text(
                     "Interaction classification: <b>Cooperative</b> = high at both archetypes "
                     "(shared program). <b>Tradeoff</b> = high at one, low at other (distinguishes "
-                    "archetypes). <b>Transition-enriched</b> = peaks in blending zone. "
-                    "<b>Gradient</b> = moderate signal. Transition direction: rising (\u03b3>0) = gene "
-                    "increases along edge; falling (\u03b3<0) = gene decreases.")
+                    "archetypes). <b>Transition-enriched</b> = peaks in blending zone, not at either vertex. "
+                    "<b>Structured</b> = significant interaction, other pattern. "
+                    "Edge \u03b3 direction: rising (\u03b3>0) = gene increases along archetype edge; "
+                    "falling (\u03b3<0) = gene decreases.")
 
-                for itype in ["tradeoff", "cooperative", "transition-enriched", "gradient"]:
+                for itype in ["tradeoff", "cooperative", "transition-enriched", "structured"]:
                     sub = int_df[int_df["Type"] == itype].head(20)
                     if len(sub) > 0:
                         html += report.df_to_html(sub, caption=f"Top {itype} interactions")
@@ -794,7 +796,7 @@ def step3_simplex_regression(adata, report):
                     adata, top_n=10, exclusive_only=True,
                     feature_type="pathways", show=False)
                 html += safe_plotly_html(report, fig_pw_dot,
-                                         "Pathway regression dotplot (exclusive pathways)")
+                                         "Pathway regression dotplot (archetype-exclusive pathways, ranked by |β|)")
             except Exception as e:
                 html += error_html(f"Pathway dotplot failed: {e}")
 
