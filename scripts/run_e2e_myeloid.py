@@ -1277,6 +1277,10 @@ def step6b_diversity_metrics(adata, report):
     X_shifted = X - X.min(axis=1, keepdims=True) + 1e-10
 
     # Alpha diversity: Shannon entropy per cell, averaged per archetype
+    html += report.text(
+        "<b>Alpha diversity (Shannon entropy)</b>: Computed per-cell on the full gene expression "
+        f"matrix ({adata.shape[1]} genes, log-normalized, shifted to non-negative). "
+        "Higher entropy = more uniform expression across genes = less specialized.")
     alpha_rows = []
     for label in arch_labels:
         mask = (adata.obs["archetypes"] == label).values
@@ -1292,7 +1296,32 @@ def step6b_diversity_metrics(adata, report):
     html += report.df_to_html(pd.DataFrame(alpha_rows),
                               caption="Alpha diversity: Shannon entropy of expression per archetype")
 
+    # Null baseline: shuffle archetype labels
+    try:
+        rng = np.random.RandomState(42)
+        null_entropies = []
+        for _ in range(5):
+            shuffled_labels = rng.permutation(adata.obs["archetypes"].values)
+            for label in arch_labels:
+                mask = shuffled_labels == label
+                cells = X_shifted[mask]
+                per_cell_ent = np.array([shannon_entropy(c / c.sum()) for c in cells])
+                null_entropies.append(per_cell_ent.mean())
+        null_mean = np.mean(null_entropies)
+        null_std = np.std(null_entropies)
+        html += report.text(
+            f"<em>Null baseline (shuffled archetype labels, 5 repeats): "
+            f"mean Shannon H = {null_mean:.4f} \u00b1 {null_std:.4f}. "
+            "Observed values deviating from this indicate the archetype assignment "
+            "captures meaningful expression diversity structure.</em>")
+    except Exception as e:
+        html += report.text(f"<em>Null baseline computation failed: {e}</em>")
+
     # Beta diversity: Bray-Curtis between archetype mean profiles
+    html += report.text(
+        "<b>Beta diversity (Bray-Curtis)</b>: Dissimilarity between archetype mean expression "
+        f"profiles ({adata.shape[1]} genes). Range 0-1; 0 = identical profiles, "
+        "1 = completely different.")
     mean_profiles = []
     for label in arch_labels:
         mask = (adata.obs["archetypes"] == label).values
@@ -1326,6 +1355,10 @@ def step6b_diversity_metrics(adata, report):
     # Gene set diversity (if pathway scores available)
     if "pathway_scores" in adata.obsm:
         pw_scores = np.asarray(adata.obsm["pathway_scores"])
+        pw_names = adata.uns.get("pathway_scores_pathways", [])
+        html += report.text(
+            f"<b>Pathway score diversity</b>: Variance of {len(pw_names)} pathway scores "
+            "per archetype. Higher variance = more heterogeneous pathway activity within the archetype.")
         pw_alpha_rows = []
         for label in arch_labels:
             mask = (adata.obs["archetypes"] == label).values
@@ -1341,6 +1374,13 @@ def step6b_diversity_metrics(adata, report):
     # Weight entropy: how committed are cells to one archetype
     weights = np.asarray(adata.obsm.get("cell_archetype_weights", np.array([])))
     if weights.size > 0:
+        K = weights.shape[1] if weights.ndim == 2 else None
+        K_label = str(K) if K is not None else "?"
+        max_entropy_str = f"{np.log(K):.2f}" if K is not None else "?"
+        html += report.text(
+            f"<b>Weight entropy</b>: -\u2211 w_i \u00b7 log(w_i) across {K_label} archetypes per cell. "
+            f"Max possible = {max_entropy_str} (uniform weights). "
+            "Higher = cell is distributed across archetypes; lower = strongly committed to one.")
         w_clipped = np.clip(weights, 1e-10, 1.0)
         weight_entropy = -np.sum(w_clipped * np.log(w_clipped), axis=1)
         entropy_rows = []
@@ -1359,6 +1399,9 @@ def step6b_diversity_metrics(adata, report):
     for condition_col in ["treatment", "pCR"]:
         if condition_col not in adata.obs.columns:
             continue
+        html += report.text(
+            f"<b>Per-{condition_col} diversity</b>: Shannon entropy computed on "
+            f"{adata.shape[1]} genes per cell, averaged across cells in each {condition_col} group.")
         groups = sorted(adata.obs[condition_col].unique())
         cond_rows = []
         for grp in groups:
