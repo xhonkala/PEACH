@@ -1201,16 +1201,17 @@ def step6_within_fit_comparisons(adata, report):
     flow_df = pd.DataFrame(flow_rows)
     html += report.df_to_html(flow_df, caption="Pairwise flow-based archetype comparison")
 
-    # Build K×K similarity matrix (MMD reduction)
+    # Build K×K dissimilarity matrix (1 - MMD reduction)
+    # Higher MMD reduction = easier to transport = more similar; so 1 - MMD_reduction = dissimilarity
     sim_matrix = np.full((K, K), np.nan)
     for _, row in flow_df.iterrows():
         if row["Status"] == "OK":
             i = arch_labels.index(row["Source"])
             j = arch_labels.index(row["Target"])
             val = row["MMD_reduction"]
-            sim_matrix[i, j] = val
-            sim_matrix[j, i] = val
-    np.fill_diagonal(sim_matrix, 1.0)
+            sim_matrix[i, j] = 1.0 - val  # dissimilarity: higher = more different
+            sim_matrix[j, i] = 1.0 - val
+    np.fill_diagonal(sim_matrix, 0.0)  # self-dissimilarity = 0
 
     # Heatmap
     try:
@@ -1222,11 +1223,11 @@ def step6_within_fit_comparisons(adata, report):
             text=np.where(np.isnan(sim_matrix), "", np.round(sim_matrix, 3).astype(str)),
             texttemplate="%{text}", textfont_size=10,
         ))
-        fig.update_layout(title="Flow-based archetype similarity (MMD reduction)",
+        fig.update_layout(title="Flow-based archetype dissimilarity (1 - MMD reduction)",
                           xaxis_title="Target", yaxis_title="Source",
                           width=500, height=450)
         html += safe_plotly_html(report, fig,
-                                 "Flow-based similarity: higher = more similar phenotype after transport")
+                                 "Higher values = more phenotypically distinct archetype pairs")
     except Exception as e:
         html += error_html(f"Flow similarity heatmap failed: {e}")
 
@@ -1545,6 +1546,7 @@ def step8_mixture_models(adata, report):
         decomp_result = pc.tl.feature_simplex_decomposition(
             adata,
             model_type="dirichlet",
+            model_selection="bic_elbow",
             n_initializations=20,
             stability_threshold=0.7,
         )
@@ -1955,9 +1957,14 @@ def step10_per_dose_models(adata, report):
             )
             ranked = cv.rank_by_metric("r2")
             best = ranked[0]
-            best_hp = best["hyperparameters"]
-            best_K = best_hp["n_archetypes"]
-            best_hd = best_hp.get("hidden_dims", [128, 256])
+            # Guard against -inf R² (all configs failed)
+            if best["metric_value"] == float("-inf") or np.isnan(best["metric_value"]):
+                html += error_html(f"{dose}: all CV configs returned -inf R², using K=4 fallback.")
+                best_K, best_hd = 4, [128, 256]
+            else:
+                best_hp = best["hyperparameters"]
+                best_K = best_hp["n_archetypes"]
+                best_hd = best_hp.get("hidden_dims", [128, 256])
 
             # CV search QC
             try:
@@ -2305,7 +2312,7 @@ def step13_sinkhorn_flow(adata, flow_results, report):
         html += f"<h4>Flow: {_flow_label}</h4>"
         log.info(f"  Gene alignment: {pair_key}...")
         try:
-            align = pc.tl.flow_gene_alignment(adata, fr, n_top=30, per_cell=False)
+            align = pc.tl.flow_gene_alignment(adata, fr, n_top=30, per_cell=False, n_permutations=200)
             alignment_results[pair_key] = align
 
             # Significance filtering
@@ -2595,6 +2602,7 @@ def step15_gene_deep_dive(adata, flow_results, jac_results, report):
         try:
             pc.pl.flow_topo_landscape(
                 adata, fr, model, n_features=5, n_eval_points=200, show=False,
+                show_velocity=False,
                 save=os.path.join(OUTPUT_DIR, f"topo_{pair_key}.png"),
             )
             # Read it back for the report
@@ -2632,10 +2640,11 @@ def step15_gene_deep_dive(adata, flow_results, jac_results, report):
                 ax.violinplot(vals, showmedians=True)
                 ax.set_title(gene_names[gi], fontsize=9)
                 ax.axhline(1.0, color="gray", linestyle="--", alpha=0.5)
+                ax.set_ylabel("Expansion score")
                 ax.spines[["top", "right"]].set_visible(False)
             for gi in range(n_show, len(axes)):
                 axes[gi].set_visible(False)
-            fig.suptitle(f"Per-cell expansion: {pair_key}", y=1.02)
+            fig.suptitle(f"Per-cell expansion: {pair_key} (>1 = expanding, <1 = contracting)", y=1.02)
             fig.tight_layout()
             html += report.fig_to_img(fig, caption=f"Per-cell expansion violins: {pair_key}")
             plt.close("all")
