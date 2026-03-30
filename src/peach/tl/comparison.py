@@ -130,6 +130,7 @@ def archetype_contrasts(
     adata: AnnData,
     *,
     robust_se: bool = True,
+    feature_type: str = "genes",
     copy: bool = False,
 ) -> dict:
     """Pairwise Wald contrasts between archetype regression coefficients.
@@ -143,17 +144,20 @@ def archetype_contrasts(
         Must have archetype weights and regression results.
     robust_se : bool
         Use HC3 heteroscedasticity-consistent covariance.
+    feature_type : str
+        Which regression result to use: "genes" (default) or "pathways".
     copy : bool
 
     Returns
     -------
     dict
-        Serialized ArchetypeContrastsResult. Also stored in adata.uns['peach_archetype_contrasts'].
+        Serialized ArchetypeContrastsResult. Also stored in
+        adata.uns['peach_archetype_contrasts_{feature_type}'].
     """
     if copy:
         adata = adata.copy()
 
-    contrasts = compute_wald_contrasts(adata, robust_se=robust_se)
+    contrasts = compute_wald_contrasts(adata, robust_se=robust_se, feature_type=feature_type)
 
     result = ArchetypeContrastsResult(
         pairs=contrasts["pairs"],
@@ -167,5 +171,6 @@ def archetype_contrasts(
         n_archetypes=contrasts["n_archetypes"],
     )
     serialized = result.to_serializable()
-    store_result(adata, "archetype_contrasts", serialized)
+    uns_key = f"archetype_contrasts_{feature_type}"
+    store_result(adata, uns_key, serialized)
     return serialized
