@@ -474,6 +474,7 @@ def archetype_regression_dotplot(
     top_n: int = 10,
     exclusive_only: bool = False,
     degree: int = 1,
+    feature_type: str = "genes",
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
@@ -505,7 +506,7 @@ def archetype_regression_dotplot(
     -------
     go.Figure
     """
-    reg = _get_regression_data(adata)
+    reg = _get_regression_data(adata, feature_type=feature_type)
     coefs = np.asarray(reg["vertex_coefficients"])  # [n_features, K]
     names = list(reg["feature_names"])
     pvals = np.asarray(reg.get("vertex_pvalues", np.ones_like(coefs)))
@@ -517,7 +518,8 @@ def archetype_regression_dotplot(
     for k in range(K):
         top_idx = np.argsort(np.abs(coefs[:, k]))[-top_n:]
         selected.update(top_idx)
-    selected = sorted(selected, key=lambda i: -np.max(np.abs(coefs[i])))
+    # Group features by dominant archetype, then rank by |beta| within group
+    selected = sorted(selected, key=lambda i: (np.argmax(np.abs(coefs[i])), -np.max(np.abs(coefs[i]))))
 
     # Filter to exclusive features if requested
     if exclusive_only:
@@ -543,6 +545,8 @@ def archetype_regression_dotplot(
         apply_style(fig, title="Regression dotplot -- no exclusive features")
         return save_and_show(fig, save_path=save_path, show=show)
 
+    # Group by dominant archetype for visual ordering (no prefix on labels)
+    dom_archs = [np.argmax(np.abs(coefs[i])) for i in selected]
     gene_labels = [names[i] for i in selected]
     arch_labels = [f"A{k+1}" for k in range(K)]
 
@@ -636,6 +640,7 @@ def archetype_radar(
     top_n: int = 10,
     feature_type: str = "genes",
     min_degree: int = 1,
+    order_by_similarity: bool = False,
     show: bool = True,
     save: str | None = None,
 ) -> go.Figure:
@@ -660,6 +665,12 @@ def archetype_radar(
         When set to 2, only include features that have a significant
         degree-2 (interaction) coefficient (FDR q < 0.05 for at least one
         interaction term). Default 1 (no interaction filter).
+    order_by_similarity : bool
+        If True, reorder the archetype spokes using a Fiedler vector
+        (spectral 1D embedding) derived from Spearman correlation between
+        archetype regression coefficient profiles. Adjacent spokes on the
+        radar will have the most similar feature profiles. Default False
+        (uniform angular spacing in archetype index order).
     show : bool
         Whether to display the figure interactively.
     save : str or None
@@ -677,6 +688,32 @@ def archetype_radar(
     coefs = np.asarray(reg["vertex_coefficients"])  # [n_features, K]
     feat_names = list(reg["feature_names"])
     K = coefs.shape[1]
+
+    # ------------------------------------------------------------------
+    # 1b. Optionally reorder archetype spokes by similarity
+    #     (Spearman correlation → Fiedler vector → 1D ordering)
+    # ------------------------------------------------------------------
+    if order_by_similarity and K > 2:
+        from scipy.stats import spearmanr
+        from scipy.sparse.csgraph import laplacian
+
+        # Spearman correlation between archetype coefficient profiles
+        corr_matrix = np.zeros((K, K))
+        for i in range(K):
+            for j in range(K):
+                corr_matrix[i, j], _ = spearmanr(coefs[:, i], coefs[:, j])
+        # Similarity-based Laplacian → Fiedler vector for 1D embedding
+        sim_matrix = np.maximum(0, corr_matrix)  # clip negatives for Laplacian
+        np.fill_diagonal(sim_matrix, 0)
+        L = laplacian(sim_matrix, normed=True)
+        _eigenvalues, eigenvectors = np.linalg.eigh(L)
+        fiedler = eigenvectors[:, 1]  # second smallest eigenvalue
+        order = np.argsort(fiedler)
+        # Reorder archetype columns and update labels
+        coefs = coefs[:, order]
+        arch_labels_ordered = [f"A{order[k]+1}" for k in range(K)]
+    else:
+        arch_labels_ordered = [f"A{k+1}" for k in range(K)]
 
     # ------------------------------------------------------------------
     # 2. Select top_n features per archetype (union), then truncate
@@ -725,7 +762,7 @@ def archetype_radar(
         sel_names.append(name)
 
     n_features = len(selected_idx)
-    arch_labels = [f"A{k+1}" for k in range(K)]
+    arch_labels = arch_labels_ordered
 
     # ------------------------------------------------------------------
     # 3. Build radar plot
@@ -734,7 +771,7 @@ def archetype_radar(
     theta_labels = arch_labels + [arch_labels[0]]  # close polygon
 
     fig = go.Figure()
-    for fi, (feat_idx, feat_label) in enumerate(zip(selected_idx, sel_names)):
+    for fi, feat_label in enumerate(sel_names):
         r_vals = abs_coefs[fi].tolist()
         r_vals_closed = r_vals + [r_vals[0]]
         color = CATEGORICAL_PALETTE[fi % len(CATEGORICAL_PALETTE)]
