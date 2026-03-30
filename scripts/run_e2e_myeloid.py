@@ -1247,6 +1247,125 @@ def step6_within_fit_comparisons(adata, report):
     return flow_df
 
 
+def step6b_diversity_metrics(adata, report):
+    """Step 6b: Alpha and beta diversity of gene expression per archetype."""
+    from scipy.stats import entropy as shannon_entropy
+    from scipy.spatial.distance import braycurtis, pdist, squareform
+
+    html = ""
+
+    if "archetypes" not in adata.obs.columns:
+        html += error_html("No 'archetypes' column — skipping diversity metrics.")
+        report.add_section("Diversity Metrics", html, step_num="6b")
+        return
+
+    arch_labels = sorted([a for a in adata.obs["archetypes"].unique()
+                          if a != "no_archetype" and not pd.isna(a)])
+
+    # Get expression matrix (dense)
+    X = np.asarray(adata.X.todense()) if hasattr(adata.X, "todense") else np.asarray(adata.X)
+    # Shift to non-negative for entropy (X is log-normalized, may have negatives)
+    X_shifted = X - X.min(axis=1, keepdims=True) + 1e-10
+
+    # Alpha diversity: Shannon entropy per cell, averaged per archetype
+    alpha_rows = []
+    for label in arch_labels:
+        mask = (adata.obs["archetypes"] == label).values
+        cells = X_shifted[mask]
+        per_cell_ent = np.array([shannon_entropy(c / c.sum()) for c in cells])
+        alpha_rows.append({
+            "Archetype": label,
+            "N cells": int(mask.sum()),
+            "Mean Shannon H": f"{per_cell_ent.mean():.4f}",
+            "Median Shannon H": f"{np.median(per_cell_ent):.4f}",
+            "Std Shannon H": f"{per_cell_ent.std():.4f}",
+        })
+    html += report.df_to_html(pd.DataFrame(alpha_rows),
+                              caption="Alpha diversity: Shannon entropy of expression per archetype")
+
+    # Beta diversity: Bray-Curtis between archetype mean profiles
+    mean_profiles = []
+    for label in arch_labels:
+        mask = (adata.obs["archetypes"] == label).values
+        mean_profiles.append(X_shifted[mask].mean(axis=0))
+    mean_profiles = np.array(mean_profiles)
+
+    bc_matrix = squareform(pdist(mean_profiles, metric="braycurtis"))
+    bc_df = pd.DataFrame(bc_matrix,
+                         index=[f"A{i+1}" for i in range(len(arch_labels))],
+                         columns=[f"A{i+1}" for i in range(len(arch_labels))])
+    html += report.df_to_html(bc_df.round(4),
+                              caption="Beta diversity: Bray-Curtis between archetype mean profiles")
+
+    # Bray-Curtis heatmap
+    try:
+        import plotly.graph_objects as go
+        arch_short = [f"A{i+1}" for i in range(len(arch_labels))]
+        fig = go.Figure(data=go.Heatmap(
+            z=bc_matrix, x=arch_short, y=arch_short,
+            colorscale="Viridis",
+            text=np.round(bc_matrix, 3).astype(str),
+            texttemplate="%{text}", textfont_size=10,
+        ))
+        fig.update_layout(title="Bray-Curtis dissimilarity between archetypes",
+                          width=500, height=450)
+        html += safe_plotly_html(report, fig,
+                                 "Bray-Curtis (0=identical, 1=completely different)")
+    except Exception as e:
+        html += error_html(f"Bray-Curtis heatmap failed: {e}")
+
+    # Gene set diversity (if pathway scores available)
+    if "pathway_scores" in adata.obsm:
+        pw_scores = np.asarray(adata.obsm["pathway_scores"])
+        pw_alpha_rows = []
+        for label in arch_labels:
+            mask = (adata.obs["archetypes"] == label).values
+            pw_cells = pw_scores[mask]
+            pw_var = pw_cells.var(axis=0).mean()
+            pw_alpha_rows.append({
+                "Archetype": label,
+                "Mean pathway score variance": f"{pw_var:.4f}",
+            })
+        html += report.df_to_html(pd.DataFrame(pw_alpha_rows),
+                                  caption="Pathway score diversity per archetype")
+
+    # Weight entropy: how committed are cells to one archetype
+    weights = np.asarray(adata.obsm.get("cell_archetype_weights", np.array([])))
+    if weights.size > 0:
+        w_clipped = np.clip(weights, 1e-10, 1.0)
+        weight_entropy = -np.sum(w_clipped * np.log(w_clipped), axis=1)
+        entropy_rows = []
+        for label in arch_labels:
+            mask = (adata.obs["archetypes"] == label).values
+            ent = weight_entropy[mask]
+            entropy_rows.append({
+                "Archetype": label,
+                "Mean weight entropy": f"{ent.mean():.4f}",
+                "Median": f"{np.median(ent):.4f}",
+            })
+        html += report.df_to_html(pd.DataFrame(entropy_rows),
+                                  caption="Archetype weight entropy (higher = less committed)")
+
+    # Per-condition diversity
+    for condition_col in ["treatment", "pCR"]:
+        if condition_col not in adata.obs.columns:
+            continue
+        groups = sorted(adata.obs[condition_col].unique())
+        cond_rows = []
+        for grp in groups:
+            mask = (adata.obs[condition_col] == grp).values
+            cells = X_shifted[mask]
+            per_cell_ent = np.array([shannon_entropy(c / c.sum()) for c in cells])
+            cond_rows.append({
+                "Group": str(grp), "N cells": int(mask.sum()),
+                "Mean Shannon H": f"{per_cell_ent.mean():.4f}",
+            })
+        html += report.df_to_html(pd.DataFrame(cond_rows),
+                                  caption=f"Expression diversity by {condition_col}")
+
+    report.add_section("Diversity Metrics (Prototype)", html, step_num="6b")
+
+
 def step7_driver_regression(adata, report):
     """Step 7: Driver regression (features predict archetype weights)."""
     import peach as pc
@@ -2951,6 +3070,15 @@ def main():
         log.error(f"Step 6 failed: {e}", exc_info=True)
         report.add_section("Within-Fit Comparisons (Flow + Feature Similarity)",
                            error_html(f"Step 6 failed: {e}"), step_num=6)
+
+    # -- Step 6b (diversity) --------------------------------------------------
+    t0 = time.time()
+    try:
+        step6b_diversity_metrics(adata, report)
+        log.info(f"Step 6b done in {time.time() - t0:.1f}s")
+    except Exception as e:
+        log.error(f"Step 6b failed: {e}", exc_info=True)
+        report.add_section("Diversity Metrics", error_html(f"Step 6b failed: {e}"), step_num="6b")
 
     # Save checkpoint
     safe_save_h5ad(adata,os.path.join(OUTPUT_DIR, "adata_step6.h5ad"))
