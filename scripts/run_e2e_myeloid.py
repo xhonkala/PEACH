@@ -91,7 +91,8 @@ log = logging.getLogger("e2e_myeloid")
 # ---------------------------------------------------------------------------
 DATA_PATH = "/Users/honkala/Desktop/FRTNBC/data/tnbc_myeloid_preprocessed.h5ad"
 OUTPUT_DIR = "outputs/e2e_myeloid"
-REPORT_PATH = os.path.join(OUTPUT_DIR, "e2e_myeloid_report.html")
+_DATE_TAG = time.strftime("%Y%m%d")
+REPORT_PATH = os.path.join(OUTPUT_DIR, f"e2e_myeloid_report_{_DATE_TAG}.html")
 
 
 # ============================================================================
@@ -586,14 +587,14 @@ def step3_simplex_regression(adata, report):
     try:
         fig_dot = pc.pl.archetype_regression_dotplot(adata, top_n=10, show=False)
         html += safe_plotly_html(report, fig_dot,
-                                 "Gene regression dotplot (top 10 per archetype, ranked by |β|)")
+                                 "Gene regression dotplot: all features, top 10 per archetype (ranked by |β|)")
     except Exception as e:
         html += error_html(f"Regression dotplot failed: {e}")
 
     # Archetype radar
     try:
         fig_radar = pc.pl.archetype_radar(adata, top_n=8, order_by_similarity=True, show=False)
-        html += safe_plotly_html(report, fig_radar, "Archetype radar (top features)")
+        html += safe_plotly_html(report, fig_radar, "Archetype radar: all features, top 8 per archetype (ranked by |β|)")
     except Exception as e:
         html += error_html(f"Archetype radar failed: {e}")
 
@@ -796,7 +797,7 @@ def step3_simplex_regression(adata, report):
                     adata, top_n=10, exclusive_only=True,
                     feature_type="pathways", show=False)
                 html += safe_plotly_html(report, fig_pw_dot,
-                                         "Pathway regression dotplot (archetype-exclusive pathways, ranked by |β|)")
+                                         "Pathway regression dotplot: exclusive pathways, top 10 per archetype (ranked by |β|)")
             except Exception as e:
                 html += error_html(f"Pathway dotplot failed: {e}")
 
@@ -806,7 +807,7 @@ def step3_simplex_regression(adata, report):
                     adata, top_n=8, feature_type="pathways",
                     order_by_similarity=True, show=False)
                 html += safe_plotly_html(report, fig_pw_radar,
-                                         "Pathway radar (similarity-ordered)")
+                                         "Pathway radar: all pathways, top 8 per archetype (ranked by |β|, similarity-ordered)")
             except Exception as e:
                 html += error_html(f"Pathway radar failed: {e}")
 
@@ -1549,6 +1550,11 @@ def step7_driver_regression(adata, report):
                 simplex_only = top50_simplex - top50_driver
                 driver_only = top50_driver - top50_simplex
 
+                html += report.text(
+                    "<b>Method comparison</b>: 'Simplex-only' = features ranked highly by simplex regression R\u00b2 "
+                    "but NOT in the driver regression top list. 'Driver-only' = features with high ILR driver "
+                    "coefficients but low simplex R\u00b2. 'Shared' = top features in both methods. "
+                    "Concordance indicates robust archetype-feature associations.")
                 html += metric_grid([
                     metric_card(len(shared), "Shared top-50"),
                     metric_card(len(simplex_only), "Simplex-only"),
@@ -2125,7 +2131,7 @@ def step11_per_dose_regression(dose_adatas, report):
         try:
             fig_dot = pc.pl.archetype_regression_dotplot(sub, top_n=10, exclusive_only=True, show=False)
             html += report.plotly_to_div(fig_dot,
-                                         caption=f"{dose}: archetype-exclusive top features (|beta| size, -log10p color)")
+                                         caption=f"Exclusive gene features: {dose}, top 10 per archetype (ranked by |β|)")
         except Exception as e:
             html += error_html(f"{dose}: dotplot failed: {e}")
 
@@ -2727,6 +2733,10 @@ def step16_per_response(adata, report):
         K = global_K.shape[1]
     else:
         K = 5
+    html += report.text(
+        f"<b>Note:</b> Per-response models use global K={K} (from step 2 model) "
+        "rather than running separate hyperparameter searches. This ensures archetype "
+        "comparability across response groups.")
 
     hidden_dims = [128, 256]
 
@@ -2747,6 +2757,13 @@ def step16_per_response(adata, report):
         res = run_subset_model(sub, K=K, hidden_dims=hidden_dims, label=f"pCR={resp}")
         if res is None:
             continue
+
+        # Ensure archetype coordinates are computed for plotting
+        try:
+            if "archetype_coordinates" not in sub.obsm:
+                pc.tl.archetypal_coordinates(sub)
+        except Exception:
+            pass
 
         response_adatas[resp] = sub
         r2 = res.get("final_archetype_r2", float("nan"))
@@ -2775,7 +2792,7 @@ def step16_per_response(adata, report):
             fig_dot = pc.pl.archetype_regression_dotplot(
                 sub, top_n=10, exclusive_only=True, show=False)
             html += safe_plotly_html(report, fig_dot,
-                                     f"Exclusive features: pCR={resp}")
+                                     f"Exclusive gene features: pCR={resp}, top 10 per archetype (ranked by |β|)")
         except Exception as e:
             html += error_html(f"Dotplot pCR={resp} failed: {e}")
 
@@ -2785,7 +2802,7 @@ def step16_per_response(adata, report):
                     sub, top_n=10, exclusive_only=True,
                     feature_type="pathways", show=False)
                 html += safe_plotly_html(report, fig_pw,
-                                         f"Exclusive pathways: pCR={resp}")
+                                         f"Exclusive pathway features: pCR={resp}, top 10 per archetype (ranked by |β|)")
             except Exception as e:
                 html += error_html(f"Pathway dotplot pCR={resp} failed: {e}")
 
@@ -2926,7 +2943,7 @@ def step17_per_response_per_dose(adata, report):
                     fig_dot = pc.pl.archetype_regression_dotplot(
                         sub, top_n=10, exclusive_only=True, show=False)
                     html += safe_plotly_html(report, fig_dot,
-                                             f"Exclusive features: {label}")
+                                             f"Exclusive gene features: {label}, top 10 per archetype (ranked by |β|)")
                 except Exception as e_dot:
                     html += error_html(f"Dotplot {label} failed: {e_dot}")
 
@@ -2936,7 +2953,7 @@ def step17_per_response_per_dose(adata, report):
                             sub, top_n=10, exclusive_only=True,
                             feature_type="pathways", show=False)
                         html += safe_plotly_html(report, fig_pw,
-                                                 f"Exclusive pathways: {label}")
+                                                 f"Exclusive pathway features: {label}, top 10 per archetype (ranked by |β|)")
                     except Exception as e_pw:
                         html += error_html(f"Pathway dotplot {label} failed: {e_pw}")
 
@@ -3038,7 +3055,7 @@ def main():
     import peach as pc
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    report = HTMLReport("PEACH v0.5 -- Myeloid End-to-End Analysis")
+    report = HTMLReport(f"PEACH v0.5 -- Myeloid End-to-End Analysis ({_DATE_TAG})")
 
     # Load data
     log.info(f"Loading data from {DATA_PATH}...")
