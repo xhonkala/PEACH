@@ -1255,18 +1255,37 @@ def step7_driver_regression(adata, report):
 
     # Use pathway scores if available, else genes
     has_pathways = "pathway_scores" in adata.obsm
-    if has_pathways:
-        feat_label = "pathway_scores"
-    else:
-        feat_label = None
+    feat_label = "pathway_scores" if has_pathways else None
+    feat_matrix_arg = feat_label  # default: pass key string
+    feat_names_arg = None  # default: infer from adata
+
+    if not has_pathways:
         html += report.text("Warning: No pathway scores available. "
                             "Driver regression on full gene set may be underdetermined.")
+
+    # Filter pathways by variance to avoid singular design matrix
+    if has_pathways:
+        pw_scores = adata.obsm.get("pathway_scores")
+        if pw_scores is not None:
+            pw_var = np.var(pw_scores, axis=0)
+            K_arch = adata.obsm.get("cell_archetype_weights", np.empty((0, 5))).shape[1]
+            n_keep = min(pw_scores.shape[1], max(20, K_arch * 4))
+            top_pw_idx = np.argsort(pw_var)[-n_keep:]
+            pw_names_all = adata.uns.get("pathway_scores_pathways",
+                                         [f"pw_{i}" for i in range(pw_scores.shape[1])])
+            feat_names_arg = [pw_names_all[i] for i in top_pw_idx]
+            feat_matrix_arg = pw_scores[:, top_pw_idx]
+            log.info(f"  Pathway driver regression: keeping {n_keep}/{pw_scores.shape[1]} "
+                     f"pathways by variance (K={K_arch})")
+            html += report.text(f"Pathway variance filter: {n_keep}/{pw_scores.shape[1]} pathways "
+                                f"retained (top by variance, max(20, K×4)={n_keep}).")
 
     log.info(f"Running driver regression (feature_matrix={feat_label}, degree=1)...")
     try:
         driver_result = pc.tl.archetype_driver_regression(
             adata,
-            feature_matrix=feat_label,
+            feature_matrix=feat_matrix_arg,
+            feature_names=feat_names_arg,
             max_degree=1,  # degree=2 creates too many interaction terms
             n_bootstrap=500,
             robust_se=True,
@@ -1368,6 +1387,25 @@ def step7_driver_regression(adata, report):
                 overlap_rows += [{"Feature": g, "Source": "simplex-only"} for g in sorted(simplex_only)[:10]]
                 overlap_rows += [{"Feature": g, "Source": "driver-only"} for g in sorted(driver_only)[:10]]
                 html += report.df_to_html(pd.DataFrame(overlap_rows), caption="Feature overlap: simplex R² top 50 vs driver |β| top 50")
+
+                # Shared features: coefficient comparison table
+                if shared:
+                    # Build lookup dicts: feature -> scalar summary
+                    simplex_r2_lookup = dict(zip(simplex_names, simplex_r2.tolist()))
+                    driver_max_beta = np.abs(np.asarray(driver_result["main_coefficients"])).max(axis=0)
+                    driver_beta_lookup = dict(zip(driver_names, driver_max_beta.tolist()))
+                    shared_rows = []
+                    for feat in sorted(shared)[:30]:
+                        row = {"Feature": feat}
+                        if feat in simplex_r2_lookup:
+                            row["Simplex R\u00b2"] = f"{simplex_r2_lookup[feat]:.3f}"
+                        if feat in driver_beta_lookup:
+                            row["Driver max|\u03b2|"] = f"{driver_beta_lookup[feat]:.3f}"
+                        shared_rows.append(row)
+                    html += report.df_to_html(
+                        pd.DataFrame(shared_rows),
+                        caption="Shared top features: simplex R\u00b2 vs driver regression max|\u03b2|"
+                    )
         except Exception as e:
             html += error_html(f"Feature overlap analysis failed: {e}")
 
@@ -1498,8 +1536,126 @@ def step9_component_characterization(adata, report):
         except Exception as e:
             html += error_html(f"Component heatmap failed: {e}")
 
+        # Pathway characterization per component
+        if "pathway_scores" in adata.obsm:
+            try:
+                log.info("  Component pathway characterization...")
+                pw_comp = pc.tl.component_regression(adata, feature_type="pathway_scores")
+                pw_comp_regs = pw_comp.get("component_regs", {})
+                if pw_comp_regs:
+                    html += report.text("Pathway characterization per component:")
+                    pw_comp_rows = []
+                    for c, reg in pw_comp_regs.items():
+                        r2_pw = np.asarray(reg["r_squared_degree1"])
+                        fn_pw = reg.get("feature_names", [])
+                        if len(fn_pw) == 0:
+                            continue
+                        top_idx_pw = np.argmax(r2_pw)
+                        pw_comp_rows.append({
+                            "Component": c,
+                            "N pathways": len(r2_pw),
+                            "Mean R\u00b2": f"{r2_pw.mean():.4f}",
+                            "Top pathway": fn_pw[top_idx_pw],
+                            "Top R\u00b2": f"{r2_pw[top_idx_pw]:.4f}",
+                        })
+                    if pw_comp_rows:
+                        html += report.df_to_html(
+                            pd.DataFrame(pw_comp_rows),
+                            caption="Per-component pathway regression summary"
+                        )
+            except Exception as e:
+                html += error_html(f"Pathway component characterization failed: {e}")
+
     except Exception as e:
         html += error_html(f"Component regression failed: {e}")
+
+    # Component-archetype similarity: raw metrics
+    gmm_raw = adata.uns.get("peach_gmm")
+    if gmm_raw is not None:
+        try:
+            from sklearn.metrics import adjusted_rand_score
+
+            assignments_raw = np.asarray(gmm_raw["component_assignments"])
+            weights_raw = adata.obsm.get("cell_archetype_weights")
+            arch_labels_raw = adata.obs.get("archetypes")
+
+            ari_value = None
+            majority_acc = None
+            mean_mmd = None
+
+            # ARI between GMM components and hard archetype assignments
+            if arch_labels_raw is not None:
+                arch_int = pd.Categorical(arch_labels_raw).codes
+                valid_mask = (assignments_raw >= 0) & (arch_int >= 0)
+                if valid_mask.sum() > 10:
+                    ari_value = adjusted_rand_score(
+                        arch_int[valid_mask], assignments_raw[valid_mask]
+                    )
+
+            # Majority-vote accuracy (for each component, how pure is its archetype?)
+            if weights_raw is not None and gmm_raw.get("n_components_stable", 0) > 0:
+                n_stable_raw = int(gmm_raw["n_components_stable"])
+                weights_arr = np.asarray(weights_raw)
+                hard_arch = np.argmax(weights_arr, axis=1)
+                vote_accs = []
+                for c in range(n_stable_raw):
+                    comp_mask = assignments_raw == c
+                    if comp_mask.sum() < 5:
+                        continue
+                    arch_in_comp = hard_arch[comp_mask]
+                    majority_frac = np.bincount(arch_in_comp).max() / comp_mask.sum()
+                    vote_accs.append(majority_frac)
+                if vote_accs:
+                    majority_acc = float(np.mean(vote_accs))
+
+            # Mean pairwise MMD in archetype weight space
+            if weights_raw is not None and gmm_raw.get("n_components_stable", 0) > 1:
+                n_stable_raw = int(gmm_raw["n_components_stable"])
+                weights_arr = np.asarray(weights_raw)
+                mmd_vals = []
+                for ca in range(n_stable_raw):
+                    for cb in range(ca + 1, n_stable_raw):
+                        xa = weights_arr[assignments_raw == ca]
+                        xb = weights_arr[assignments_raw == cb]
+                        if len(xa) < 5 or len(xb) < 5:
+                            continue
+                        # Unbiased MMD^2 with RBF kernel (bandwidth = median heuristic)
+                        n_sub = min(500, len(xa), len(xb))
+                        rng_mmd = np.random.default_rng(42)
+                        xa_sub = xa[rng_mmd.choice(len(xa), n_sub, replace=False)]
+                        xb_sub = xb[rng_mmd.choice(len(xb), n_sub, replace=False)]
+                        all_x = np.vstack([xa_sub, xb_sub])
+                        sq_dists = np.sum((all_x[:, None] - all_x[None, :]) ** 2, axis=-1)
+                        bw = np.median(sq_dists[sq_dists > 0]) or 1.0
+                        K_aa = np.exp(-sq_dists[:n_sub, :n_sub] / bw)
+                        K_bb = np.exp(-sq_dists[n_sub:, n_sub:] / bw)
+                        K_ab = np.exp(-sq_dists[:n_sub, n_sub:] / bw)
+                        np.fill_diagonal(K_aa, 0)
+                        np.fill_diagonal(K_bb, 0)
+                        mmd2 = (K_aa.sum() / (n_sub * (n_sub - 1))
+                                + K_bb.sum() / (n_sub * (n_sub - 1))
+                                - 2 * K_ab.mean())
+                        mmd_vals.append(float(np.sqrt(max(mmd2, 0))))
+                if mmd_vals:
+                    mean_mmd = float(np.mean(mmd_vals))
+
+            raw_metrics = []
+            if ari_value is not None:
+                raw_metrics.append({"Metric": "Adjusted Rand Index (GMM vs archetype)",
+                                    "Value": f"{ari_value:.4f}"})
+            if majority_acc is not None:
+                raw_metrics.append({"Metric": "Mean majority-vote archetype purity",
+                                    "Value": f"{majority_acc:.4f}"})
+            if mean_mmd is not None:
+                raw_metrics.append({"Metric": "Mean pairwise MMD (archetype weight space)",
+                                    "Value": f"{mean_mmd:.4f}"})
+            if raw_metrics:
+                html += report.df_to_html(
+                    pd.DataFrame(raw_metrics),
+                    caption="Component-archetype similarity: raw metrics"
+                )
+        except Exception as e:
+            html += error_html(f"Component-archetype raw metrics failed: {e}")
 
     # Component conditional associations
     gmm_data = adata.uns.get("peach_gmm")
