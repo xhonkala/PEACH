@@ -300,11 +300,21 @@ def compute_wald_contrasts(
     adata: AnnData,
     *,
     robust_se: bool = True,
+    feature_type: str = "genes",
 ) -> dict:
     """Pairwise Wald contrasts beta_k - beta_j with SEs from regression covariance.
 
     Re-runs degree-1 regression with return_covariance=True, then computes
     contrasts for all K*(K-1)/2 pairs.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data matrix with archetype weights and regression results.
+    robust_se : bool
+        Use HC3 heteroscedasticity-consistent standard errors.
+    feature_type : str
+        Which regression result to use: "genes" (default) or "pathways".
 
     Returns
     -------
@@ -313,10 +323,11 @@ def compute_wald_contrasts(
     """
     from statsmodels.stats.multitest import multipletests
 
-    reg = resolve_regression_result(adata, feature_type="genes")
+    reg = resolve_regression_result(adata, feature_type=feature_type)
     if reg is None:
         raise ValueError(
-            "No regression results. Run pc.tl.feature_simplex_regression() first."
+            f"No regression results for feature_type='{feature_type}'. "
+            "Run pc.tl.feature_simplex_regression() first."
         )
 
     weights = get_archetype_weights(adata)

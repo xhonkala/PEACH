@@ -950,27 +950,73 @@ def step5_wald_contrasts(adata, report, gene_reg):
     except Exception as e:
         html += error_html(f"Contrast volcano grid failed: {e}")
 
-    # Top contrasts table (top 20 across all pairs)
+    # Top contrasts table (top 30 across all pairs, grouped by Direction)
     top_rows = []
+    # Also collect per-gene per-pair directions for multi-pair confusion matrix
+    gene_pair_directions = {}  # gene -> {pair_label -> "+"/"-"}
+    all_pair_labels = [
+        f"A{(pair[0] if isinstance(pair, (list, tuple)) else pair[0])+1}-"
+        f"A{(pair[1] if isinstance(pair, (list, tuple)) else pair[1])+1}"
+        for pair in pairs
+    ]
     for pair in pairs:
         pair_key = str(tuple(pair) if isinstance(pair, list) else pair)
         pvals = np.asarray(contrast_result["pvalues_fdr"][pair_key])
         delta = np.asarray(contrast_result["delta_beta"][pair_key])
         j, k = pair if isinstance(pair, (list, tuple)) else (pair[0], pair[1])
+        pair_label = f"A{j+1}-A{k+1}"
         for feat_idx in range(len(feature_names)):
             if pvals[feat_idx] < 0.05:
+                direction = "+" if delta[feat_idx] > 0 else "-"
                 top_rows.append({
                     "Feature": feature_names[feat_idx],
                     "Pair": f"A{j+1} vs A{k+1}",
+                    "Direction": direction,
                     "delta_beta": delta[feat_idx],
                     "FDR q": pvals[feat_idx],
                 })
+                gene = feature_names[feat_idx]
+                if gene not in gene_pair_directions:
+                    gene_pair_directions[gene] = {}
+                gene_pair_directions[gene][pair_label] = direction
     if top_rows:
-        top_df = pd.DataFrame(top_rows).sort_values("FDR q").head(30)
+        top_df = pd.DataFrame(top_rows)
+        # Sort by Direction (ascending: + before -) then by |delta_beta| descending
+        top_df["abs_delta"] = top_df["delta_beta"].abs()
+        top_df = top_df.sort_values(["Direction", "abs_delta"], ascending=[True, False])
+        top_df = top_df.drop(columns=["abs_delta"]).head(30)
         top_df["FDR q"] = top_df["FDR q"].apply(fmt_pval)
-        html += report.df_to_html(top_df, caption="Top 30 significant contrasts (by FDR q)")
+        html += report.df_to_html(top_df, caption="Top 30 significant contrasts (grouped by Direction, sorted by |delta-beta|)")
     else:
         html += report.text("No significant contrasts at FDR < 0.05.")
+
+    # Multi-pair confusion matrix: genes significant in ≥2 pairs
+    multi_genes = {
+        gene: directions
+        for gene, directions in gene_pair_directions.items()
+        if len(directions) >= 2
+    }
+    if multi_genes:
+        matrix_rows = []
+        for gene_name, gene_dir in sorted(multi_genes.items()):
+            row = {"Gene": gene_name}
+            for pair_label in all_pair_labels:
+                row[pair_label] = gene_dir.get(pair_label, "")
+            # Count pairs where this gene is significant
+            row["N pairs"] = len(gene_dir)
+            matrix_rows.append(row)
+        conf_df = pd.DataFrame(matrix_rows).set_index("Gene")
+        # Sort by number of significant pairs descending
+        conf_df = conf_df.sort_values("N pairs", ascending=False)
+        html += report.df_to_html(
+            conf_df,
+            caption=(
+                f"Multi-pair contrast direction matrix ({len(multi_genes)} genes significant in ≥2 pairs; "
+                "+ = up in first archetype, - = down)"
+            ),
+        )
+    else:
+        html += report.text("No genes were significant across multiple archetype pairs.")
 
     # Overlap with 2nd-degree interaction terms
     try:
@@ -1009,6 +1055,74 @@ def step5_wald_contrasts(adata, report, gene_reg):
                 )
     except Exception as e:
         html += error_html(f"Overlap analysis failed: {e}")
+
+    # Pathway contrasts (if pathway regression results exist)
+    has_pathway_reg = "peach_simplex_regression_pathways" in adata.uns
+    if has_pathway_reg:
+        try:
+            log.info("Computing Wald contrasts for pathways...")
+            pathway_contrast = pc.tl.archetype_contrasts(adata, feature_type="pathways")
+            pw_pairs = pathway_contrast.get("pairs", [])
+            pw_feature_names = list(pathway_contrast.get("feature_names", []))
+            html += report.text(
+                f"Pathway Wald contrasts: {len(pw_pairs)} pairs across {len(pw_feature_names)} pathway features."
+            )
+            # Summary table
+            pw_summary_rows = []
+            for pair in pw_pairs:
+                pair_key = str(tuple(pair) if isinstance(pair, list) else pair)
+                pw_pvals = np.asarray(pathway_contrast["pvalues_fdr"][pair_key])
+                pw_delta = np.asarray(pathway_contrast["delta_beta"][pair_key])
+                j, k = pair if isinstance(pair, (list, tuple)) else (pair[0], pair[1])
+                pw_summary_rows.append({
+                    "Pair": f"A{j+1} vs A{k+1}",
+                    "N significant (FDR<0.05)": int((pw_pvals < 0.05).sum()),
+                    "Mean |delta-beta|": f"{np.abs(pw_delta).mean():.4f}",
+                    "Max |delta-beta|": f"{np.abs(pw_delta).max():.4f}",
+                })
+            if pw_summary_rows:
+                html += report.df_to_html(
+                    pd.DataFrame(pw_summary_rows),
+                    caption="Pairwise Wald contrast summary — pathways",
+                )
+            # Top pathway contrasts grouped by Direction
+            pw_top_rows = []
+            for pair in pw_pairs:
+                pair_key = str(tuple(pair) if isinstance(pair, list) else pair)
+                pw_pvals = np.asarray(pathway_contrast["pvalues_fdr"][pair_key])
+                pw_delta = np.asarray(pathway_contrast["delta_beta"][pair_key])
+                j, k = pair if isinstance(pair, (list, tuple)) else (pair[0], pair[1])
+                for feat_idx in range(len(pw_feature_names)):
+                    if pw_pvals[feat_idx] < 0.05:
+                        direction = "+" if pw_delta[feat_idx] > 0 else "-"
+                        pw_top_rows.append({
+                            "Pathway": pw_feature_names[feat_idx],
+                            "Pair": f"A{j+1} vs A{k+1}",
+                            "Direction": direction,
+                            "delta_beta": pw_delta[feat_idx],
+                            "FDR q": pw_pvals[feat_idx],
+                        })
+            if pw_top_rows:
+                pw_top_df = pd.DataFrame(pw_top_rows)
+                pw_top_df["abs_delta"] = pw_top_df["delta_beta"].abs()
+                pw_top_df = pw_top_df.sort_values(
+                    ["Direction", "abs_delta"], ascending=[True, False]
+                )
+                pw_top_df = pw_top_df.drop(columns=["abs_delta"]).head(30)
+                pw_top_df["FDR q"] = pw_top_df["FDR q"].apply(fmt_pval)
+                html += report.df_to_html(
+                    pw_top_df,
+                    caption="Top 30 significant pathway contrasts (grouped by Direction, sorted by |delta-beta|)",
+                )
+            else:
+                html += report.text("No significant pathway contrasts at FDR < 0.05.")
+        except Exception as e:
+            html += error_html(f"Pathway contrasts failed: {e}")
+    else:
+        html += report.text(
+            "Pathway Wald contrasts skipped: no pathway regression results found "
+            "(peach_simplex_regression_pathways not in adata.uns)."
+        )
 
     report.add_section("Wald Contrasts", html, step_num=5)
     return contrast_result
