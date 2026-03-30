@@ -61,6 +61,23 @@ def classify_feature_patterns(
     # Pass SEs for SE-aware exclusive classification
     vertex_ses = getattr(regression_result, "vertex_se", None)
 
+    # Extract per-pair interaction data (may not exist for degree-1 only)
+    int_coefs = (
+        regression_result.get("interaction_coefficients")
+        if hasattr(regression_result, "get")
+        else getattr(regression_result, "interaction_coefficients", None)
+    )
+    int_pairs = (
+        regression_result.get("interaction_pairs")
+        if hasattr(regression_result, "get")
+        else getattr(regression_result, "interaction_pairs", None)
+    )
+    int_pvals_fdr = (
+        regression_result.get("interaction_pvalues_fdr")
+        if hasattr(regression_result, "get")
+        else getattr(regression_result, "interaction_pvalues_fdr", None)
+    )
+
     classifications = classify_all_features(
         vertex_coefficients=regression_result.vertex_coefficients,
         r_squared=regression_result.r_squared_degree1,
@@ -69,6 +86,9 @@ def classify_feature_patterns(
         fdr_threshold=fdr_threshold,
         exclusive_ratio=exclusive_ratio,
         vertex_ses=vertex_ses,
+        interaction_coefficients=np.asarray(int_coefs) if int_coefs is not None else None,
+        interaction_pairs=int_pairs if int_pairs else None,
+        interaction_pvalues_fdr=np.asarray(int_pvals_fdr) if int_pvals_fdr is not None else None,
     )
 
     # Count patterns
