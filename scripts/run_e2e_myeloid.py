@@ -1284,6 +1284,43 @@ def step6_within_fit_comparisons(adata, report):
     except Exception as e:
         html += error_html(f"Flow similarity heatmap failed: {e}")
 
+    # Randomized null: shuffle archetype labels, compute flow for 3 random pairs
+    try:
+        rng = np.random.RandomState(42)
+        null_reductions = []
+        shuffled_labels = rng.permutation(adata.obs["archetypes"].values)
+        # Pick 3 random pairs from the actual pairs
+        null_pairs = flow_pairs[:min(3, len(flow_pairs))]
+        for src_label, tgt_label in null_pairs:
+            # Create temporary column with shuffled labels
+            adata.obs["_shuffled_arch"] = shuffled_labels
+            n_src_s = int((adata.obs["_shuffled_arch"] == src_label).sum())
+            n_tgt_s = int((adata.obs["_shuffled_arch"] == tgt_label).sum())
+            if n_src_s >= 50 and n_tgt_s >= 50:
+                fr_null = pc.tl.flow_within(
+                    adata,
+                    source={"_shuffled_arch": src_label},
+                    target={"_shuffled_arch": tgt_label},
+                    n_epochs=100, hidden_dims=(64, 64),
+                    batch_size=min(64, min(n_src_s, n_tgt_s) // 2),
+                    return_model=False,
+                    name=f"null_{src_label}_{tgt_label}",
+                )
+                null_red = 1.0 - fr_null["mmd_after"] / max(fr_null["mmd_before"], 1e-10)
+                null_reductions.append(null_red)
+        if "_shuffled_arch" in adata.obs.columns:
+            del adata.obs["_shuffled_arch"]
+        if null_reductions:
+            null_mean = np.mean(null_reductions)
+            html += report.text(
+                f"<em>Randomized null (shuffled archetype labels, {len(null_reductions)} pairs): "
+                f"mean 1-MMD reduction = {null_mean:.4f}. Observed values substantially above this "
+                f"indicate the archetype assignment captures real phenotype structure.</em>")
+    except Exception as e:
+        html += report.text(f"<em>Randomized null computation failed: {e}</em>")
+        if "_shuffled_arch" in adata.obs.columns:
+            del adata.obs["_shuffled_arch"]
+
     # Feature similarity (Spearman on regression coefficients) — keep existing
     log.info("Computing within-fit feature similarity...")
     try:
@@ -1291,6 +1328,9 @@ def step6_within_fit_comparisons(adata, report):
         n_sig_feat = sim_result.get("n_significant_features", "?")
         html += report.text(f"Spearman \u03c1 computed on {n_sig_feat} FDR-significant (q<0.05) "
                             "vertex \u03b2 coefficients from simplex regression.")
+        html += report.text("Spearman \u03c1 computed on the intersection of FDR-significant (q<0.05) "
+                            "vertex \u03b2 coefficients from simplex regression. Only features significant "
+                            "in at least one archetype are included.")
 
         fig_sim = pc.pl.feature_similarity_heatmap(adata, show=False)
         html += safe_plotly_html(report, fig_sim, "Feature similarity (Spearman \u03c1) heatmap")
@@ -1439,6 +1479,15 @@ def step6b_diversity_metrics(adata, report):
             })
         html += report.df_to_html(pd.DataFrame(entropy_rows),
                                   caption="Archetype weight entropy (higher = less committed)")
+
+        # Global weight entropy for comparison
+        if weights.size > 0:
+            global_ent = weight_entropy.mean()
+            K_val = weights.shape[1] if weights.ndim == 2 else 0
+            max_ent = np.log(K_val) if K_val > 0 else 0
+            html += report.text(
+                f"<em>Global mean weight entropy: {global_ent:.4f} (max possible: {max_ent:.2f} for uniform weights). "
+                f"Per-archetype values below global mean indicate more committed cells.</em>")
 
     # Per-condition diversity
     for condition_col in ["cell_type_short"]:
@@ -2497,6 +2546,8 @@ def step13_sinkhorn_flow(adata, flow_results, report):
         try:
             fig_quiv = pc.pl.velocity_quiver(adata, fr, show=False)
             fig_quiv.update_layout(title=f"Flow velocity field: {pair_key.replace('_to_', ' → ')}")
+            # Raise cell scatter alpha for better visibility
+            fig_quiv.update_traces(marker=dict(opacity=0.75), selector=dict(mode="markers"))
             html += safe_plotly_html(report, fig_quiv, f"Velocity quiver: {pair_key}")
         except Exception as e:
             html += error_html(f"Quiver ({pair_key}) failed: {e}")
@@ -2807,10 +2858,11 @@ def step15_gene_deep_dive(adata, flow_results, jac_results, report):
                 ax.set_title(gene_names[gi], fontsize=9)
                 ax.axhline(1.0, color="gray", linestyle="--", alpha=0.5)
                 ax.set_ylabel("Expansion score")
+                ax.set_xlabel("")  # No x-label on individual violins
                 ax.spines[["top", "right"]].set_visible(False)
             for gi in range(n_show, len(axes)):
                 axes[gi].set_visible(False)
-            fig.suptitle(f"Per-cell expansion: {pair_key} (>1 = expanding, <1 = contracting)", y=1.02)
+            fig.suptitle(f"Per-cell feature expansion: {pair_key}\n(>1 = expanding along flow, <1 = contracting)", y=1.04, fontsize=11)
             fig.tight_layout()
             html += report.fig_to_img(fig, caption=f"Per-cell expansion violins: {pair_key}")
             plt.close("all")
