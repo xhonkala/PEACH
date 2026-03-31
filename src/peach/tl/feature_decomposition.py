@@ -50,8 +50,10 @@ def feature_simplex_decomposition(
     n_components_range : tuple[int, int] or None
         (min_components, max_components). Default: (K, 3*K).
     model_selection : str
-        'bic' or 'icl'. ICL = BIC + 2*entropy(posterior), which penalizes
-        overlapping clusters more heavily.
+        'bic', 'icl', or 'bic_elbow'. 'bic': argmin of BIC. 'icl': argmin of
+        ICL (BIC + 2*entropy), penalizes overlapping clusters. 'bic_elbow':
+        elbow detection via maximum curvature — preferred for Dirichlet mixtures
+        where BIC penalty is too small to produce a minimum.
     model_type : str
         'dirichlet' (default): Dirichlet mixture directly on the simplex.
         'gaussian': GMM in ILR-transformed space.

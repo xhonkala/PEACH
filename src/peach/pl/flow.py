@@ -507,6 +507,7 @@ def flow_topo_landscape(
     n_eval_points: int = 300,
     n_grid: int = 80,
     feature_type: str = "genes",
+    show_velocity: bool = True,
     show: bool = True,
     save: str | None = None,
 ) -> "matplotlib.figure.Figure":
@@ -545,6 +546,10 @@ def flow_topo_landscape(
     feature_type : str
         ``"genes"`` to read from ``adata.X``, or ``"pathways"`` to
         read from ``adata.obsm["pathway_scores"]``.
+    show_velocity : bool
+        Whether to draw quiver arrows showing flow velocity. Defaults
+        to ``True``. Set to ``False`` to suppress the arrows and show
+        only the topographic contours and cell scatter.
     show : bool
         Whether to call ``plt.show()``.
     save : str or None
@@ -657,56 +662,57 @@ def flow_topo_landscape(
     # Background: faint scatter of source and target cells
     ax.scatter(
         src_2d[:, 0], src_2d[:, 1],
-        s=1, alpha=0.03, c="steelblue", rasterized=True,
+        s=4, alpha=0.15, c="steelblue", rasterized=True,
     )
     ax.scatter(
         tgt_2d[:, 0], tgt_2d[:, 1],
-        s=1, alpha=0.03, c="coral", rasterized=True,
+        s=4, alpha=0.15, c="coral", rasterized=True,
     )
 
     # ------------------------------------------------------------------
     # 6a. Quiver arrows showing flow velocity (behind contours)
     # ------------------------------------------------------------------
-    # Compute velocity from consecutive trajectory timepoints
-    # trajectory shape: [n_steps+1, n_traj, dim]
-    n_frames = len(trajectory)
-    quiver_x_all = []
-    quiver_y_all = []
-    quiver_u_all = []
-    quiver_v_all = []
+    if show_velocity:
+        # Compute velocity from consecutive trajectory timepoints
+        # trajectory shape: [n_steps+1, n_traj, dim]
+        n_frames = len(trajectory)
+        quiver_x_all = []
+        quiver_y_all = []
+        quiver_u_all = []
+        quiver_v_all = []
 
-    for t_idx in range(n_frames - 1):
-        pos_2d = trajectory[t_idx, :, :2]
-        next_2d = trajectory[t_idx + 1, :, :2]
-        vel_2d = next_2d - pos_2d
+        for t_idx in range(n_frames - 1):
+            pos_2d = trajectory[t_idx, :, :2]
+            next_2d = trajectory[t_idx + 1, :, :2]
+            vel_2d = next_2d - pos_2d
 
-        quiver_x_all.append(pos_2d[:, 0])
-        quiver_y_all.append(pos_2d[:, 1])
-        quiver_u_all.append(vel_2d[:, 0])
-        quiver_v_all.append(vel_2d[:, 1])
+            quiver_x_all.append(pos_2d[:, 0])
+            quiver_y_all.append(pos_2d[:, 1])
+            quiver_u_all.append(vel_2d[:, 0])
+            quiver_v_all.append(vel_2d[:, 1])
 
-    quiver_x = np.concatenate(quiver_x_all)
-    quiver_y = np.concatenate(quiver_y_all)
-    quiver_u = np.concatenate(quiver_u_all)
-    quiver_v = np.concatenate(quiver_v_all)
+        quiver_x = np.concatenate(quiver_x_all)
+        quiver_y = np.concatenate(quiver_y_all)
+        quiver_u = np.concatenate(quiver_u_all)
+        quiver_v = np.concatenate(quiver_v_all)
 
-    # Subsample to avoid overcrowding: keep every Nth point
-    n_quiver_total = len(quiver_x)
-    max_arrows = 2000
-    if n_quiver_total > max_arrows:
-        step = max(1, n_quiver_total // max_arrows)
-        q_idx = np.arange(0, n_quiver_total, step)
-        quiver_x = quiver_x[q_idx]
-        quiver_y = quiver_y[q_idx]
-        quiver_u = quiver_u[q_idx]
-        quiver_v = quiver_v[q_idx]
+        # Subsample to avoid overcrowding: keep every Nth point
+        n_quiver_total = len(quiver_x)
+        max_arrows = 2000
+        if n_quiver_total > max_arrows:
+            step = max(1, n_quiver_total // max_arrows)
+            q_idx = np.arange(0, n_quiver_total, step)
+            quiver_x = quiver_x[q_idx]
+            quiver_y = quiver_y[q_idx]
+            quiver_u = quiver_u[q_idx]
+            quiver_v = quiver_v[q_idx]
 
-    ax.quiver(
-        quiver_x, quiver_y, quiver_u, quiver_v,
-        color="0.25", alpha=0.07, scale=None,
-        headwidth=4, headlength=5, headaxislength=4,
-        linewidth=0.3, zorder=1,
-    )
+        ax.quiver(
+            quiver_x, quiver_y, quiver_u, quiver_v,
+            color="0.25", alpha=0.07, scale=None,
+            headwidth=4, headlength=5, headaxislength=4,
+            linewidth=0.3, zorder=1,
+        )
 
     # Colors and line styles for features
     feat_colors = plt.cm.plasma(np.linspace(0.1, 0.9, n_feat))
