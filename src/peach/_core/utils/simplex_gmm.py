@@ -22,6 +22,31 @@ from scipy.optimize import linear_sum_assignment
 from peach._core.utils.ilr_transform import ilr_transform, inverse_ilr
 
 
+def _find_bic_elbow(n_range, bic_values):
+    """Find elbow in BIC curve using second derivative (maximum curvature).
+
+    Returns the n_components at the elbow, or argmin(BIC) if no elbow found.
+    """
+    bic = np.asarray(bic_values, dtype=float)
+    ns = np.asarray(n_range, dtype=float)
+    if len(bic) < 3:
+        return n_range[int(np.argmin(bic))]
+
+    # Normalize to [0,1] for curvature calculation
+    ns_norm = (ns - ns.min()) / max(ns.max() - ns.min(), 1)
+    bic_norm = (bic - bic.min()) / max(bic.max() - bic.min(), 1)
+
+    # Second derivative (discrete)
+    d2 = np.diff(bic_norm, 2)
+    # Elbow = point of maximum positive second derivative (where curve bends from steep to flat)
+    # Require curvature meaningfully above zero (not just floating-point noise)
+    if len(d2) > 0 and np.any(d2 > 1e-6):
+        elbow_idx = int(np.argmax(d2)) + 1  # +1 because diff reduces length
+        return n_range[elbow_idx]
+
+    return n_range[int(np.argmin(bic))]
+
+
 def _compute_icl(gmm, X):
     """Integrated Completed Likelihood criterion.
 
@@ -84,8 +109,11 @@ def fit_simplex_gmm(
         all unstable cells are reassigned (backward compatible). Higher values
         (e.g. 0.8) leave low-confidence cells as -1 (unassigned).
     model_selection : str
-        Criterion for selecting optimal n_components. 'bic' or 'icl'.
-        ICL = BIC + 2*entropy(posterior), which penalizes overlapping clusters.
+        Criterion for selecting optimal n_components. 'bic', 'icl', or 'bic_elbow'.
+        'bic': argmin of BIC curve. 'icl': argmin of ICL (BIC + 2*entropy).
+        'bic_elbow': elbow detection on BIC curve via maximum curvature (second
+        derivative). Preferred for Dirichlet mixtures where BIC penalty per
+        component is small enough that argmin always picks max components.
     model_type : str
         'dirichlet' (default): Dirichlet mixture directly on the simplex.
         'gaussian': GMM in ILR-transformed space.
@@ -121,8 +149,8 @@ def fit_simplex_gmm(
         model_type : str
             'gaussian' or 'dirichlet'.
     """
-    if model_selection not in ("bic", "icl"):
-        raise ValueError(f"model_selection must be 'bic' or 'icl', got '{model_selection}'")
+    if model_selection not in ("bic", "icl", "bic_elbow"):
+        raise ValueError(f"model_selection must be 'bic', 'icl', or 'bic_elbow', got '{model_selection}'")
     if model_type not in ("gaussian", "dirichlet"):
         raise ValueError(f"model_type must be 'gaussian' or 'dirichlet', got '{model_type}'")
 
@@ -184,6 +212,19 @@ def _fit_gaussian(
             best_score = score
             best_model = gmm
             best_n = n_comp
+
+    # BIC elbow detection overrides argmin selection
+    if model_selection == "bic_elbow":
+        best_n = _find_bic_elbow(n_range, bic_values)
+        # Re-fit at the elbow if it differs from current best
+        if best_model is None or best_n != best_model.n_components:
+            best_model = GaussianMixture(
+                n_components=best_n,
+                covariance_type=covariance_type,
+                n_init=3,
+                random_state=random_state,
+            )
+            best_model.fit(ilr_coords)
 
     # Stability analysis for optimal n_components
     stability_scores = _compute_stability(
@@ -289,6 +330,16 @@ def _fit_dirichlet(
             best_score = score
             best_model = dm
             best_n = n_comp
+
+    # BIC elbow detection overrides argmin selection
+    if model_selection == "bic_elbow":
+        best_n = _find_bic_elbow(n_range, bic_values)
+        # Re-fit at the elbow if it differs from current best
+        if best_model is None or best_n != best_model.n_components:
+            best_model = DirichletMixture(
+                n_components=best_n, n_init=3, random_state=random_state,
+            )
+            best_model.fit(weights)
 
     # Stability analysis for optimal n_components
     stability_scores = _compute_stability_dirichlet(

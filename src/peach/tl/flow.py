@@ -397,6 +397,8 @@ def flow_jacobian(
     aggregate: str = "mean",
     per_cell_features: bool = True,
     n_top_features: int = 2500,
+    n_permutations: int = 0,
+    permutation_seed: int = 42,
 ) -> dict:
     """Compute Jacobian of the flow velocity field.
 
@@ -427,6 +429,14 @@ def flow_jacobian(
     n_top_features : int
         Maximum number of genes to include in the per-cell expansion matrix.
         Genes are selected by absolute aggregated feature expansion. Default: 2500.
+    n_permutations : int
+        Number of permutations for expansion significance testing. When > 0,
+        shuffles gene-to-PCA-loading assignments and recomputes the quadratic
+        form L^T J L to build a null distribution. The Jacobian J is fixed;
+        only loading vectors change, making permutations cheap. Results stored
+        as ``expansion_pvalues`` and ``expansion_pvalues_fdr``. Default: 0.
+    permutation_seed : int
+        Random seed for permutation shuffling. Default: 42.
     """
     if evaluation_points is None:
         evaluation_points = adata.obsm[flow_result["pca_key"]][flow_result["source_mask"]]
@@ -494,6 +504,39 @@ def flow_jacobian(
         result["per_cell_expansion"] = per_cell_exp
         result["per_cell_expansion_gene_names"] = top_feat_names
         result["per_cell_expansion_gene_indices"] = top_feat_idx
+
+    # Permutation test for feature expansion significance
+    if n_permutations > 0 and pca_loadings_key in adata.varm and len(feature_expansion) > 0:
+        from peach._core.utils.permutation import fdr_correct, permutation_pvalue
+
+        n_genes = loadings_normalized.shape[0]
+        rng = np.random.default_rng(permutation_seed)
+        null_expansion = np.empty((n_permutations, n_genes))
+
+        for p in range(n_permutations):
+            # Shuffle gene-to-loading assignments (permute rows of loading matrix)
+            perm_idx = rng.permutation(n_genes)
+            shuffled_loadings = loadings_normalized[perm_idx]
+            # Recompute L^T J L for each gene with shuffled loadings
+            null_expansion[p] = np.einsum(
+                'gi,ij,gj->g', shuffled_loadings, mean_jac, shuffled_loadings
+            )
+
+        perm_pvals = permutation_pvalue(
+            feature_expansion, null_expansion, alternative="two-sided"
+        )
+        _, perm_fdr = fdr_correct(perm_pvals)
+
+        result["expansion_pvalues"] = perm_pvals
+        result["expansion_pvalues_raw"] = perm_pvals
+        result["expansion_pvalues_fdr"] = perm_fdr
+        n_raw_sig = int((perm_pvals < 0.01).sum())
+        result["expansion_n_raw_significant"] = n_raw_sig
+        result["n_permutations"] = n_permutations
+        logger.info(
+            f"Jacobian permutation: {n_raw_sig}/{n_genes} genes at raw p<0.01, "
+            f"{(perm_fdr < 0.05).sum()}/{n_genes} at FDR q<0.05 ({n_permutations} permutations)"
+        )
 
     return result
 

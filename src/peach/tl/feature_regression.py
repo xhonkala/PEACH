@@ -191,7 +191,8 @@ def feature_simplex_regression(
     if store_to_adata:
         suffix = regression_storage_suffix(feature_matrix)
         store_result(adata, f"simplex_regression_{suffix}", serialized)
-        store_result(adata, "simplex_regression", serialized)
+        if suffix == "genes":
+            store_result(adata, "simplex_regression", serialized)
 
     return serialized
 
