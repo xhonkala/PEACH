@@ -1,2562 +1,1471 @@
-# src/peach/_core/tools_schema.py
+"""PEACH tools schema — AUTO-GENERATED from inspect.signature().
+
+DO NOT EDIT MANUALLY. Regenerate with: python scripts/_regenerate_tools_schema.py
 """
-PEACH Tools Schema - Function signatures for programmatic use.
 
-This module provides complete input/output schemas for all PEACH functions,
-enabling programmatic access and tool integrations.
-
-Usage:
-    from peach._core.tools_schema import get_tool_schema, TOOL_SCHEMAS
-
-    # Get schema for a specific function
-    schema = get_tool_schema("tl.train_archetypal")
-
-    # Generate tool definitions for an agent
-    tools = generate_tool_definitions(["tl.train_archetypal", "tl.archetypal_coordinates"])
-
-Key Concepts:
-    - All functions operate on AnnData objects referenced by `adata_key`
-    - Session state maintains loaded datasets in ADATA_REGISTRY
-    - Results are stored back in the AnnData object (adata.obs, adata.obsm, adata.uns)
-
-NOTE ON adata_key vs adata
---------------------------
-Schema entries use ``adata_key`` (ParamType.ADATA_REF) referencing AnnData objects
-by name in a PeachSession registry. The actual Python API functions accept ``adata``
-(an AnnData instance) directly. When using schemas programmatically via PeachSession,
-call ``session.get_adata(adata_key)`` to resolve the reference before passing to
-the function. When calling functions directly, ignore adata_key and pass adata.
-
-Version: 0.5.0
-"""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-# =============================================================================
-# PARAMETER TYPE DEFINITIONS
-# =============================================================================
 
-
-class ParamType(str, Enum):
-    """Parameter types for tool schemas."""
-
+class ParamType(Enum):
     STRING = "string"
     INTEGER = "integer"
     FLOAT = "number"
     BOOLEAN = "boolean"
     ARRAY = "array"
     OBJECT = "object"
-    ADATA_REF = "adata_reference"  # Special: reference to loaded AnnData
-    MODEL_REF = "model_reference"  # Special: reference to trained model
+    ADATA_REF = "adata_reference"
 
 
 @dataclass
 class Parameter:
-    """Tool parameter definition."""
-
     name: str
     type: ParamType
     description: str
-    required: bool = True
+    required: bool = False
     default: Any = None
-    enum: list[Any] | None = None  # For constrained choices
-    items_type: ParamType | None = None  # For arrays
-
-    def to_json_schema(self) -> dict[str, Any]:
-        """Convert to JSON Schema format."""
-        schema = {
-            "type": self.type.value if self.type != ParamType.ADATA_REF else "string",
-            "description": self.description,
-        }
-        if self.type == ParamType.ADATA_REF:
-            schema["description"] += " (AnnData reference key)"
-        if self.type == ParamType.MODEL_REF:
-            schema["description"] += " (trained model reference key)"
-        if self.default is not None:
-            schema["default"] = self.default
-        if self.enum:
-            schema["enum"] = self.enum
-        if self.items_type and self.type == ParamType.ARRAY:
-            schema["items"] = {"type": self.items_type.value}
-        return schema
+    enum: list[str] | None = None
+    items_type: ParamType | None = None
 
 
 @dataclass
 class ToolSchema:
-    """Complete tool schema for a PEACH function."""
-
     name: str
     description: str
-    parameters: list[Parameter]
-    returns: str  # Return type name from types_index.py
-    returns_description: str
-    modifies_adata: list[str] = field(default_factory=list)  # Keys modified in adata
-    requires: list[str] = field(default_factory=list)  # Prerequisites (e.g., "X_pca in adata.obsm")
+    parameters: list[Parameter] = field(default_factory=list)
+    returns: str = ""
+    returns_description: str = ""
+    modifies_adata: list[str] = field(default_factory=list)
+    requires: list[str] = field(default_factory=list)
 
     def to_tool_definition(self) -> dict[str, Any]:
-        """Convert to tool definition format."""
-        properties = {}
+        props = {}
         required = []
-
-        for param in self.parameters:
-            properties[param.name] = param.to_json_schema()
-            if param.required:
-                required.append(param.name)
-
+        for p in self.parameters:
+            prop = {"type": p.type.value, "description": p.description}
+            if p.default is not None:
+                prop["default"] = p.default
+            if p.enum:
+                prop["enum"] = p.enum
+            props[p.name] = prop
+            if p.required:
+                required.append(p.name)
         return {
-            "name": self.name.replace(".", "_"),  # tl.train_archetypal → tl_train_archetypal
-            "description": self._build_description(),
-            "input_schema": {
+            "name": self.name,
+            "description": self.description,
+            "parameters": {
                 "type": "object",
-                "properties": properties,
+                "properties": props,
                 "required": required,
             },
         }
 
-    def _build_description(self) -> str:
-        """Build complete description including requirements and outputs."""
-        desc = self.description
-        if self.requires:
-            desc += f"\n\nRequires: {', '.join(self.requires)}"
-        if self.modifies_adata:
-            desc += f"\n\nModifies AnnData: {', '.join(self.modifies_adata)}"
-        desc += f"\n\nReturns: {self.returns} - {self.returns_description}"
-        return desc
-
-
-# =============================================================================
-# TOOL SCHEMAS - Complete parameter definitions
-# =============================================================================
 
 TOOL_SCHEMAS: dict[str, ToolSchema] = {
-    # =========================================================================
-    # pp (PREPROCESSING)
-    # =========================================================================
-    "pp.load_data": ToolSchema(
-        name="pp.load_data",
-        description="Load single-cell data from file into AnnData format.",
-        parameters=[
-            Parameter("filepath", ParamType.STRING, "Path to data file (.h5ad, .loom, .csv)"),
-            Parameter("adata_key", ParamType.STRING, "Key to store loaded AnnData in registry", default="adata"),
-        ],
-        returns="AnnData",
-        returns_description="Loaded AnnData object stored in registry",
-        modifies_adata=[],
-    ),
-    "pp.generate_synthetic": ToolSchema(
-        name="pp.generate_synthetic",
-        description="Generate synthetic data with known archetypes for testing.",
-        parameters=[
-            Parameter("n_points", ParamType.INTEGER, "Number of samples (cells) to generate", default=1000),
-            Parameter("n_dimensions", ParamType.INTEGER, "Number of features (genes)", default=50),
-            Parameter("n_archetypes", ParamType.INTEGER, "Number of true archetypes", default=4),
-            Parameter("noise", ParamType.FLOAT, "Noise standard deviation", default=0.1),
-            Parameter("seed", ParamType.INTEGER, "Random seed", default=1205),
-            Parameter(
-                "archetype_type",
-                ParamType.STRING,
-                "How to generate archetypes",
-                default="random",
-                enum=["random", "simplex"],
-            ),
-            Parameter("scale", ParamType.FLOAT, "Scale of archetype positions", default=20.0),
-        ],
-        returns="AnnData",
-        returns_description="Synthetic AnnData with true archetypes in .uns['true_archetypes']",
-        modifies_adata=["uns['true_archetypes']", "obsm['X_pca']"],
-    ),
-    "pp.prepare_training": ToolSchema(
-        name="pp.prepare_training",
-        description="Prepare data for training (ensure PCA, create DataLoader).",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to loaded AnnData"),
-            Parameter("n_pcs", ParamType.INTEGER, "Number of PCA components", default=30),
-            Parameter("batch_size", ParamType.INTEGER, "Training batch size", default=256),
-            Parameter("pca_key", ParamType.STRING, "Key for PCA in obsm", default="X_pca"),
-        ],
-        returns="Tuple[DataLoader, AnnData]",
-        returns_description="PyTorch DataLoader and updated AnnData",
-        requires=["adata loaded"],
-        modifies_adata=["obsm['X_pca'] if not present"],
-    ),
-    "pp.prepare_atacseq": ToolSchema(
-        name="pp.prepare_atacseq",
-        description="TF-IDF + LSI preprocessing for scATAC-seq peak count data. "
-        "Produces embeddings usable with pc.tl.train_archetypal(adata, pca_key='X_lsi').",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with peak count matrix in .X"),
-            Parameter("n_components", ParamType.INTEGER, "Number of LSI components to compute (30-50 standard)", default=50),
-            Parameter(
-                "drop_first",
-                ParamType.BOOLEAN,
-                "Drop first SVD component (captures sequencing depth, not biology)",
-                default=True,
-            ),
-            Parameter("log_tf", ParamType.BOOLEAN, "Use log(1 + TF) variant of term frequency", default=True),
-            Parameter("store_key", ParamType.STRING, "Key in adata.obsm to store LSI embeddings", default="X_lsi"),
-            Parameter("random_state", ParamType.INTEGER, "Random seed for truncated SVD", default=42),
-        ],
-        returns="None",
-        returns_description="Modifies adata in place: obsm[store_key] = LSI embeddings, uns['lsi'] = variance info",
-        requires=["sparse peak count matrix in adata.X"],
-        modifies_adata=["obsm['X_lsi']", "uns['lsi']"],
-    ),
-    # =========================================================================
-    # tl (TOOLS) - Training
-    # =========================================================================
-    "tl.train_archetypal": ToolSchema(
-        name="tl.train_archetypal",
-        description="Train Deep Archetypal Analysis model. Main training function.",
-        parameters=[
-            # --- CORE (commonly used) ---
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA"),
-            Parameter("n_archetypes", ParamType.INTEGER, "Number of archetypes to learn", default=5),
-            Parameter("n_epochs", ParamType.INTEGER, "Maximum training epochs", default=50),
-            Parameter(
-                "hidden_dims",
-                ParamType.ARRAY,
-                "Encoder/decoder layer dimensions, e.g. [256, 128, 64]",
-                default=None,
-                items_type=ParamType.INTEGER,
-            ),
-            Parameter(
-                "inflation_factor",
-                ParamType.FLOAT,
-                "PCHA inflation factor for initialization (1.2-2.0 recommended)",
-                default=1.5,
-            ),
-            Parameter("early_stopping", ParamType.BOOLEAN, "Enable early stopping", default=False),
-            Parameter("early_stopping_patience", ParamType.INTEGER, "Patience for early stopping", default=10),
-            Parameter("seed", ParamType.INTEGER, "Random seed", default=42),
-            Parameter(
-                "device", ParamType.STRING, "Computing device", default="cpu", enum=["cpu", "cuda", "mps"]
-            ),
-            # --- DATA SELECTION ---
-            Parameter("layer", ParamType.STRING, "Expression layer to use", required=False, default=None),
-            Parameter("pca_key", ParamType.STRING, "Key for PCA coordinates", default="X_pca"),
-            Parameter(
-                "store_coords_key", ParamType.STRING, "Key for archetype coords in uns", default="archetype_coordinates"
-            ),
-            # --- ADVANCED (model_config for other options) ---
-            Parameter(
-                "model_config",
-                ParamType.OBJECT,
-                "Additional model config: {archetypal_weight, kld_weight, diversity_weight, use_barycentric}",
-                default=None,
-            ),
-            # --- LOSS WEIGHTS (advanced - defaults are optimal) ---
-            Parameter(
-                "archetypal_weight",
-                ParamType.FLOAT,
-                "Archetypal loss weight (default 1.0 in model)",
-                required=False,
-                default=None,
-            ),
-            Parameter(
-                "kld_weight",
-                ParamType.FLOAT,
-                "KL divergence weight (0.1 default, regularizes encoder variance)",
-                required=False,
-                default=None,
-            ),
-            Parameter("reconstruction_weight", ParamType.FLOAT, "Reconstruction loss weight", default=0.0),
-            Parameter("diversity_weight", ParamType.FLOAT, "Archetype diversity weight", default=0.0),
-            # --- OPTIMIZER (advanced) ---
-            Parameter(
-                "optimizer_config",
-                ParamType.OBJECT,
-                "Optimizer config: {lr: float, weight_decay: float}",
-                required=False,
-                default=None,
-            ),
-            Parameter("lr_factor", ParamType.FLOAT, "LR reduction factor on plateau", default=0.1),
-            Parameter("lr_patience", ParamType.INTEGER, "LR scheduler patience", default=10),
-            # --- TRAINING BEHAVIOR (advanced) ---
-            Parameter("activation_func", ParamType.STRING, "Activation function", default="relu"),
-            Parameter("track_stability", ParamType.BOOLEAN, "Track archetype stability metrics", default=True),
-            Parameter("validate_constraints", ParamType.BOOLEAN, "Validate archetypal constraints", default=True),
-            Parameter("constraint_tolerance", ParamType.FLOAT, "Constraint violation tolerance", default=0.001),
-            Parameter("stability_history_size", ParamType.INTEGER, "Window size for stability tracking", default=20),
-            # --- EARLY STOPPING (advanced) ---
-            Parameter(
-                "early_stopping_metric",
-                ParamType.STRING,
-                "Metric for early stopping",
-                default="archetype_r2",
-                enum=["archetype_r2", "loss", "rmse"],
-            ),
-            Parameter("min_improvement", ParamType.FLOAT, "Min improvement for early stopping", default=0.0001),
-            Parameter("validation_check_interval", ParamType.INTEGER, "Epochs between validation checks", default=5),
-        ],
-        returns="TrainingResults",
-        returns_description="Dict with history, final_model, model, training_config. Use .get() for final_archetype_r2",
-        requires=["X_pca in adata.obsm"],
-        modifies_adata=["uns['archetype_coordinates']"],
-    ),
-    "tl.hyperparameter_search": ToolSchema(
-        name="tl.hyperparameter_search",
-        description="Grid search over hyperparameters with cross-validation.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter(
-                "n_archetypes_range",
-                ParamType.ARRAY,
-                "Archetype numbers to test",
-                default=[3, 4, 5, 6],
-                items_type=ParamType.INTEGER,
-            ),
-            Parameter(
-                "hidden_dims_options",
-                ParamType.ARRAY,
-                "Network architectures to test",
-                default=[[128, 64], [256, 128, 64]],
-            ),
-            Parameter("cv_folds", ParamType.INTEGER, "Number of CV folds", default=5),
-            Parameter("max_epochs_cv", ParamType.INTEGER, "Max epochs per fold", default=50),
-            Parameter("subsample_fraction", ParamType.FLOAT, "Fraction of data for CV", default=0.5),
-        ],
-        returns="CVSummary",
-        returns_description="Use .rank_by_metric('archetype_r2') → ranked[i].metric_value for best config",
-        requires=["X_pca in adata.obsm"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # tl (TOOLS) - Coordinates & Assignment
-    # =========================================================================
-    "tl.archetypal_coordinates": ToolSchema(
-        name="tl.archetypal_coordinates",
-        description="Compute distances from cells to archetypes in PCA space.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("model_key", ParamType.MODEL_REF, "Reference to trained model", default="model"),
-            Parameter("pca_key", ParamType.STRING, "Key for PCA coordinates", default="X_pca"),
-        ],
-        returns="DataFrame",
-        returns_description="Columns: archetype_1_distance, ..., nearest_archetype, nearest_archetype_distance (1-indexed)",
-        requires=["archetype_coordinates in adata.uns", "trained model"],
-        modifies_adata=["obsm['archetype_distances']"],
-    ),
-    "tl.assign_archetypes": ToolSchema(
-        name="tl.assign_archetypes",
-        description="Assign cells to nearest archetype based on distance.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter(
-                "percentage_per_archetype",
-                ParamType.FLOAT,
-                "Top percentage of cells per archetype (0.1 = 10%)",
-                default=0.1,
-            ),
-            Parameter("obsm_key", ParamType.STRING, "Key for distances", default="archetype_distances"),
-        ],
-        returns="None",
-        returns_description="Modifies adata.obs['archetypes'] with Categorical assignments",
-        requires=["archetype_distances in adata.obsm"],
-        modifies_adata=["obs['archetypes']"],
-    ),
-    "tl.extract_archetype_weights": ToolSchema(
-        name="tl.extract_archetype_weights",
-        description="Extract cell-archetype weight matrix (A matrix / barycentric coordinates).",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("model_key", ParamType.MODEL_REF, "Reference to trained model"),
-        ],
-        returns="np.ndarray",
-        returns_description="Shape (n_cells, n_archetypes), rows sum to 1",
-        requires=["trained model"],
-        modifies_adata=["obsm['cell_archetype_weights']"],
-    ),
-    "tl.compute_conditional_centroids": ToolSchema(
-        name="tl.compute_conditional_centroids",
-        description="Compute centroid positions in PCA space for each level of a categorical condition. "
-        "Enables trajectory visualization of condition changes (e.g., treatment phases) in archetypal space.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA coordinates"),
-            Parameter("condition_column", ParamType.STRING, "Categorical column in adata.obs to compute centroids for"),
-            Parameter("pca_key", ParamType.STRING, "Key for PCA coordinates in obsm", default="X_pca"),
-            Parameter(
-                "store_key", ParamType.STRING, "Key to store results in adata.uns", default="conditional_centroids"
-            ),
-            Parameter(
-                "exclude_archetypes",
-                ParamType.ARRAY,
-                "Archetype labels to exclude from calculation",
-                default=["no_archetype", "archetype_0"],
-                items_type=ParamType.STRING,
-            ),
-            Parameter(
-                "groupby",
-                ParamType.STRING,
-                "Second categorical column for multi-group trajectories",
-                required=False,
-                default=None,
-            ),
-            Parameter("verbose", ParamType.BOOLEAN, "Print progress messages", default=True),
-        ],
-        returns="ConditionalCentroidResult",
-        returns_description="Dict with centroids, centroids_3d, cell_counts, levels. Also stores in adata.uns['conditional_centroids']",
-        requires=["X_pca in adata.obsm", "condition_column in adata.obs"],
-        modifies_adata=["uns['conditional_centroids']"],
-    ),
-    "tl.assign_to_centroids": ToolSchema(
-        name="tl.assign_to_centroids",
-        description="Assign cells to nearest centroid based on distance (top bin_prop% closest). "
-        "Mirrors assign_archetypes but for condition-based centroids. "
-        "Enables using treatment phase centroids as trajectory endpoints in single_trajectory_analysis.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with centroids computed"),
-            Parameter("condition_column", ParamType.STRING, "Condition column used in compute_conditional_centroids"),
-            Parameter("pca_key", ParamType.STRING, "Key for PCA coordinates in obsm", default="X_pca"),
-            Parameter(
-                "centroid_key",
-                ParamType.STRING,
-                "Key in adata.uns containing centroid results",
-                default="conditional_centroids",
-            ),
-            Parameter(
-                "bin_prop", ParamType.FLOAT, "Proportion of cells to assign to each centroid (0.15 = 15%)", default=0.15
-            ),
-            Parameter(
-                "obs_key", ParamType.STRING, "Key in adata.obs to store assignments", default="centroid_assignments"
-            ),
-            Parameter(
-                "exclude_archetypes",
-                ParamType.ARRAY,
-                "Archetype labels to exclude from assignment",
-                default=["no_archetype"],
-                items_type=ParamType.STRING,
-            ),
-            Parameter("verbose", ParamType.BOOLEAN, "Print progress messages", default=True),
-        ],
-        returns="None",
-        returns_description="Modifies adata.obs[obs_key] with Categorical assignments (condition levels + 'unassigned')",
-        requires=["conditional_centroids in adata.uns (from compute_conditional_centroids)", "X_pca in adata.obsm"],
-        modifies_adata=["obs['centroid_assignments']"],
-    ),
-    # =========================================================================
-    # tl (TOOLS) - Statistical Testing
-    # =========================================================================
-    "tl.gene_associations": ToolSchema(
-        name="tl.gene_associations",
-        description="Test gene expression associations with archetypes (Mann-Whitney U by default). "
-        "Returns 14-column DataFrame with gene, archetype, log_fold_change, pvalue, fdr_pvalue, etc.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("obs_key", ParamType.STRING, "Key for archetype assignments in obs", default="archetypes"),
-            Parameter("bin_prop", ParamType.FLOAT, "Proportion of cells per archetype bin", default=0.1),
-            Parameter("obsm_key", ParamType.STRING, "Key for distances in obsm", default="archetype_distances"),
-            Parameter(
-                "use_layer", ParamType.STRING, "Expression layer to use (None = .X)", required=False, default=None
-            ),
-            # --- Statistical testing ---
-            Parameter(
-                "test_method",
-                ParamType.STRING,
-                "Statistical test method",
-                default="mannwhitneyu",
-                enum=["mannwhitneyu", "ttest"],
-            ),
-            Parameter(
-                "test_direction",
-                ParamType.STRING,
-                "Test direction",
-                default="two-sided",
-                enum=["two-sided", "greater", "less"],
-            ),
-            # --- FDR correction ---
-            Parameter(
-                "fdr_method",
-                ParamType.STRING,
-                "FDR correction method",
-                default="benjamini_hochberg",
-                enum=["benjamini_hochberg", "bonferroni"],
-            ),
-            Parameter(
-                "fdr_scope",
-                ParamType.STRING,
-                "FDR scope: global (all tests) or per_archetype",
-                default="global",
-                enum=["global", "per_archetype"],
-            ),
-            # --- Thresholds ---
-            Parameter("min_logfc", ParamType.FLOAT, "Minimum |log_fold_change| threshold", default=0.01),
-            Parameter("min_cells", ParamType.INTEGER, "Minimum cells per group for valid test", default=10),
-            Parameter(
-                "comparison_group",
-                ParamType.STRING,
-                "Comparison group: 'all' other cells or specific archetype",
-                default="all",
-            ),
-            Parameter("verbose", ParamType.BOOLEAN, "Print progress", default=True),
-        ],
-        returns="DataFrame[GeneAssociationResult]",
-        returns_description="14 cols: gene, archetype, n_archetype_cells, n_other_cells, mean_archetype, mean_other, "
-        "log_fold_change, statistic, pvalue, test_direction, direction, passes_lfc_threshold, fdr_pvalue, significant",
-        requires=["archetypes in adata.obs", "archetype_distances in adata.obsm"],
-        modifies_adata=[],
-    ),
-    "tl.pathway_associations": ToolSchema(
-        name="tl.pathway_associations",
-        description="Test pathway activity associations with archetypes. Requires pp.compute_pathway_scores() first. "
-        "Returns 15-column DataFrame (gene_associations columns + mean_diff).",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("obs_key", ParamType.STRING, "Key for archetype assignments in obs", default="archetypes"),
-            Parameter("pathway_obsm_key", ParamType.STRING, "Key for pathway scores in obsm", default="pathway_scores"),
-            Parameter("obsm_key", ParamType.STRING, "Key for distances in obsm", default="archetype_distances"),
-            # --- Statistical testing ---
-            Parameter(
-                "test_method",
-                ParamType.STRING,
-                "Statistical test method",
-                default="mannwhitneyu",
-                enum=["mannwhitneyu", "ttest"],
-            ),
-            Parameter(
-                "test_direction",
-                ParamType.STRING,
-                "Test direction",
-                default="two-sided",
-                enum=["two-sided", "greater", "less"],
-            ),
-            # --- FDR correction ---
-            Parameter("fdr_method", ParamType.STRING, "FDR correction method", default="benjamini_hochberg"),
-            Parameter("fdr_scope", ParamType.STRING, "FDR scope", default="global", enum=["global", "per_archetype"]),
-            # --- Thresholds ---
-            Parameter("min_logfc", ParamType.FLOAT, "Minimum effect size threshold", default=0.01),
-            Parameter("min_cells", ParamType.INTEGER, "Minimum cells per group", default=10),
-            Parameter("comparison_group", ParamType.STRING, "Comparison group", default="all"),
-            Parameter("verbose", ParamType.BOOLEAN, "Print progress", default=True),
-        ],
-        returns="DataFrame[PathwayAssociationResult]",
-        returns_description="15 cols: gene (pathway name), archetype, mean_diff, + 12 cols from gene_associations",
-        requires=["archetypes in adata.obs", "pathway_scores in adata.obsm (from pp.compute_pathway_scores)"],
-        modifies_adata=[],
-    ),
-    "tl.conditional_associations": ToolSchema(
-        name="tl.conditional_associations",
-        description="Test archetype enrichment for categorical conditions (hypergeometric test). "
-        "Returns 12-column DataFrame with odds ratios and confidence intervals.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("obs_column", ParamType.STRING, "Categorical column in adata.obs to test"),
-            Parameter("obs_key", ParamType.STRING, "Key for archetype assignments", default="archetypes"),
-            Parameter(
-                "archetype_assignments",
-                ParamType.ARRAY,
-                "Override archetype assignments (array)",
-                required=False,
-                default=None,
-            ),
-            # --- Testing ---
-            Parameter("test_method", ParamType.STRING, "Test method", default="hypergeometric"),
-            Parameter("fdr_method", ParamType.STRING, "FDR correction method", default="benjamini_hochberg"),
-            Parameter("min_cells", ParamType.INTEGER, "Minimum cells per group", default=5),
-            Parameter("verbose", ParamType.BOOLEAN, "Print progress", default=True),
-        ],
-        returns="DataFrame[ConditionalAssociationResult]",
-        returns_description="12 cols: archetype, condition, observed, expected, total_archetype, total_condition, "
-        "odds_ratio, ci_lower, ci_upper, pvalue, fdr_pvalue, significant",
-        requires=["archetypes in adata.obs", "obs_column in adata.obs"],
-        modifies_adata=[],
-    ),
-    "tl.pattern_analysis": ToolSchema(
-        name="tl.pattern_analysis",
-        description="Test multi-archetype patterns. Returns dict with conditional keys: "
-        "'individual' (15 cols), 'patterns' (26 cols), 'exclusivity' (21 cols, requires patterns).",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("obs_key", ParamType.STRING, "Key for archetype assignments", default="archetypes"),
-            Parameter(
-                "data_obsm_key",
-                ParamType.STRING,
-                "Key for data (pathway_scores or gene expression)",
-                default="pathway_scores",
-            ),
-            # --- Control which analyses to run ---
-            Parameter(
-                "include_individual_tests",
-                ParamType.BOOLEAN,
-                "Include individual gene/pathway tests → 'individual' key",
-                default=True,
-            ),
-            Parameter(
-                "include_pattern_tests",
-                ParamType.BOOLEAN,
-                "Include multi-archetype pattern tests → 'patterns' key",
-                default=True,
-            ),
-            Parameter(
-                "include_exclusivity_analysis",
-                ParamType.BOOLEAN,
-                "Include exclusivity analysis → 'exclusivity' key (requires patterns)",
-                default=True,
-            ),
-            Parameter("verbose", ParamType.BOOLEAN, "Print progress", default=True),
-        ],
-        returns="Dict[str, DataFrame]",
-        returns_description="Conditional dict: 'individual' (if include_individual_tests), 'patterns' (if include_pattern_tests), "
-        "'exclusivity' (if include_exclusivity_analysis AND include_pattern_tests)",
-        requires=["archetypes in adata.obs"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # tl (TOOLS) - Spatial Analysis (requires squidpy)
-    # =========================================================================
-    "tl.spatial_neighbors": ToolSchema(
-        name="tl.spatial_neighbors",
-        description="Build spatial neighbor graph from tissue coordinates. "
-        "Wrapper around squidpy.gr.spatial_neighbors() with PEACH-appropriate defaults.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial coordinates"),
-            Parameter("spatial_key", ParamType.STRING, "Key in adata.obsm for 2D spatial coordinates", default="spatial"),
-            Parameter("n_neighs", ParamType.INTEGER, "Number of nearest neighbors", default=10),
-            Parameter(
-                "coord_type",
-                ParamType.STRING,
-                "Coordinate type: 'generic' for Slide-seq/MERFISH, 'grid' for Visium",
-                default="generic",
-                enum=["generic", "grid"],
-            ),
-        ],
-        returns="None",
-        returns_description="Modifies adata in place: obsp['spatial_connectivities'] and obsp['spatial_distances']",
-        requires=["spatial coordinates in adata.obsm['spatial']", "pip install peach[spatial]"],
-        modifies_adata=["obsp['spatial_connectivities']", "obsp['spatial_distances']"],
-    ),
-    "tl.archetype_nhood_enrichment": ToolSchema(
-        name="tl.archetype_nhood_enrichment",
-        description="Test spatial neighborhood enrichment between archetype groups via permutation test. "
-        "For each archetype pair, tests whether cells co-localize more/less than expected by chance.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial graph"),
-            Parameter("cluster_key", ParamType.STRING, "Column in adata.obs with archetype labels", default="archetypes"),
-            Parameter("n_perms", ParamType.INTEGER, "Number of permutations for significance testing", default=1000),
-            Parameter("seed", ParamType.INTEGER, "Random seed for permutation reproducibility", default=42),
-        ],
-        returns="Dict",
-        returns_description="Dict with 'zscore' and 'count' arrays [n_archetypes x n_archetypes]. "
-        "Positive z-score = enriched (co-localized), negative = depleted (separated). "
-        "Also stored in adata.uns['archetype_nhood_enrichment'].",
-        requires=["spatial_connectivities in adata.obsp (from spatial_neighbors)", "archetypes in adata.obs"],
-        modifies_adata=["uns['archetype_nhood_enrichment']"],
-    ),
-    "tl.archetype_co_occurrence": ToolSchema(
-        name="tl.archetype_co_occurrence",
-        description="Compute distance-dependent co-occurrence of archetype groups. "
-        "Measures how co-occurrence ratio varies with spatial distance.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial coordinates"),
-            Parameter("cluster_key", ParamType.STRING, "Column in adata.obs with archetype labels", default="archetypes"),
-            Parameter("spatial_key", ParamType.STRING, "Key in adata.obsm with spatial coordinates", default="spatial"),
-            Parameter("interval", ParamType.INTEGER, "Number of distance intervals to evaluate", default=50),
-        ],
-        returns="Dict",
-        returns_description="Dict with 'occ' (ratios [n_arch, n_arch, n_intervals]) and 'interval' (distance bins). "
-        "Also stored in adata.uns['archetype_co_occurrence'].",
-        requires=["spatial coordinates in adata.obsm", "archetypes in adata.obs", "pip install peach[spatial]"],
-        modifies_adata=["uns['archetype_co_occurrence']"],
-    ),
-    # =========================================================================
-    # tl (TOOLS) - CellRank Integration
-    # =========================================================================
-    "tl.setup_cellrank": ToolSchema(
-        name="tl.setup_cellrank",
-        description="Set up CellRank workflow for trajectory analysis with archetypes or centroids as terminal states.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter(
-                "high_purity_threshold",
-                ParamType.FLOAT,
-                "Percentile threshold for high-purity cells (only for archetypes)",
-                default=0.80,
-            ),
-            Parameter("n_neighbors", ParamType.INTEGER, "Number of neighbors for k-NN graph", default=30),
-            Parameter("n_pcs", ParamType.INTEGER, "Number of PCs to use", default=11),
-            Parameter("compute_paga", ParamType.BOOLEAN, "Compute PAGA connectivity", default=True),
-            Parameter("solver", ParamType.STRING, "Solver for fate probabilities", default="gmres"),
-            Parameter("tol", ParamType.FLOAT, "Tolerance for solver", default=1e-6),
-            Parameter(
-                "terminal_obs_key",
-                ParamType.STRING,
-                "Key in obs for terminal states ('archetypes' or 'centroid_assignments')",
-                default="archetypes",
-            ),
-            Parameter("verbose", ParamType.BOOLEAN, "Print progress", default=True),
-        ],
-        returns="Tuple[ConnectivityKernel, GPCCA]",
-        returns_description="CellRank kernel and GPCCA estimator with fate probabilities",
-        requires=["terminal_obs_key in adata.obs", "X_pca in adata.obsm"],
-        modifies_adata=["obs['terminal_states']", "obsm['fate_probabilities']", "uns['lineage_names']"],
-    ),
-    "tl.compute_lineage_pseudotimes": ToolSchema(
-        name="tl.compute_lineage_pseudotimes",
-        description="Convert fate probabilities to lineage-specific pseudotimes. Stores in adata.obs.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("lineage_names", ParamType.ARRAY, "Lineage names to compute. None = all from uns['lineage_names']", required=False, default=None),
-            Parameter("fate_prob_key", ParamType.STRING, "Key in obsm for fate probabilities", default="fate_probabilities"),
-        ],
-        returns="None",
-        returns_description="Modifies adata.obs in-place with pseudotime_to_{lineage} columns",
-        requires=["fate_probabilities in adata.obsm", "lineage_names in adata.uns"],
-        modifies_adata=["obs['pseudotime_to_{lineage}']"],
-    ),
-    # =========================================================================
-    # pl (PLOTTING)
-    # =========================================================================
+
+    # --- pl module ---
     "pl.archetypal_space": ToolSchema(
         name="pl.archetypal_space",
-        description="Plot cells in 2D archetypal simplex projection.",
+        description="Visualize cells in 3D archetypal coordinate space.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("color", ParamType.STRING, "Column to color by", default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-            Parameter("save", ParamType.STRING, "Path to save figure", default=None),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with archetypal coordinates.", required=True, default=None),
+        Parameter("archetype_coords_key", ParamType.STRING, "str, default: \"archetype_coordinates\" Key in adata.uns containing archetype c...", required=False, default='archetype_coordinates'),
+        Parameter("pca_key", ParamType.STRING, "str, default: \"X_pca\" Key in adata.obsm containing PCA coordinates [n_cells, ...", required=False, default='X_pca'),
+        Parameter("color_by", ParamType.STRING, "str | None, default: None Column in adata.obs (categorical/continuous) or gen...", required=False, default=None),
+        Parameter("use_layer", ParamType.STRING, "str, default: \"logcounts\" Layer for gene expression. Falls back to adata.X if...", required=False, default='logcounts'),
+        Parameter("cell_size", ParamType.FLOAT, "float, default: 2.0 Size of cell points.", required=False, default=2.0),
+        Parameter("cell_opacity", ParamType.FLOAT, "float, default: 0.6 Opacity of cell points (0-1).", required=False, default=0.6),
+        Parameter("archetype_size", ParamType.FLOAT, "float, default: 8.0 Size of archetype diamond markers.", required=False, default=8.0),
+        Parameter("archetype_color", ParamType.STRING, "str, default: \"red\" Color for archetype markers.", required=False, default='red'),
+        Parameter("show_archetype_labels", ParamType.BOOLEAN, "bool, default: True Whether to show 'Arch1', 'Arch2', etc. labels.", required=False, default=True),
+        Parameter("show_connections", ParamType.BOOLEAN, "bool, default: True Whether to draw lines connecting all archetype pairs.", required=False, default=True),
+        Parameter("color_scale", ParamType.STRING, "str, default: \"viridis\" Plotly color scale for continuous variables.", required=False, default='viridis'),
+        Parameter("categorical_colors", ParamType.OBJECT, "dict | None, default: None Custom colors for categorical variables {category:...", required=False, default=None),
+        Parameter("title", ParamType.STRING, "str, default: \"Archetypal Space Visualization\" Plot title.", required=False, default='Archetypal Space Visualization'),
+        Parameter("auto_scale", ParamType.BOOLEAN, "bool, default: True Whether to auto-scale axes using 1st-99th percentiles.", required=False, default=True),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save HTML file.", required=False, default=None),
+        Parameter("fixed_ranges", ParamType.OBJECT, "dict | None, default: None Fixed axis ranges {'x': (min, max), 'y': (min, max...", required=False, default=None),
+        Parameter("legend_marker_scale", ParamType.FLOAT, "float, default: 1.0 Scale factor for legend marker sizes.", required=False, default=1.0),
+        Parameter("legend_font_size", ParamType.INTEGER, "int, default: 12 Font size for legend text.", required=False, default=12),
+        Parameter("show_centroids", ParamType.BOOLEAN, "bool, default: False Whether to display condition centroids on the plot. Requ...", required=False, default=False),
+        Parameter("centroid_condition", ParamType.STRING, "str | None, default: None Column name in adata.obs for condition centroids. M...", required=False, default=None),
+        Parameter("centroid_order", ParamType.ARRAY, "list | None, default: None Order of condition levels for trajectory line. If ...", required=False, default=None),
+        Parameter("centroid_groupby", ParamType.STRING, "str | None, default: None Column name for multi-group trajectories. If provid...", required=False, default=None),
+        Parameter("centroid_size", ParamType.FLOAT, "float, default: 20.0 Size of centroid markers.", required=False, default=20.0),
+        Parameter("centroid_start_symbol", ParamType.STRING, "str, default: \"circle\" Plotly symbol for first centroid in trajectory.", required=False, default='circle'),
+        Parameter("centroid_end_symbol", ParamType.STRING, "str, default: \"diamond\" Plotly symbol for last centroid in trajectory.", required=False, default='diamond'),
+        Parameter("centroid_line_width", ParamType.FLOAT, "float, default: 6.0 Width of trajectory line connecting centroids.", required=False, default=6.0),
+        Parameter("centroid_colors", ParamType.OBJECT, "dict | None, default: None Custom colors for centroid markers/lines. If centr...", required=False, default=None),
         ],
         returns="Figure",
-        returns_description="Matplotlib Figure (None if show=True)",
-        requires=["cell_archetype_weights in adata.obsm"],
-        modifies_adata=[],
     ),
-    "pl.training_metrics": ToolSchema(
-        name="pl.training_metrics",
-        description="Plot training loss curves and metrics.",
+    "pl.archetypal_space_multi": ToolSchema(
+        name="pl.archetypal_space_multi",
+        description="Compare multiple archetypal analysis fits in 3D PCA space.",
         parameters=[
-            Parameter("results", ParamType.OBJECT, "TrainingResults dict from tl.train_archetypal"),
-            Parameter(
-                "metrics",
-                ParamType.ARRAY,
-                "Metrics to plot",
-                default=["loss", "archetype_r2"],
-                items_type=ParamType.STRING,
-            ),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata_list", ParamType.ADATA_REF, "list of AnnData List of AnnData objects with PCA coordinates and archetype re...", required=True, default=None),
+        Parameter("archetype_coords_key", ParamType.STRING, "str, default: \"archetype_coordinates\" Key in adata.uns containing archetype c...", required=False, default='archetype_coordinates'),
+        Parameter("pca_key", ParamType.STRING, "str, default: \"X_pca\" Key in adata.obsm containing PCA coordinates", required=False, default='X_pca'),
+        Parameter("labels_list", ParamType.ARRAY, "list of str | None, default: None Labels for each dataset (defaults to 'Set 1...", required=False, default=None),
+        Parameter("color_by", ParamType.ARRAY, "str | list of str | None, default: None Column(s) to color cells by - single ...", required=False, default=None),
+        Parameter("color_values", ParamType.ARRAY, "array | list of arrays | None, default: None Direct color values - single arr...", required=False, default=None),
+        Parameter("cell_size", ParamType.FLOAT, "float, default: 2.0 Size of cell points", required=False, default=2.0),
+        Parameter("cell_opacity", ParamType.FLOAT, "float, default: 0.6 Opacity of cell points (0-1)", required=False, default=0.6),
+        Parameter("archetype_size", ParamType.FLOAT, "float, default: 8.0 Size of archetype markers", required=False, default=8.0),
+        Parameter("archetype_colors", ParamType.ARRAY, "list of str | None, default: None Colors for archetype markers per dataset", required=False, default=None),
+        Parameter("show_labels", ParamType.BOOLEAN, "bool | list of int, default: True Which datasets to show archetype labels for...", required=False, default=True),
+        Parameter("auto_scale", ParamType.BOOLEAN, "bool, default: True Whether to auto-scale axes based on all data", required=False, default=True),
+        Parameter("range_reference", ParamType.INTEGER, "int | AnnData | None, default: None Reference dataset index or AnnData for ax...", required=False, default=None),
+        Parameter("fixed_ranges", ParamType.FLOAT, "dict | None, default: None Fixed axis ranges {'x': (min, max), 'y': (min, max...", required=False, default=None),
+        Parameter("color_scale", ParamType.STRING, "str, default: 'viridis' Plotly color scale for continuous variables", required=False, default='viridis'),
+        Parameter("categorical_colors", ParamType.OBJECT, "dict | None, default: None Custom colors for categorical variables", required=False, default=None),
+        Parameter("title", ParamType.STRING, "str, default: 'Multi-Archetypal Space Comparison' Plot title", required=False, default='Multi-Archetypal Space Comparison'),
+        Parameter("save_path", ParamType.STRING, "str | Path | None, default: None Optional path to save HTML file", required=False, default=None),
         ],
         returns="Figure",
-        returns_description="Multi-panel training metrics figure",
-        requires=["TrainingResults from training"],
-        modifies_adata=[],
     ),
-    "pl.dotplot": ToolSchema(
-        name="pl.dotplot",
-        description="Create dotplot of gene/pathway expression by archetype.",
+    "pl.archetype_correspondence": ToolSchema(
+        name="pl.archetype_correspondence",
+        description="K_src × K_tgt heatmap for archetype correspondence.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("var_names", ParamType.ARRAY, "Genes or pathways to plot", items_type=ParamType.STRING),
-            Parameter("groupby", ParamType.STRING, "Grouping column", default="archetypes"),
-            Parameter("use_raw", ParamType.BOOLEAN, "Use raw expression", default=False),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("flow_between_result", ParamType.STRING, "FlowBetweenResult Result from ``pc.tl.flow_between()`` with archetype corresp...", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure to this path (format inferred from exten...", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
         ],
         returns="Figure",
-        returns_description="Dotplot figure with size=fraction expressing, color=mean expression",
-        requires=["archetypes in adata.obs"],
-        modifies_adata=[],
     ),
     "pl.archetype_positions": ToolSchema(
         name="pl.archetype_positions",
-        description="Plot archetype positions in PCA space.",
+        description="Visualize archetype positions in PCA space with distance matrix.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("dims", ParamType.ARRAY, "PCA dimensions to plot", default=[0, 1], items_type=ParamType.INTEGER),
-            Parameter("show_cells", ParamType.BOOLEAN, "Show cell scatter", default=True),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with archetype coordinates", required=True, default=None),
+        Parameter("coords_key", ParamType.STRING, "str, default: \"archetype_coordinates\" Key in adata.uns containing archetype c...", required=False, default='archetype_coordinates'),
+        Parameter("title", ParamType.STRING, "str, default: \"Archetype Positions in PCA Space\" Main figure title", required=False, default='Archetype Positions in PCA Space'),
+        Parameter("figsize", ParamType.ARRAY, "tuple, default: (15, 6) Figure size as (width, height)", required=False, default=(15, 6)),
+        Parameter("cmap", ParamType.STRING, "str, default: 'tab10' Colormap for archetype points", required=False, default='tab10'),
+        Parameter("show_distances", ParamType.BOOLEAN, "bool, default: True Whether to show distance matrix panel", required=False, default=True),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save the figure **kwargs Additional argumen...", required=False, default=None),
         ],
-        returns="Figure",
-        returns_description="2D PCA scatter with archetype positions marked",
-        requires=["archetype_coordinates in adata.uns", "X_pca in adata.obsm"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # _core (Advanced)
-    # =========================================================================
-    "_core.calculate_archetype_r2": ToolSchema(
-        name="_core.calculate_archetype_r2",
-        description="Calculate R² for archetypal reconstruction.",
-        parameters=[
-            Parameter("reconstructions", ParamType.OBJECT, "Reconstructed data tensor"),
-            Parameter("original", ParamType.OBJECT, "Original data tensor"),
-        ],
-        returns="float",
-        returns_description="R² value (1.0=perfect, 0.0=mean baseline, <0=worse than mean)",
-        requires=[],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # pp (PREPROCESSING) - Remaining
-    # =========================================================================
-    "pp.load_pathway_networks": ToolSchema(
-        name="pp.load_pathway_networks",
-        description="Load pathway gene sets from MSigDB or custom GMT files.",
-        parameters=[
-            Parameter("pathway_source", ParamType.STRING, "Source: 'msigdb', 'reactome', or GMT file path"),
-            Parameter(
-                "collection", ParamType.STRING, "MSigDB collection", default="H", enum=["H", "C2", "C5", "C6", "C7"]
-            ),
-            Parameter(
-                "species", ParamType.STRING, "Species for gene symbols", default="human", enum=["human", "mouse"]
-            ),
-            Parameter("min_genes", ParamType.INTEGER, "Minimum genes per pathway", default=10),
-            Parameter("max_genes", ParamType.INTEGER, "Maximum genes per pathway", default=500),
-        ],
-        returns="Dict[str, Set[str]]",
-        returns_description="pathway_name → set of gene symbols",
-        requires=[],
-        modifies_adata=[],
-    ),
-    "pp.compute_pathway_scores": ToolSchema(
-        name="pp.compute_pathway_scores",
-        description="Compute pathway activity scores per cell (AUCell-like scoring).",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("pathways", ParamType.OBJECT, "Dict of pathway → gene sets"),
-            Parameter("method", ParamType.STRING, "Scoring method", default="mean", enum=["mean", "sum", "aucell"]),
-            Parameter("use_raw", ParamType.BOOLEAN, "Use raw counts", default=False),
-        ],
-        returns="AnnData",
-        returns_description="AnnData with pathway_scores added to obsm",
-        requires=["gene symbols in adata.var_names"],
-        modifies_adata=["obsm['pathway_scores']"],
-    ),
-    # =========================================================================
-    # tl (TOOLS) - Pattern Analysis Variants
-    # =========================================================================
-    "tl.archetype_exclusive_patterns": ToolSchema(
-        name="tl.archetype_exclusive_patterns",
-        description="Test genes/pathways exclusive to single archetypes (high in one, low in all others).",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter(
-                "feature_type", ParamType.STRING, "Features to test", default="genes", enum=["genes", "pathways"]
-            ),
-            Parameter("bin_prop", ParamType.FLOAT, "Proportion of cells per archetype", default=0.1),
-            Parameter("fdr_method", ParamType.STRING, "FDR correction method", default="benjamini_hochberg"),
-            Parameter("min_logfc", ParamType.FLOAT, "Minimum log fold change", default=0.5),
-        ],
-        returns="DataFrame[PatternAssociationResult]",
-        returns_description="pattern_type='exclusive'. Columns: gene/pathway, pattern_code, pvalue, significant",
-        requires=["archetypes in adata.obs"],
-        modifies_adata=[],
-    ),
-    "tl.specialization_patterns": ToolSchema(
-        name="tl.specialization_patterns",
-        description="Test genes/pathways showing specialization (high in subset, low in complement).",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter(
-                "feature_type", ParamType.STRING, "Features to test", default="genes", enum=["genes", "pathways"]
-            ),
-            Parameter("bin_prop", ParamType.FLOAT, "Proportion of cells per group", default=0.1),
-            Parameter("fdr_method", ParamType.STRING, "FDR correction method", default="benjamini_hochberg"),
-            Parameter("min_logfc", ParamType.FLOAT, "Minimum log fold change", default=0.5),
-        ],
-        returns="DataFrame[PatternAssociationResult]",
-        returns_description="pattern_type='specialization'. Tests all subsets of archetypes",
-        requires=["archetypes in adata.obs"],
-        modifies_adata=[],
-    ),
-    "tl.tradeoff_patterns": ToolSchema(
-        name="tl.tradeoff_patterns",
-        description="Test genes/pathways showing tradeoffs (high in one group, low in another).",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter(
-                "feature_type", ParamType.STRING, "Features to test", default="genes", enum=["genes", "pathways"]
-            ),
-            Parameter("bin_prop", ParamType.FLOAT, "Proportion of cells per group", default=0.1),
-            Parameter("mode", ParamType.STRING, "Tradeoff mode", default="pairs", enum=["pairs", "patterns"]),
-            Parameter("fdr_method", ParamType.STRING, "FDR correction method", default="benjamini_hochberg"),
-        ],
-        returns="DataFrame[PatternAssociationResult]",
-        returns_description="pattern_type='tradeoff'. Tests pairwise or multi-archetype tradeoffs",
-        requires=["archetypes in adata.obs"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # tl (TOOLS) - CellRank Remaining
-    # =========================================================================
-    "tl.compute_lineage_drivers": ToolSchema(
-        name="tl.compute_lineage_drivers",
-        description="Identify driver genes for each lineage using correlation with fate probabilities.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("lineages", ParamType.ARRAY, "Lineage names to analyze", items_type=ParamType.STRING),
-            Parameter("n_top_genes", ParamType.INTEGER, "Number of top drivers per lineage", default=100),
-            Parameter("use_raw", ParamType.BOOLEAN, "Use raw counts for correlation", default=False),
-        ],
-        returns="DataFrame",
-        returns_description="Columns: gene, lineage, correlation, pvalue, qvalue",
-        requires=["fate probabilities computed"],
-        modifies_adata=[],
-    ),
-    "tl.compute_transition_frequencies": ToolSchema(
-        name="tl.compute_transition_frequencies",
-        description="Compute transition frequencies between archetypes from transition matrix.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("transition_key", ParamType.STRING, "Key for transition matrix in obsp", default="T_forward"),
-        ],
-        returns="DataFrame",
-        returns_description="Columns: source_archetype, target_archetype, frequency, normalized_freq",
-        requires=["T_forward in adata.obsp", "archetypes in adata.obs"],
-        modifies_adata=[],
-    ),
-    "tl.single_trajectory_analysis": ToolSchema(
-        name="tl.single_trajectory_analysis",
-        description="Analyze single archetype-to-archetype trajectory. Filters cells by source archetype and target "
-        "fate probability, returns subset AnnData ready for CellRank gene_trends. "
-        "REQUIRES: setup_cellrank() and compute_lineage_pseudotimes() to be run first. "
-        "For driver genes, use CellRank's g.compute_lineage_drivers() directly.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with CellRank setup"),
-            Parameter(
-                "trajectory",
-                ParamType.ARRAY,
-                "Archetype pair as [source_idx, target_idx], e.g., [0, 3]",
-                items_type=ParamType.INTEGER,
-            ),
-            Parameter(
-                "trajectories",
-                ParamType.ARRAY,
-                "Multiple trajectory pairs to analyze sequentially",
-                required=False,
-                default=None,
-            ),
-            Parameter(
-                "selection_method",
-                ParamType.STRING,
-                "How to select source cells: 'discrete' (archetypes column), 'weight' (threshold), 'both' (compare)",
-                default="discrete",
-                enum=["discrete", "weight", "both"],
-            ),
-            Parameter(
-                "source_weight_threshold",
-                ParamType.FLOAT,
-                "Minimum barycentric weight for weight-based selection",
-                default=0.4,
-            ),
-            Parameter(
-                "target_fate_threshold", ParamType.FLOAT, "Minimum fate probability for target archetype", default=0.4
-            ),
-            Parameter("verbose", ParamType.BOOLEAN, "Print progress", default=True),
-        ],
-        returns="Tuple[SingleTrajectoryResult, AnnData]",
-        returns_description="(result, adata_traj) - Result metadata and subset AnnData for trajectory cells. "
-        "Use adata_traj directly with cr.pl.gene_trends(). List if trajectories provided.",
-        requires=[
-            "fate_probabilities in adata.obsm",
-            "lineage_names in adata.uns",
-            "pseudotime_to_{archetype} in adata.obs (from compute_lineage_pseudotimes)",
-            "archetypes in adata.obs (for selection_method='discrete')",
-        ],
-        modifies_adata=["obs['trajectory_{src}_to_{tgt}_cells']", "uns['trajectory_{src}_to_{tgt}']"],
-    ),
-    # =========================================================================
-    # pl (PLOTTING) - Remaining
-    # =========================================================================
-    "pl.archetypal_space_multi": ToolSchema(
-        name="pl.archetypal_space_multi",
-        description="Plot multiple archetypal space panels, one per condition.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("groupby", ParamType.STRING, "Column to split panels by"),
-            Parameter("color", ParamType.STRING, "Column to color cells by", default=None),
-            Parameter("ncols", ParamType.INTEGER, "Number of columns in grid", default=3),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-            Parameter("save", ParamType.STRING, "Path to save figure", default=None),
-        ],
-        returns="Figure",
-        returns_description="Multi-panel figure with one simplex per group",
-        requires=["cell_archetype_weights in adata.obsm", "groupby column in adata.obs"],
-        modifies_adata=[],
-    ),
-    "pl.elbow_curve": ToolSchema(
-        name="pl.elbow_curve",
-        description="Plot metric vs n_archetypes for model selection (elbow method).",
-        parameters=[
-            Parameter("cv_summary", ParamType.OBJECT, "CVSummary from hyperparameter_search"),
-            Parameter("metric", ParamType.STRING, "Metric to plot", default="archetype_r2"),
-            Parameter("show_std", ParamType.BOOLEAN, "Show standard deviation bands", default=True),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="Figure",
-        returns_description="Elbow curve with error bars",
-        requires=["CVSummary from hyperparameter_search"],
-        modifies_adata=[],
+        returns="Any",
     ),
     "pl.archetype_positions_3d": ToolSchema(
         name="pl.archetype_positions_3d",
-        description="Plot archetype positions in 3D PCA space.",
+        description="Visualize archetype positions in 3D PCA space.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("dims", ParamType.ARRAY, "PCA dimensions (3)", default=[0, 1, 2], items_type=ParamType.INTEGER),
-            Parameter("show_cells", ParamType.BOOLEAN, "Show cell scatter", default=True),
-            Parameter("alpha", ParamType.FLOAT, "Cell point transparency", default=0.3),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with archetype coordinates", required=True, default=None),
+        Parameter("coords_key", ParamType.STRING, "str, default: \"archetype_coordinates\" Key in adata.uns containing archetype c...", required=False, default='archetype_coordinates'),
+        Parameter("title", ParamType.STRING, "str, default: \"Archetype Positions in 3D PCA Space\" Figure title", required=False, default='Archetype Positions in 3D PCA Space'),
+        Parameter("figsize", ParamType.ARRAY, "tuple, default: (12, 10) Figure size as (width, height)", required=False, default=(12, 10)),
+        Parameter("cmap", ParamType.STRING, "str, default: 'tab10' Colormap for archetype points", required=False, default='tab10'),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save the figure **kwargs Additional argumen...", required=False, default=None),
+        ],
+        returns="Any",
+    ),
+    "pl.archetype_radar": ToolSchema(
+        name="pl.archetype_radar",
+        description="Radar/spider plot for archetype phenotype characterization.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must contain regression results (run ``pc.tl.feature_simplex_regressi...", required=True, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int Number of top features per archetype (by ``|vertex_coefficient|``) to inc...", required=False, default=10),
+        Parameter("feature_type", ParamType.STRING, "str ``\"genes\"`` or ``\"pathways\"``.", required=False, default='genes'),
+        Parameter("min_degree", ParamType.INTEGER, "int When set to 2, only include features that have a significant degree-2 (in...", required=False, default=1),
+        Parameter("order_by_similarity", ParamType.BOOLEAN, "bool If True, reorder the archetype spokes using a Fiedler vector (spectral 1...", required=False, default=False),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to display the figure interactively.", required=False, default=True),
+        Parameter("save", ParamType.STRING, "str or None If provided, save figure to this path (format inferred from exten...", required=False, default=None),
         ],
         returns="Figure",
-        returns_description="3D scatter plot with archetype positions",
-        requires=["archetype_coordinates in adata.uns", "X_pca in adata.obsm"],
-        modifies_adata=[],
+    ),
+    "pl.archetype_regression_dotplot": ToolSchema(
+        name="pl.archetype_regression_dotplot",
+        description="Dotplot of top genes per archetype from regression coefficients.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have regression results in ``uns['peach_simplex_regression']``.", required=True, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int Number of top features per archetype to include.", required=False, default=10),
+        Parameter("exclusive_only", ParamType.BOOLEAN, "bool If True, only show features where the max coefficient is at least 2x the...", required=False, default=False),
+        Parameter("degree", ParamType.INTEGER, "int 1 = show only degree-1 (vertex) coefficients. 2 = also show interaction t...", required=False, default=1),
+        Parameter("feature_type", ParamType.STRING, "", required=False, default='genes'),
+        Parameter("save_path", ParamType.STRING, "str or None", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool", required=False, default=True),
+        ],
+        returns="Figure",
     ),
     "pl.archetype_statistics": ToolSchema(
         name="pl.archetype_statistics",
-        description="Plot summary statistics for archetypes (usage, distances, weights).",
+        description="Compute and display statistics about archetype positions.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("show_usage", ParamType.BOOLEAN, "Show archetype usage histogram", default=True),
-            Parameter("show_distances", ParamType.BOOLEAN, "Show distance distributions", default=True),
-            Parameter("show_weights", ParamType.BOOLEAN, "Show weight distributions", default=True),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with archetype coordinates.", required=True, default=None),
+        Parameter("coords_key", ParamType.STRING, "str, default: \"archetype_coordinates\" Key in adata.uns containing archetype c...", required=False, default='archetype_coordinates'),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print statistics to console.", required=False, default=True),
         ],
-        returns="Figure",
-        returns_description="Multi-panel statistics figure",
-        requires=["archetypes in adata.obs", "cell_archetype_weights in adata.obsm"],
-        modifies_adata=[],
-    ),
-    "pl.pattern_dotplot": ToolSchema(
-        name="pl.pattern_dotplot",
-        description="Dotplot visualization of pattern analysis results.",
-        parameters=[
-            Parameter("results_df", ParamType.OBJECT, "DataFrame from pattern_analysis/specialization/tradeoff"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top patterns per type", default=20),
-            Parameter("significance_threshold", ParamType.FLOAT, "FDR threshold", default=0.05),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="Figure",
-        returns_description="Dotplot with size=significance, color=effect size",
-        requires=["PatternAssociationResult DataFrame"],
-        modifies_adata=[],
-    ),
-    "pl.pattern_summary_barplot": ToolSchema(
-        name="pl.pattern_summary_barplot",
-        description="Bar plot summarizing number of significant patterns per archetype.",
-        parameters=[
-            Parameter("results_df", ParamType.OBJECT, "DataFrame from pattern_analysis"),
-            Parameter(
-                "pattern_types",
-                ParamType.ARRAY,
-                "Pattern types to include",
-                default=["exclusive", "specialization", "tradeoff"],
-                items_type=ParamType.STRING,
-            ),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="Figure",
-        returns_description="Grouped bar chart",
-        requires=["PatternAssociationResult DataFrame"],
-        modifies_adata=[],
-    ),
-    "pl.pattern_heatmap": ToolSchema(
-        name="pl.pattern_heatmap",
-        description="Heatmap of pattern effect sizes across archetypes.",
-        parameters=[
-            Parameter("results_df", ParamType.OBJECT, "DataFrame from pattern_analysis"),
-            Parameter("value_col", ParamType.STRING, "Column for heatmap values", default="log_fold_change"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top patterns to show", default=50),
-            Parameter("cluster", ParamType.BOOLEAN, "Hierarchically cluster rows/cols", default=True),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="Figure",
-        returns_description="Clustered heatmap",
-        requires=["PatternAssociationResult DataFrame"],
-        modifies_adata=[],
-    ),
-    "pl.fate_probabilities": ToolSchema(
-        name="pl.fate_probabilities",
-        description="Plot CellRank fate probabilities on UMAP or embedding.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("lineages", ParamType.ARRAY, "Lineages to plot", items_type=ParamType.STRING),
-            Parameter("basis", ParamType.STRING, "Embedding key in obsm", default="X_umap"),
-            Parameter("ncols", ParamType.INTEGER, "Columns in subplot grid", default=3),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="Figure",
-        returns_description="UMAP colored by fate probability per lineage",
-        requires=["fate probabilities computed", "embedding in adata.obsm"],
-        modifies_adata=[],
-    ),
-    # Note: gene_trends removed - use cellrank.pl.gene_trends() directly
-    # =========================================================================
-    # pl (PLOTTING) - Spatial (requires squidpy for analysis, plotly for plots)
-    # =========================================================================
-    "pl.nhood_enrichment": ToolSchema(
-        name="pl.nhood_enrichment",
-        description="Plotly heatmap of archetype neighborhood enrichment z-scores. "
-        "Red = co-localized, blue = spatially separated.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with enrichment results"),
-            Parameter(
-                "uns_key", ParamType.STRING, "Key in adata.uns for enrichment results", default="archetype_nhood_enrichment"
-            ),
-            Parameter("cluster_key", ParamType.STRING, "Column in adata.obs for axis labels", default="archetypes"),
-            Parameter("title", ParamType.STRING, "Plot title", default="Archetype Neighborhood Enrichment"),
-            Parameter("colorscale", ParamType.STRING, "Plotly colorscale", default="RdBu_r"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-        ],
-        returns="Figure",
-        returns_description="Plotly Figure with z-score heatmap (symmetric around 0)",
-        requires=["archetype_nhood_enrichment in adata.uns (from tl.archetype_nhood_enrichment)"],
-        modifies_adata=[],
+        returns="dict",
     ),
     "pl.co_occurrence": ToolSchema(
         name="pl.co_occurrence",
-        description="Plotly line plot of distance-dependent archetype co-occurrence ratios. "
-        "Values > 1 = co-occurrence above chance, < 1 = avoidance.",
+        description="Line plot of distance-dependent archetype co-occurrence ratios.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with co-occurrence results"),
-            Parameter(
-                "uns_key", ParamType.STRING, "Key in adata.uns for co-occurrence results", default="archetype_co_occurrence"
-            ),
-            Parameter("cluster_key", ParamType.STRING, "Column in adata.obs for legend labels", default="archetypes"),
-            Parameter("title", ParamType.STRING, "Plot title", default="Archetype Spatial Co-occurrence"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with co-occurrence results.", required=True, default=None),
+        Parameter("uns_key", ParamType.STRING, "str, default: \"archetype_co_occurrence\" Key in ``adata.uns`` containing co-oc...", required=False, default='archetype_co_occurrence'),
+        Parameter("cluster_key", ParamType.STRING, "str, default: \"archetypes\" Column in ``adata.obs`` with archetype labels.", required=False, default='archetypes'),
+        Parameter("title", ParamType.STRING, "str, default: \"Archetype Spatial Co-occurrence\" Plot title.", required=False, default='Archetype Spatial Co-occurrence'),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save the figure.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool, default: True Whether to display the figure.", required=False, default=True),
         ],
         returns="Figure",
-        returns_description="Plotly Figure with co-occurrence ratio vs distance lines per archetype pair",
-        requires=["archetype_co_occurrence in adata.uns (from tl.archetype_co_occurrence)"],
-        modifies_adata=[],
-    ),
-    "pl.spatial_archetypes": ToolSchema(
-        name="pl.spatial_archetypes",
-        description="ScatterGL plot of cells on spatial coordinates colored by archetype assignment.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial coords"),
-            Parameter("spatial_key", ParamType.STRING, "Key in adata.obsm with 2D spatial coordinates", default="spatial"),
-            Parameter("color_key", ParamType.STRING, "Column in adata.obs to color by", default="archetypes"),
-            Parameter("point_size", ParamType.FLOAT, "Size of scatter points", default=2.0),
-            Parameter("opacity", ParamType.FLOAT, "Point opacity", default=0.7),
-            Parameter("title", ParamType.STRING, "Plot title", default="Spatial Archetype Map"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-        ],
-        returns="Figure",
-        returns_description="Plotly Figure with cells plotted at spatial positions, colored by archetype",
-        requires=["spatial coordinates in adata.obsm", "color_key in adata.obs"],
-        modifies_adata=[],
-    ),
-    "pl.lineage_drivers": ToolSchema(
-        name="pl.lineage_drivers",
-        description="Plot top driver genes for each lineage.",
-        parameters=[
-            Parameter("drivers_df", ParamType.OBJECT, "DataFrame from compute_lineage_drivers"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top drivers per lineage", default=10),
-            Parameter("show_correlation", ParamType.BOOLEAN, "Show correlation values", default=True),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="Figure",
-        returns_description="Horizontal bar chart of driver genes",
-        requires=["lineage_drivers DataFrame"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # v0.5.0: Continuous Characterization (tl)
-    # =========================================================================
-    "tl.feature_simplex_regression": ToolSchema(
-        name="tl.feature_simplex_regression",
-        description="Simplex regression of features on archetype weights using Scheffe polynomials. "
-        "Fits linear (degree 1) and optionally interaction (degree 2) models. "
-        "Stores results in adata.uns['peach_simplex_regression'].",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
-            Parameter(
-                "feature_matrix",
-                ParamType.STRING,
-                "Feature matrix to regress. None = adata.X, str = obsm key, array = direct",
-                required=False,
-                default=None,
-            ),
-            Parameter("feature_names", ParamType.ARRAY, "Feature names. Inferred if None", required=False, default=None),
-            Parameter("max_degree", ParamType.INTEGER, "1 = linear only, 2 = with pairwise interactions", default=2),
-            Parameter("permutation_test", ParamType.BOOLEAN, "Run permutation test for model significance", default=False),
-            Parameter("n_permutations", ParamType.INTEGER, "Number of permutations", default=1000),
-            Parameter("n_bootstrap", ParamType.INTEGER, "Bootstrap samples for CIs (0 to disable)", default=1000),
-            Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 heteroscedasticity-consistent SEs", default=True),
-            Parameter("store_residuals", ParamType.BOOLEAN, "Store residuals in adata.obsm", default=True),
-            Parameter("comprehensive_degree", ParamType.BOOLEAN, "Run degree 2..K-1 fits with incremental F-tests", default=False),
-            Parameter("store_to_adata", ParamType.BOOLEAN, "Store results in adata.uns", default=True),
-            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
-        ],
-        returns="dict (serialized SimplexRegressionResult)",
-        returns_description="vertex_coefficients [n_features, K], vertex_covariance [n_features] list of [K,K], "
-        "r_squared_degree1, f_pvalue, vertex_pvalues, "
-        "interaction_coefficients (optional), CIs (optional), effective_rank, expected_rank, extra_rank_deficient",
-        requires=["cell_archetype_weights in adata.obsm"],
-        modifies_adata=[
-            "uns['peach_simplex_regression']",
-            "obsm['peach_residuals'] (if store_residuals=True)",
-        ],
-    ),
-    "tl.classify_feature_patterns": ToolSchema(
-        name="tl.classify_feature_patterns",
-        description="Classify features into biological pattern types (flat, archetype-exclusive, "
-        "interaction, structured) based on FDR-corrected regression p-values.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter(
-                "regression_result",
-                ParamType.OBJECT,
-                "SimplexRegressionResult. If None, reads from adata.uns",
-                required=False,
-                default=None,
-            ),
-            Parameter("fdr_threshold", ParamType.FLOAT, "FDR p-value threshold for significance", default=0.05),
-            Parameter("exclusive_ratio", ParamType.FLOAT, "Min fold-change for exclusive pattern", default=2.0),
-        ],
-        returns="PatternClassificationResult",
-        returns_description="classifications [n_features] with pattern type and details, pattern_counts dict, "
-        "archetype_features {archetype_idx: [feature_names]}",
-        requires=["peach_simplex_regression in adata.uns (or regression_result)"],
-        modifies_adata=["uns['peach_feature_patterns']"],
-    ),
-    "tl.archetype_driver_regression": ToolSchema(
-        name="tl.archetype_driver_regression",
-        description="Flipped regression: features predict archetype weights (ILR space). "
-        "Identifies which features drive archetypal specialization.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
-            Parameter(
-                "feature_matrix",
-                ParamType.STRING,
-                "Feature matrix (predictors). Default: pathway_scores if available, else adata.X",
-                required=False,
-                default=None,
-            ),
-            Parameter("feature_names", ParamType.ARRAY, "Feature names", required=False, default=None),
-            Parameter("max_degree", ParamType.INTEGER, "1 = main effects only, 2 = with interactions", default=2),
-            Parameter("n_bootstrap", ParamType.INTEGER, "Bootstrap samples for CIs (0 to disable)", default=1000),
-            Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 SEs", default=True),
-            Parameter(
-                "max_interaction_features",
-                ParamType.INTEGER,
-                "Max features allowed for degree=2",
-                default=50,
-            ),
-            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
-        ],
-        returns="dict (serialized DriverRegressionResult)",
-        returns_description="main_coefficients_ilr [K-1, n_features], main_coefficients [K, n_features], "
-        "main_pvalues, main_pvalues_fdr [K, n_features], r_squared [K-1]",
-        requires=["cell_archetype_weights in adata.obsm"],
-        modifies_adata=["uns['peach_driver_regression']"],
-    ),
-    "tl.feature_simplex_decomposition": ToolSchema(
-        name="tl.feature_simplex_decomposition",
-        description="Decompose cell populations by mixture model in archetype weight space. "
-        "Supports Gaussian (ILR) or Dirichlet mixture. Selects component count by BIC or ICL "
-        "and filters by multi-initialization pairwise stability.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
-            Parameter(
-                "feature_matrix",
-                ParamType.STRING,
-                "Feature matrix for component characterization",
-                required=False,
-                default=None,
-            ),
-            Parameter("feature_names", ParamType.ARRAY, "Feature names", required=False, default=None),
-            Parameter(
-                "n_components_range",
-                ParamType.ARRAY,
-                "(min, max) components to test. Default: (K, 3*K)",
-                required=False,
-                default=None,
-            ),
-            Parameter(
-                "model_type",
-                ParamType.STRING,
-                "Mixture model type: 'dirichlet' (on simplex) or 'gaussian' (GMM in ILR space)",
-                default="dirichlet",
-                enum=["gaussian", "dirichlet"],
-            ),
-            Parameter(
-                "model_selection",
-                ParamType.STRING,
-                "Model selection criterion: 'bic' or 'icl' (integrated classification likelihood)",
-                default="bic",
-                enum=["bic", "icl"],
-            ),
-            Parameter("covariance_type", ParamType.STRING, "GMM covariance type", default="full"),
-            Parameter("n_initializations", ParamType.INTEGER, "Random inits for stability", default=20),
-            Parameter("stability_threshold", ParamType.FLOAT, "Min stability score to retain", default=0.7),
-            Parameter("ilr_epsilon", ParamType.FLOAT, "ILR zero smoothing constant", default=0.001),
-            Parameter("characterize_features", ParamType.BOOLEAN, "Compute per-component feature profiles", default=True),
-            Parameter(
-                "reassignment_confidence",
-                ParamType.FLOAT,
-                "Min posterior probability to reassign unstable cells. 0.0 = always reassign, 1.0 = never",
-                default=0.0,
-            ),
-            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
-            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
-        ],
-        returns="dict",
-        returns_description="n_components_optimal, n_components_stable, component_assignments, "
-        "component_simplex_means, component_probabilities, bic_values, "
-        "icl_values (when model_selection='icl'), model_type",
-        requires=["cell_archetype_weights in adata.obsm"],
-        modifies_adata=["uns['peach_gmm']", "obsm['peach_gmm_labels']"],
-    ),
-    "tl.flow_within": ToolSchema(
-        name="tl.flow_within",
-        description="Train a neural ODE flow model to transport source cells to target cells "
-        "within a single AnnData. Measures transport quality via MMD. Supports OT-CFM "
-        "training and holdout validation.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("source", ParamType.OBJECT, "Obs column filter dict, e.g. {'treatment': 'Base'}"),
-            Parameter("target", ParamType.OBJECT, "Obs column filter dict, e.g. {'treatment': 'PD1'}"),
-            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
-            Parameter("hidden_dims", ParamType.ARRAY, "MLP hidden dimensions", default=[128, 128, 128]),
-            Parameter("lr", ParamType.FLOAT, "Learning rate", default=1e-3),
-            Parameter("n_epochs", ParamType.INTEGER, "Training epochs", default=1000),
-            Parameter("batch_size", ParamType.INTEGER, "Batch size", default=256),
-            Parameter("n_steps", ParamType.INTEGER, "ODE integration steps", default=50),
-            Parameter("device", ParamType.STRING, "Computing device", default="cpu"),
-            Parameter("solver_method", ParamType.STRING, "ODE solver: 'euler', 'midpoint', 'heun3', 'dopri5'", default="dopri5"),
-            Parameter("name", ParamType.STRING, "Name for storage key", required=False, default=None),
-            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
-            Parameter("return_model", ParamType.BOOLEAN, "Return FlowModel in result (needed for Jacobian/trajectory)", default=False),
-            Parameter("use_ot", ParamType.BOOLEAN, "Use minibatch Sinkhorn OT coupling for training pairs (requires POT)", default=False),
-            Parameter("holdout_fraction", ParamType.FLOAT, "Fraction of source cells held out for validation MMD (0 to 1)", default=0.0),
-            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
-        ],
-        returns="FlowWithinResult",
-        returns_description="transported [n_source, dim], losses, mmd_before, mmd_after, source/target masks, "
-        "model (if return_model=True), holdout_mmd (if holdout_fraction > 0)",
-        requires=["X_pca in adata.obsm", "source/target columns in adata.obs"],
-        modifies_adata=["uns['peach_flow_*']"],
-    ),
-    "tl.archetype_summary": ToolSchema(
-        name="tl.archetype_summary",
-        description="Generate structured summary for one or all archetypes. "
-        "Aggregates results from regression, patterns, drivers, and GMM.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter(
-                "archetype_idx",
-                ParamType.INTEGER,
-                "Specific archetype index, or None for all",
-                required=False,
-                default=None,
-            ),
-            Parameter("top_n", ParamType.INTEGER, "Top enriched/depleted features to report", default=20),
-            Parameter("include_drivers", ParamType.BOOLEAN, "Include driver regression results", default=True),
-            Parameter("include_gmm", ParamType.BOOLEAN, "Include GMM components", default=True),
-        ],
-        returns="dict | list[dict]",
-        returns_description="Per-archetype summary with top_enriched, top_depleted, interactions, pattern_counts, "
-        "driver_genesets (optional), gmm_components (optional)",
-        requires=["peach_simplex_regression in adata.uns"],
-        modifies_adata=[],
-    ),
-    "tl.archetype_mmd": ToolSchema(
-        name="tl.archetype_mmd",
-        description="K x K MMD similarity matrix between archetype cell populations. "
-        "Uses soft archetype weights (not hard argmax) and permutation-based p-values.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
-            Parameter(
-                "adata_b_key",
-                ParamType.ADATA_REF,
-                "Second AnnData for between-fit comparison. None for within-fit.",
-                required=False,
-                default=None,
-            ),
-            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
-            Parameter("n_permutations", ParamType.INTEGER, "Permutations for p-value computation", default=1000),
-            Parameter("seed", ParamType.INTEGER, "Random seed", default=42),
-            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
-        ],
-        returns="dict (serialized ArchetypeMMDResult)",
-        returns_description="mmd_matrix [K, K], pvalue_matrix [K, K], n_permutations, is_between_fit, "
-        "archetype_names_a, archetype_names_b",
-        requires=["cell_archetype_weights in adata.obsm", "X_pca in adata.obsm"],
-        modifies_adata=["uns['peach_archetype_mmd']"],
-    ),
-    "tl.archetype_feature_similarity": ToolSchema(
-        name="tl.archetype_feature_similarity",
-        description="Feature-level archetype similarity: Spearman correlation on FDR-significant "
-        "regression coefficient vectors. Requires simplex regression results.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter(
-                "adata_b_key",
-                ParamType.ADATA_REF,
-                "Second AnnData for between-fit Spearman on shared features",
-                required=False,
-                default=None,
-            ),
-            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
-        ],
-        returns="dict (serialized ArchetypeFeatureSimilarityResult)",
-        returns_description="spearman_matrix [K, K], spearman_pvalue_matrix [K, K], "
-        "spearman_pvalue_fdr_matrix [K, K], n_shared_features, n_significant_features",
-        requires=["peach_simplex_regression in adata.uns"],
-        modifies_adata=["uns['peach_archetype_feature_similarity']"],
-    ),
-    "tl.archetype_contrasts": ToolSchema(
-        name="tl.archetype_contrasts",
-        description="Pairwise Wald contrasts between archetype regression coefficients. "
-        "Tests H0: beta_j = beta_k using t-distribution (n - K df) with global BH FDR correction.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights and regression results"),
-            Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 heteroscedasticity-consistent covariance", default=True),
-            Parameter("copy", ParamType.BOOLEAN, "Operate on a copy of adata", default=False),
-        ],
-        returns="dict (serialized ArchetypeContrastsResult)",
-        returns_description="pairs [(j,k)], delta_beta {pair: [n_features]}, delta_se, t_scores, "
-        "pvalues (t-distribution), pvalues_fdr (global BH), feature_names, n_features, n_archetypes",
-        requires=["cell_archetype_weights in adata.obsm", "peach_simplex_regression in adata.uns"],
-        modifies_adata=["uns['peach_archetype_contrasts']"],
-    ),
-    "tl.component_regression": ToolSchema(
-        name="tl.component_regression",
-        description="Run simplex regression independently per GMM component. "
-        "Detects component-specific feature drivers masked in the global regression.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights and GMM results"),
-            Parameter("feature_type", ParamType.STRING, "'genes' for adata.X, or obsm key", default="genes"),
-            Parameter("n_bootstrap", ParamType.INTEGER, "Bootstrap replicates for CIs", default=100),
-            Parameter("robust_se", ParamType.BOOLEAN, "Use HC3 SEs", default=True),
-        ],
-        returns="dict",
-        returns_description="component_regs: dict[int, regression_result], n_components: int",
-        requires=["cell_archetype_weights in adata.obsm", "peach_gmm in adata.uns"],
-        modifies_adata=[],
-    ),
-    "tl.flow_gene_alignment": ToolSchema(
-        name="tl.flow_gene_alignment",
-        description="Compute gene alignment with flow velocity. Projects mean transport "
-        "direction onto PCA loadings to identify genes aligned/opposed to the flow.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA loadings"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("t", ParamType.FLOAT, "Time point for instantaneous velocity (None=displacement)", required=False, default=None),
-            Parameter("n_top", ParamType.INTEGER, "Number of top aligned/opposed genes to report", default=50),
-            Parameter(
-                "pca_loadings_key",
-                ParamType.STRING,
-                "Key in adata.varm for PCA loadings",
-                required=False,
-                default=None,
-            ),
-            Parameter("n_permutations", ParamType.INTEGER, "Permutations for significance. 0 to skip", default=0),
-            Parameter("per_cell", ParamType.BOOLEAN, "Compute per-cell per-gene alignment scores (top n_top_features by |alignment_score|)", default=True),
-            Parameter("n_top_features", ParamType.INTEGER, "Max genes in per-cell matrix (by |alignment_score|)", default=2500),
-            Parameter("normalize", ParamType.BOOLEAN, "Normalize loadings to unit norm (cosine-like scores)", default=True),
-            Parameter("random_state", ParamType.INTEGER, "Random seed for permutations", default=42),
-        ],
-        returns="dict",
-        returns_description="alignment_scores [n_genes], gene_names, top_aligned, top_opposed, t, "
-        "velocity_mode ('displacement' or 'instantaneous'), "
-        "alignment_pvalues (optional), alignment_pvalues_fdr (optional), "
-        "per_cell_alignment [n_source, n_top_feat] (if per_cell=True), "
-        "per_cell_gene_names, per_cell_gene_indices (if per_cell=True)",
-        requires=["PCs in adata.varm", "FlowWithinResult"],
-        modifies_adata=[],
-    ),
-    "tl.flow_jacobian": ToolSchema(
-        name="tl.flow_jacobian",
-        description="Compute Jacobian of the flow velocity field. Returns determinants, "
-        "mean Jacobian, and feature expansion scores via PCA loadings.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA loadings"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("flow_model", ParamType.OBJECT, "FlowModel (from flow_result['model'] when return_model=True)"),
-            Parameter("t", ParamType.FLOAT, "Time point to evaluate Jacobian", default=0.5),
-            Parameter("evaluation_points", ParamType.ARRAY, "Points to evaluate at [n_points, dim]. None = subsample source", required=False, default=None),
-            Parameter("pca_loadings_key", ParamType.STRING, "Key in adata.varm for PCA loadings", required=False, default=None),
-            Parameter("aggregate", ParamType.STRING, "Aggregation: 'mean' or 'none'", default="mean"),
-            Parameter("per_cell_features", ParamType.BOOLEAN, "Compute per-cell feature expansion for top genes", default=True),
-            Parameter("n_top_features", ParamType.INTEGER, "Max genes in per-cell expansion matrix", default=2500),
-        ],
-        returns="dict",
-        returns_description="jacobian_det [n_points], mean_jacobian [dim, dim], feature_expansion [n_genes], t, "
-        "per_cell_expansion [n_points, n_top_feat] (if per_cell_features=True), "
-        "per_cell_expansion_gene_names, per_cell_expansion_gene_indices (if per_cell_features=True)",
-        requires=["FlowModel from flow_within(return_model=True)", "PCs in adata.varm (for feature_expansion)"],
-        modifies_adata=[],
-    ),
-    "tl.flow_bifurcation": ToolSchema(
-        name="tl.flow_bifurcation",
-        description="Eigenvalue-based bifurcation scoring along the flow trajectory. "
-        "Computes Jacobian eigenvalues at multiple timepoints to detect saddle points "
-        "and divergent dynamics.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("flow_model", ParamType.OBJECT, "FlowModel (from flow_result['model'] when return_model=True)"),
-            Parameter("n_timepoints", ParamType.INTEGER, "Number of timepoints to evaluate along trajectory", default=10),
-            Parameter("evaluation_points", ParamType.ARRAY, "Points to evaluate [n_points, dim]. None = source cells",
-                      required=False, default=None),
-        ],
-        returns="dict",
-        returns_description="divergence [n_eval, n_t], bifurcation_score [n_eval], "
-        "eigenvalue_real [n_eval, n_t, dim], eigenvalue_imag [n_eval, n_t, dim], "
-        "timepoints [n_t], n_saddle_points [n_eval]",
-        requires=["FlowModel from flow_within(return_model=True)"],
-        modifies_adata=[],
-    ),
-    "tl.flow_feature_graph": ToolSchema(
-        name="tl.flow_feature_graph",
-        description="Static feature coupling graph from flow Jacobian. Builds a directed "
-        "gene interaction graph by projecting the mean Jacobian into gene space "
-        "via PCA loadings, collapsed over time.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA loadings"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("flow_model", ParamType.OBJECT, "FlowModel (from flow_result['model'] when return_model=True)"),
-            Parameter("n_top_genes", ParamType.INTEGER, "Number of top genes by PCA loading", default=200),
-            Parameter("n_timepoints", ParamType.INTEGER, "Timepoints for Jacobian averaging", default=20),
-            Parameter("n_eval_points", ParamType.INTEGER, "Points to evaluate Jacobian", default=300),
-            Parameter("edge_threshold", ParamType.FLOAT, "Min |weight| for edges. Auto = mean + 2*std",
-                      required=False, default=None),
-            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
-        ],
-        returns="dict",
-        returns_description="adjacency_matrix [n_top, n_top], gene_names, gene_indices, "
-        "out_centrality, in_centrality, flow_centrality, top_hub_genes, "
-        "igraph (optional), hub_genes_per_archetype {k: [genes]}",
-        requires=["PCs in adata.varm", "FlowModel from flow_within(return_model=True)"],
-        modifies_adata=[],
-    ),
-    "tl.flow_temporal_feature_graph": ToolSchema(
-        name="tl.flow_temporal_feature_graph",
-        description="Temporal feature graph with (gene, timepoint) nodes. Retains full "
-        "temporal structure with backbone edges and cross-feature edges per timepoint.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with PCA loadings"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("flow_model", ParamType.OBJECT, "FlowModel (from flow_result['model'] when return_model=True)"),
-            Parameter("n_top_genes", ParamType.INTEGER, "Number of top genes by PCA loading", default=200),
-            Parameter("n_timepoints", ParamType.INTEGER, "Timepoints for temporal nodes", default=20),
-            Parameter("n_eval_points", ParamType.INTEGER, "Points to evaluate Jacobian", default=300),
-            Parameter("archetype_pairs", ParamType.ARRAY, "Restrict to cells whose top-2 weights match these pairs", default=None),
-            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
-        ],
-        returns="dict",
-        returns_description="cross_matrices [n_t], self_expansion [n_top, n_t], gene_names, timepoints, "
-        "temporal_centrality [n_top], temporal_profile [n_top, 4], "
-        "top_early_genes, top_mid_early_genes, top_mid_late_genes, top_late_genes",
-        requires=["PCs in adata.varm", "FlowModel from flow_within(return_model=True)"],
-        modifies_adata=[],
-    ),
-    "tl.flow_significance": ToolSchema(
-        name="tl.flow_significance",
-        description="Permutation test for flow significance. Uses the original flow_result's "
-        "MMD improvement as the observed statistic, then retrains flows on permuted "
-        "condition labels to build a null distribution.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within(). Must contain mmd_before and mmd_after"),
-            Parameter("n_permutations", ParamType.INTEGER, "Number of label-permuted null models to train", default=100),
-            Parameter("n_epochs_per_perm", ParamType.INTEGER, "Epochs per null model", default=200),
-            Parameter("statistic", ParamType.STRING, "Test statistic to use", default="mmd"),
-            Parameter("solver_method", ParamType.STRING, "ODE solver: 'euler', 'midpoint', 'heun3', 'dopri5'", default="dopri5"),
-            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
-        ],
-        returns="dict",
-        returns_description="p_value, observed_stat, null_distribution",
-        requires=["FlowWithinResult from flow_within()"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # v0.5.0: Continuous Characterization (pl)
-    # =========================================================================
-    "pl.ternary_facet": ToolSchema(
-        name="pl.ternary_facet",
-        description="Ternary plot for 3 selected archetypes on triangular axes.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
-            Parameter("archetypes", ParamType.ARRAY, "Tuple of 3 archetype indices", default=[0, 1, 2]),
-            Parameter("color_by", ParamType.STRING, "Color by gene, obs column, or obsm column", required=False, default=None),
-            Parameter("style", ParamType.STRING, "Plot style: 'scatter' or 'density'", default="scatter"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Ternary scatter or density plot for 3 archetypes",
-        requires=["cell_archetype_weights in adata.obsm"],
-        modifies_adata=[],
     ),
     "pl.coefficient_heatmap": ToolSchema(
         name="pl.coefficient_heatmap",
-        description="Heatmap of vertex coefficients for top features by R^2.",
+        description="Heatmap of vertex coefficients (beta_k) for top features by R-squared.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top features to display", default=50),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have regression results in ``uns['peach_simplex_regression']``.", required=True, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int Number of top features to display, ranked by R-squared.", required=False, default=50),
+        Parameter("fdr_threshold", ParamType.FLOAT, "float FDR significance threshold. Only features with FDR q < threshold are sh...", required=False, default=0.05),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Plotly heatmap of features x archetypes",
-        requires=["peach_simplex_regression in adata.uns"],
-        modifies_adata=[],
+        returns="Figure",
     ),
-    "pl.r2_barplot": ToolSchema(
-        name="pl.r2_barplot",
-        description="Bar plot of features ranked by R^2, with optional per-archetype |beta| breakdown.",
+    "pl.component_archetype_summary": ToolSchema(
+        name="pl.component_archetype_summary",
+        description="2x2 panel: component sizes, weight profiles, archetype distances, entropy.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top features to display", default=50),
-            Parameter("per_archetype", ParamType.BOOLEAN, "Show per-archetype |beta| grouped bars + global R^2 overlay", default=True),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have GMM results in ``uns['peach_gmm']`` and archetype weights i...", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Ranked bar plot of R^2 values with per-archetype coefficient magnitudes",
-        requires=["peach_simplex_regression in adata.uns"],
-        modifies_adata=[],
+        returns="Figure",
     ),
-    "pl.pattern_summary": ToolSchema(
-        name="pl.pattern_summary",
-        description="Bar plot summarizing pattern type counts from feature classification.",
+    "pl.component_heatmap": ToolSchema(
+        name="pl.component_heatmap",
+        description="Heatmap of per-component feature profiles.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with pattern results"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have GMM results with feature profiles in ``uns['peach_gmm']``.", required=True, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int Number of top features to display, ranked by cross-component variance.", required=False, default=20),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Bar chart of pattern type counts",
-        requires=["peach_feature_patterns in adata.uns"],
-        modifies_adata=[],
+        returns="Figure",
+    ),
+    "pl.component_neighborhood_graph": ToolSchema(
+        name="pl.component_neighborhood_graph",
+        description="2D network graph of GMM components in PCA space.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have GMM results in ``uns['peach_gmm']`` with at least ``compone...", required=True, default=None),
+        Parameter("pca_key", ParamType.STRING, "str Key in ``obsm`` for PCA coordinates used for node layout.", required=False, default='X_pca'),
+        Parameter("edge_threshold", ParamType.FLOAT, "float or None Maximum Euclidean distance (in weight space) for drawing an edge.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        Parameter("save", ParamType.STRING, "str or None If provided, save figure to this path.", required=False, default=None),
+        ],
+        returns="Figure",
     ),
     "pl.component_scatter": ToolSchema(
         name="pl.component_scatter",
-        description="2D PCA scatter colored by GMM component assignment.",
+        description="2D PCA scatter colored by GMM component.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with GMM results"),
-            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have GMM results in ``uns['peach_gmm']`` and labels in ``obsm['p...", required=True, default=None),
+        Parameter("pca_key", ParamType.STRING, "str Key in ``obsm`` for PCA coordinates.", required=False, default='X_pca'),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="PCA scatter with cells colored by GMM component",
-        requires=["peach_gmm in adata.uns", "peach_gmm_labels in adata.obsm"],
-        modifies_adata=[],
+        returns="Figure",
     ),
-    "pl.velocity_quiver": ToolSchema(
-        name="pl.velocity_quiver",
-        description="2D quiver plot of flow transport directions in PCA space.",
+    "pl.component_stability": ToolSchema(
+        name="pl.component_stability",
+        description="Bar plot of component stability scores.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
-            Parameter("n_arrows", ParamType.INTEGER, "Number of arrows to draw", default=200),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have GMM results in ``uns['peach_gmm']``.", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="2D quiver plot with arrows from source to transported positions",
-        requires=["X_pca in adata.obsm", "FlowWithinResult"],
-        modifies_adata=[],
-    ),
-    "pl.mmd_heatmap": ToolSchema(
-        name="pl.mmd_heatmap",
-        description="Heatmap of K x K MMD matrix between archetypes.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with MMD results"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Heatmap of MMD values between archetype populations",
-        requires=["peach_archetype_mmd in adata.uns"],
-        modifies_adata=[],
+        returns="Figure",
     ),
     "pl.contrast_volcano": ToolSchema(
         name="pl.contrast_volcano",
-        description="Volcano plot for one archetype pair: delta-beta vs -log10(FDR q-value). "
-        "Includes 95% CI error bars from Wald SE.",
+        description="Volcano plot for one archetype pair contrast: delta-beta vs -log10(p).",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with contrast results"),
-            Parameter("pair", ParamType.ARRAY, "Archetype pair (j, k) as [j, k]"),
-            Parameter("fdr_threshold", ParamType.FLOAT, "FDR threshold for significance coloring", default=0.05),
-            Parameter("n_labels", ParamType.INTEGER, "Number of top features to label on plot", default=10),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have contrast results in uns['peach_archetype_contrasts'].", required=True, default=None),
+        Parameter("pair", ParamType.INTEGER, "tuple[int, int] Archetype pair (j, k), 0-indexed.", required=True, default=None),
+        Parameter("fdr_threshold", ParamType.FLOAT, "float Significance threshold for FDR-corrected p-values.", required=False, default=0.05),
+        Parameter("n_labels", ParamType.INTEGER, "int Number of top features to label on the plot (by absolute effect size amon...", required=False, default=10),
+        Parameter("save_path", ParamType.STRING, "str or None", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Volcano plot with delta-beta on x-axis, -log10(q) on y-axis, error bars for 95% CI, top feature labels",
-        requires=["peach_archetype_contrasts in adata.uns"],
-        modifies_adata=[],
+        returns="Figure",
     ),
     "pl.contrast_volcano_grid": ToolSchema(
         name="pl.contrast_volcano_grid",
         description="Small-multiple grid of volcano plots for all pairwise Wald contrasts.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with contrast results"),
-            Parameter("fdr_threshold", ParamType.FLOAT, "FDR threshold for significance coloring", default=0.05),
-            Parameter("n_labels", ParamType.INTEGER, "Number of top features to label per subplot", default=5),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have contrast results in uns['peach_archetype_contrasts'].", required=True, default=None),
+        Parameter("fdr_threshold", ParamType.FLOAT, "float Significance threshold for FDR-corrected p-values.", required=False, default=0.05),
+        Parameter("n_labels", ParamType.INTEGER, "int Number of top features to label per subplot (by absolute effect size amon...", required=False, default=3),
+        Parameter("save_path", ParamType.STRING, "str or None", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Grid of volcano subplots, one per archetype pair, with top feature labels",
-        requires=["peach_archetype_contrasts in adata.uns"],
-        modifies_adata=[],
+        returns="Figure",
+    ),
+    "pl.cross_correlations": ToolSchema(
+        name="pl.cross_correlations",
+        description="Diverging dot plot of per-archetype cross-correlations between cell types.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with interaction boundary results in ``adata.uns[uns_k...", required=True, default=None),
+        Parameter("uns_key", ParamType.STRING, "str, default: \"archetype_interaction_boundaries\" Key in ``adata.uns`` with bo...", required=False, default='archetype_interaction_boundaries'),
+        Parameter("title", ParamType.STRING, "str | None, default: None Plot title. Auto-generated from cell type names if ...", required=False, default=None),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save the figure.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool, default: True Whether to display the figure.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.density_comparison": ToolSchema(
+        name="pl.density_comparison",
+        description="KDE comparison: source vs transported vs target in PC1.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data matrix with PCA coordinates.", required=True, default=None),
+        Parameter("flow_result", ParamType.STRING, "FlowWithinResult Result from ``pc.tl.flow_within()``.", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure to this path (format inferred from exten...", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.dotplot": ToolSchema(
+        name="pl.dotplot",
+        description="Create dotplot visualization for statistical results.",
+        parameters=[
+        Parameter("results_df", ParamType.STRING, "pd.DataFrame Statistical test results from pc.tl.gene_associations(), pc.tl.p...", required=True, default=None),
+        Parameter("x_col", ParamType.STRING, "str, default: \"archetype\" Column for x-axis (groups).", required=False, default='archetype'),
+        Parameter("y_col", ParamType.STRING, "str, default: \"gene\" Column for y-axis (features).", required=False, default='gene'),
+        Parameter("size_col", ParamType.STRING, "str, default: \"mean_archetype\" Column for dot size (effect magnitude).", required=False, default='mean_archetype'),
+        Parameter("color_col", ParamType.STRING, "str, default: \"pvalue\" Column for dot color (significance).", required=False, default='pvalue'),
+        Parameter("top_n_per_group", ParamType.INTEGER, "int, default: 10 Number of top results per group.", required=False, default=10),
+        Parameter("filter_zero_p", ParamType.BOOLEAN, "bool, default: True Whether to filter out p-values of exactly 0.", required=False, default=True),
+        Parameter("log_transform_p", ParamType.BOOLEAN, "bool, default: True Whether to apply -log10 transformation to p-values.", required=False, default=True),
+        Parameter("max_log_p", ParamType.FLOAT, "float, default: 300.0 Maximum -log10(p-value) cap.", required=False, default=300.0),
+        Parameter("title", ParamType.STRING, "str, default: \"Gene-Archetype Associations\" Plot title.", required=False, default='Gene-Archetype Associations'),
+        Parameter("figsize", ParamType.FLOAT, "tuple[float, float], default: (12, 8) Figure size as (width, height).", required=False, default=(12, 8)),
+        Parameter("color_palette", ParamType.STRING, "str, default: \"plasma\" Matplotlib colormap name.", required=False, default='plasma'),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save the figure. **kwargs Additional argume...", required=False, default=None),
+        ],
+        returns="Figure",
+    ),
+    "pl.elbow_curve": ToolSchema(
+        name="pl.elbow_curve",
+        description="Plot elbow curves for hyperparameter selection.",
+        parameters=[
+        Parameter("cv_summary", ParamType.STRING, "CVSummary Cross-validation results from pc.tl.hyperparameter_search()", required=True, default=None),
+        Parameter("metrics", ParamType.ARRAY, "list[str], default: [\"archetype_r2\", \"rmse\"] Metrics to plot **kwargs Additio...", required=False, default=['archetype_r2', 'rmse']),
+        ],
+        returns="Figure",
+    ),
+    "pl.fate_probabilities": ToolSchema(
+        name="pl.fate_probabilities",
+        description="Plot fate probabilities on embedding.",
+        parameters=[
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data matrix with fate probabilities computed.", required=True, default=None),
+        Parameter("lineages", ParamType.STRING, "list of str, optional Specific lineages to plot. If None, plots all lineages.", required=False, default=None),
+        Parameter("basis", ParamType.STRING, "str, default: 'X_umap' Embedding to use ('X_umap', 'X_pca', etc.).", required=False, default='X_umap'),
+        Parameter("same_plot", ParamType.BOOLEAN, "bool, default: False If True, plots all lineages on same axes (pie chart styl...", required=False, default=False),
+        Parameter("ncols", ParamType.INTEGER, "int, default: 3 Number of columns for multi-panel plot (if same_plot=False).", required=False, default=3),
+        Parameter("figsize", ParamType.STRING, "tuple, optional Figure size. If None, automatically determined. **kwargs Addi...", required=False, default=None),
+        ],
+        returns="unspecified",
     ),
     "pl.feature_similarity_heatmap": ToolSchema(
         name="pl.feature_similarity_heatmap",
         description="Heatmap of Spearman correlation between archetype beta vectors.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with feature similarity results"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have feature similarity results in uns['peach_archetype_feature_...", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Diverging heatmap of Spearman rho between archetype coefficient vectors",
-        requires=["peach_archetype_feature_similarity in adata.uns"],
-        modifies_adata=[],
-    ),
-    "pl.archetype_regression_dotplot": ToolSchema(
-        name="pl.archetype_regression_dotplot",
-        description="Dotplot of top genes per archetype: dot size = |beta|, dot color = -log10(p). Supports exclusivity filter and degree-2 interactions.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top features per archetype", default=10),
-            Parameter("exclusive_only", ParamType.BOOLEAN, "Only show features where max coef >= 2x second-highest", default=False),
-            Parameter("degree", ParamType.INTEGER, "1 = vertex only, 2 = also show interaction columns", default=1),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Dotplot with genes (rows) x archetypes+interactions (cols), size=|beta|, color=-log10(p)",
-        requires=["peach_simplex_regression in adata.uns"],
-        modifies_adata=[],
-    ),
-    "pl.component_archetype_summary": ToolSchema(
-        name="pl.component_archetype_summary",
-        description="2x2 panel: component sizes, weight profiles, archetype proximity, entropy.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with GMM results"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="2x2 subplot: bar sizes, weight heatmap, proximity bars, entropy boxes",
-        requires=["peach_gmm in adata.uns", "cell_archetype_weights in adata.obsm"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # _core (ADVANCED) - Remaining Core Functions
-    # =========================================================================
-    "_core.train_vae": ToolSchema(
-        name="_core.train_vae",
-        description="Low-level VAE training function with full control over training loop.",
-        parameters=[
-            Parameter("model", ParamType.OBJECT, "Deep_AA model instance"),
-            Parameter("dataloader", ParamType.OBJECT, "PyTorch DataLoader"),
-            Parameter("n_epochs", ParamType.INTEGER, "Number of training epochs", default=100),
-            Parameter("lr", ParamType.FLOAT, "Learning rate", default=1e-3),
-            Parameter("early_stopping", ParamType.BOOLEAN, "Enable early stopping", default=True),
-            Parameter("early_stopping_patience", ParamType.INTEGER, "Early stopping patience", default=10),
-            Parameter("track_stability", ParamType.BOOLEAN, "Track archetype stability", default=True),
-            Parameter("validate_constraints", ParamType.BOOLEAN, "Validate simplex constraints", default=True),
-            Parameter("device", ParamType.STRING, "Computing device", default="cpu"),
-            Parameter("_cv_mode", ParamType.BOOLEAN, "Internal: suppress adata warning during CV", default=False),
-        ],
-        returns="Tuple[CoreTrainingResults, Module]",
-        returns_description="(results_dict, trained_model). Results has same structure as TrainingResults",
-        requires=["initialized model", "DataLoader"],
-        modifies_adata=[],
-    ),
-    "_core.get_archetypal_coordinates": ToolSchema(
-        name="_core.get_archetypal_coordinates",
-        description="Extract archetypal coordinates from model for a single batch (internal use).",
-        parameters=[
-            Parameter("model", ParamType.OBJECT, "Trained Deep_AA model"),
-            Parameter("input", ParamType.OBJECT, "Input tensor [batch_size, n_features]"),
-            Parameter("device", ParamType.STRING, "Computing device", default="cpu"),
-        ],
-        returns="ArchetypalCoordinates",
-        returns_description="Dict with A, B, Y, mu, log_var, z tensors",
-        requires=["trained model"],
-        modifies_adata=[],
-    ),
-    "_core.extract_and_store_archetypal_coordinates": ToolSchema(
-        name="_core.extract_and_store_archetypal_coordinates",
-        description="Extract coordinates for full dataset and store in AnnData.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("model_key", ParamType.MODEL_REF, "Reference to trained model"),
-            Parameter("pca_key", ParamType.STRING, "Key for PCA coordinates", default="X_pca"),
-            Parameter("batch_size", ParamType.INTEGER, "Batch size for extraction", default=256),
-        ],
-        returns="ExtractedCoordinates",
-        returns_description="archetype_positions, cell_weights, cell_latent, cell_mu, cell_log_var",
-        requires=["trained model", "X_pca in adata.obsm"],
-        modifies_adata=[
-            "obsm['cell_archetype_weights']",
-            "obsm['cell_archetype_weights_latent']",
-            "obsm['cell_archetype_weights_mu']",
-            "obsm['cell_archetype_weights_log_var']",
-        ],
-    ),
-    "_core.compute_archetype_distances": ToolSchema(
-        name="_core.compute_archetype_distances",
-        description="Compute Euclidean distances from cells to archetypes in PCA space.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("pca_key", ParamType.STRING, "Key for PCA coordinates", default="X_pca"),
-            Parameter(
-                "archetype_key", ParamType.STRING, "Key for archetype positions", default="archetype_coordinates"
-            ),
-        ],
-        returns="DataFrame",
-        returns_description="Columns: archetype_1_distance, ..., nearest_archetype, nearest_archetype_distance (1-indexed)",
-        requires=["X_pca in adata.obsm", "archetype_coordinates in adata.uns"],
-        modifies_adata=["obsm['archetype_distances']"],
-    ),
-    "_core.bin_cells_by_archetype": ToolSchema(
-        name="_core.bin_cells_by_archetype",
-        description="Assign cells to archetypes based on distance thresholds.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("percentage_per_archetype", ParamType.FLOAT, "Top percentage per archetype", default=0.1),
-            Parameter("obsm_key", ParamType.STRING, "Key for distance matrix", default="archetype_distances"),
-            Parameter("obs_key", ParamType.STRING, "Key for assignments in obs", default="archetypes"),
-        ],
-        returns="None",
-        returns_description="Modifies adata.obs with Categorical assignments",
-        requires=["archetype_distances in adata.obsm"],
-        modifies_adata=["obs['archetypes']"],
-    ),
-    "_core.test_archetype_recovery": ToolSchema(
-        name="_core.test_archetype_recovery",
-        description="Test recovery of true archetypes (for synthetic data validation).",
-        parameters=[
-            Parameter("model", ParamType.OBJECT, "Trained Deep_AA model"),
-            Parameter("true_archetypes", ParamType.OBJECT, "True archetype positions [n_arch, n_features]"),
-            Parameter("dataloader", ParamType.OBJECT, "DataLoader for computing learned positions"),
-            Parameter("tolerance", ParamType.FLOAT, "Distance tolerance for success", default=0.1),
-        ],
-        returns="ArchetypeRecoveryMetrics",
-        returns_description="mean_distance, max_distance, normalized_mean_distance, recovery_success, assignment",
-        requires=["true archetypes (synthetic data)"],
-        modifies_adata=[],
-    ),
-    "_core.generate_convex_data": ToolSchema(
-        name="_core.generate_convex_data",
-        description="Generate synthetic data with known convex hull structure.",
-        parameters=[
-            Parameter("n_samples", ParamType.INTEGER, "Number of samples", default=1000),
-            Parameter("n_archetypes", ParamType.INTEGER, "Number of archetypes", default=4),
-            Parameter("n_features", ParamType.INTEGER, "Number of features", default=100),
-            Parameter("noise_level", ParamType.FLOAT, "Noise standard deviation", default=0.1),
-            Parameter("archetype_scale", ParamType.FLOAT, "Scale of archetype positions", default=1.0),
-            Parameter("seed", ParamType.INTEGER, "Random seed", default=42),
-        ],
-        returns="Dict",
-        returns_description="data, archetypes, weights, labels arrays",
-        requires=[],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # tl (TOOLS) - Flow Between & Simplex Regression Wrappers
-    # =========================================================================
-    "tl.flow_between": ToolSchema(
-        name="tl.flow_between",
-        description="Inter-model flow between separate AnnDatas. Trains a neural ODE to "
-        "transport source cells from one AnnData to target cells in another.",
-        parameters=[
-            Parameter(
-                "adatas",
-                ParamType.ARRAY,
-                "List of AnnData objects (at least 2) to compute flow between",
-            ),
-            Parameter("condition_key", ParamType.STRING, "Column in obs identifying conditions", default="condition"),
-            Parameter(
-                "condition_labels",
-                ParamType.ARRAY,
-                "Ordered condition labels. None = infer from condition_key",
-                required=False,
-                default=None,
-                items_type=ParamType.STRING,
-            ),
-            Parameter(
-                "pairs",
-                ParamType.ARRAY,
-                "Specific (source, target) pairs to compute. None = consecutive pairs",
-                required=False,
-                default=None,
-            ),
-            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
-            Parameter(
-                "hidden_dims",
-                ParamType.ARRAY,
-                "MLP hidden dimensions",
-                default=[128, 128, 128],
-                items_type=ParamType.INTEGER,
-            ),
-            Parameter("lr", ParamType.FLOAT, "Learning rate", default=1e-3),
-            Parameter("n_epochs", ParamType.INTEGER, "Training epochs", default=1000),
-            Parameter("batch_size", ParamType.INTEGER, "Batch size", default=256),
-            Parameter("n_steps", ParamType.INTEGER, "ODE integration steps", default=50),
-            Parameter("device", ParamType.STRING, "Computing device", default="cpu"),
-            Parameter(
-                "solver_method",
-                ParamType.STRING,
-                "ODE solver: 'euler', 'midpoint', 'heun3', 'dopri5'",
-                default="dopri5",
-            ),
-            Parameter("use_ot", ParamType.BOOLEAN, "Use minibatch Sinkhorn OT coupling for training pairs", default=False),
-            Parameter("random_state", ParamType.INTEGER, "Random seed", default=42),
-        ],
-        returns="dict",
-        returns_description="Per-pair flow results with transported cells, losses, MMD before/after, "
-        "archetype correspondence matrix (K_src x K_tgt)",
-        requires=["X_pca in each adata.obsm"],
-        modifies_adata=[],
-    ),
-    "tl.gene_simplex_regression": ToolSchema(
-        name="tl.gene_simplex_regression",
-        description="Convenience wrapper: simplex regression on adata.X (gene expression). "
-        "Calls tl.feature_simplex_regression with feature_matrix=None.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
-        ],
-        returns="dict (serialized SimplexRegressionResult)",
-        returns_description="vertex_coefficients [n_genes, K], r_squared_degree1, vertex_pvalues, "
-        "interaction_coefficients (optional). Same as feature_simplex_regression.",
-        requires=["cell_archetype_weights in adata.obsm"],
-        modifies_adata=["uns['peach_simplex_regression']"],
-    ),
-    "tl.pathway_simplex_regression": ToolSchema(
-        name="tl.pathway_simplex_regression",
-        description="Convenience wrapper: simplex regression on pathway scores. "
-        "Calls tl.feature_simplex_regression with feature_matrix='pathway_scores'.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights and pathway scores"),
-        ],
-        returns="dict (serialized SimplexRegressionResult)",
-        returns_description="vertex_coefficients [n_pathways, K], r_squared_degree1, vertex_pvalues, "
-        "interaction_coefficients (optional). Same as feature_simplex_regression.",
-        requires=["cell_archetype_weights in adata.obsm", "pathway_scores in adata.obsm"],
-        modifies_adata=["uns['peach_simplex_regression']"],
-    ),
-    # =========================================================================
-    # tl (TOOLS) - Spatial Analysis (v0.5.0 additions)
-    # =========================================================================
-    "tl.archetype_spatial_autocorr": ToolSchema(
-        name="tl.archetype_spatial_autocorr",
-        description="Spatial autocorrelation (Moran's I / Geary's C) per archetype weight. "
-        "Measures whether archetype weight distributions are spatially clustered.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial graph and archetype weights"),
-            Parameter("weights_key", ParamType.STRING, "Key in obsm for archetype weights", default="cell_archetype_weights"),
-            Parameter(
-                "mode",
-                ParamType.STRING,
-                "Autocorrelation measure: 'moran' (Moran's I) or 'geary' (Geary's C)",
-                default="moran",
-                enum=["moran", "geary"],
-            ),
-            Parameter("n_perms", ParamType.INTEGER, "Number of permutations for significance", default=100),
-            Parameter("n_jobs", ParamType.INTEGER, "Number of parallel jobs", default=1),
-        ],
-        returns="DataFrame",
-        returns_description="Per-archetype spatial autocorrelation statistics (I/C, p-value, z-score)",
-        requires=["spatial_connectivities in adata.obsp", "cell_archetype_weights in adata.obsm"],
-        modifies_adata=["uns['archetype_spatial_autocorr']"],
-    ),
-    "tl.archetype_interaction_boundaries": ToolSchema(
-        name="tl.archetype_interaction_boundaries",
-        description="Detect spatial fronts where archetype compositions diverge between cell types "
-        "using Jensen-Shannon Divergence (JSD) on archetype weight vectors.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial coords and archetype weights"),
-            Parameter("cell_type_col", ParamType.STRING, "Column in adata.obs with cell type labels", default="Cell_Type"),
-            Parameter("weights_key", ParamType.STRING, "Key in obsm for archetype weights", default="cell_archetype_weights"),
-            Parameter(
-                "cell_type_a",
-                ParamType.STRING,
-                "First cell type. None = auto-detect",
-                required=False,
-                default=None,
-            ),
-            Parameter(
-                "cell_type_b",
-                ParamType.STRING,
-                "Second cell type. None = auto-detect",
-                required=False,
-                default=None,
-            ),
-        ],
-        returns="dict",
-        returns_description="boundary_scores, per-archetype cross-correlations, cell type pair metadata",
-        requires=["cell_archetype_weights in adata.obsm", "cell_type_col in adata.obs"],
-        modifies_adata=["uns['archetype_interaction_boundaries']"],
-    ),
-    "tl.archetype_pair_enrichment": ToolSchema(
-        name="tl.archetype_pair_enrichment",
-        description="Permutation test for spatial co-localization of archetype weight pairs. "
-        "Tests whether cells with high weights for two archetypes are spatially proximate.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial coords and archetype weights"),
-            Parameter(
-                "archetype_pairs",
-                ParamType.ARRAY,
-                "Specific archetype pairs to test. None = all pairs",
-                required=False,
-                default=None,
-            ),
-            Parameter("weight_threshold", ParamType.FLOAT, "Weight threshold for 'high' assignment", default=0.3),
-            Parameter("n_permutations", ParamType.INTEGER, "Number of permutations for significance", default=1000),
-            Parameter("spatial_key", ParamType.STRING, "Key in obsm for spatial coordinates", default="spatial"),
-        ],
-        returns="dict",
-        returns_description="Per-pair enrichment scores, p-values, observed vs expected co-localization",
-        requires=["cell_archetype_weights in adata.obsm", "spatial coordinates in adata.obsm"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # pl (PLOTTING) - Flow Visualization (v0.5.0)
-    # =========================================================================
-    "pl.archetype_correspondence": ToolSchema(
-        name="pl.archetype_correspondence",
-        description="K_src x K_tgt heatmap for archetype correspondence from flow_between results.",
-        parameters=[
-            Parameter("flow_between_result", ParamType.OBJECT, "Result dict from tl.flow_between()"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Plotly heatmap of archetype correspondence matrix",
-        requires=["flow_between result"],
-        modifies_adata=[],
-    ),
-    "pl.density_comparison": ToolSchema(
-        name="pl.density_comparison",
-        description="KDE comparison of source vs transported vs target distributions in PC1.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="KDE density curves for source, transported, and target in PC1",
-        requires=["X_pca in adata.obsm", "FlowWithinResult"],
-        modifies_adata=[],
+        returns="Figure",
     ),
     "pl.flow_magnitude": ToolSchema(
         name="pl.flow_magnitude",
-        description="2D scatter colored by transport magnitude (displacement norm).",
+        description="2D scatter colored by transport magnitude (‖transported − source‖).",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data matrix with PCA coordinates.", required=True, default=None),
+        Parameter("flow_result", ParamType.STRING, "FlowWithinResult Result from ``pc.tl.flow_within()``.", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure to this path (format inferred from exten...", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="2D PCA scatter with cells colored by flow displacement magnitude",
-        requires=["X_pca in adata.obsm", "FlowWithinResult"],
-        modifies_adata=[],
+        returns="Figure",
     ),
     "pl.flow_topo_landscape": ToolSchema(
         name="pl.flow_topo_landscape",
-        description="Topographic contour map of feature expression and Jacobian expansion over the flow.",
+        description="Topographic contour map of feature expression and Jacobian expansion.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter("flow_model", ParamType.OBJECT, "FlowModel (from flow_result['model'] when return_model=True)"),
-            Parameter(
-                "features",
-                ParamType.ARRAY,
-                "Specific feature names to plot. None = auto-select top features",
-                required=False,
-                default=None,
-                items_type=ParamType.STRING,
-            ),
-            Parameter("n_features", ParamType.INTEGER, "Number of top features to display (if features=None)", default=5),
-            Parameter("n_timepoints", ParamType.INTEGER, "Number of timepoints along trajectory", default=20),
-            Parameter("n_eval_points", ParamType.INTEGER, "Number of points for Jacobian evaluation", default=300),
-            Parameter("n_grid", ParamType.INTEGER, "Grid resolution for contour map", default=80),
-            Parameter(
-                "feature_type",
-                ParamType.STRING,
-                "Feature source: 'genes' for adata.X, or obsm key",
-                default="genes",
-            ),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-            Parameter("save", ParamType.STRING, "Path to save figure", required=False, default=None),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data matrix with PCA coordinates in ``adata.obsm[\"X_pca\"]``...", required=True, default=None),
+        Parameter("flow_result", ParamType.OBJECT, "dict Result from ``pc.tl.flow_within()``. Must contain ``source_mask``, ``tar...", required=True, default=None),
+        Parameter("flow_model", ParamType.STRING, "FlowModel Trained flow model with ``.transport()`` and ``.jacobian()`` methods.", required=True, default=None),
+        Parameter("features", ParamType.ARRAY, "list of str or None Feature names to plot. If None, auto-selects top ``n_feat...", required=False, default=None),
+        Parameter("n_features", ParamType.INTEGER, "int Number of features to auto-select when ``features`` is None.", required=False, default=5),
+        Parameter("n_timepoints", ParamType.INTEGER, "int Number of intermediate timepoints for trajectory and expansion computation.", required=False, default=20),
+        Parameter("n_eval_points", ParamType.INTEGER, "int Number of source cells to subsample for trajectory computation.", required=False, default=300),
+        Parameter("n_grid", ParamType.INTEGER, "int Resolution of the interpolation grid (n_grid x n_grid).", required=False, default=80),
+        Parameter("feature_type", ParamType.STRING, "str ``\"genes\"`` to read from ``adata.X``, or ``\"pathways\"`` to read from ``ad...", required=False, default='genes'),
+        Parameter("show_velocity", ParamType.BOOLEAN, "bool Whether to draw quiver arrows showing flow velocity. Defaults to ``True`...", required=False, default=True),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``plt.show()``.", required=False, default=True),
+        Parameter("save", ParamType.STRING, "str or None If provided, save figure to this path.", required=False, default=None),
         ],
-        returns="matplotlib.figure.Figure",
-        returns_description="Topographic contour map with feature expression and Jacobian expansion overlays",
-        requires=["FlowModel from flow_within(return_model=True)", "PCs in adata.varm"],
-        modifies_adata=[],
+        returns="Figure",
     ),
     "pl.gene_alignment_barplot": ToolSchema(
         name="pl.gene_alignment_barplot",
-        description="Top aligned/opposed genes bar plot from flow gene alignment analysis.",
+        description="Top aligned and opposed genes horizontal bar plot.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("alignment_result", ParamType.OBJECT, "Result dict from tl.flow_gene_alignment()"),
-            Parameter("n_top", ParamType.INTEGER, "Number of top aligned/opposed genes to show", default=20),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data matrix (used for consistency with PEACH API).", required=True, default=None),
+        Parameter("alignment_result", ParamType.STRING, "GeneAlignmentResult Result from ``pc.tl.flow_gene_alignment()``.", required=True, default=None),
+        Parameter("n_top", ParamType.INTEGER, "int Number of top genes to show in each direction.", required=False, default=20),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure to this path (format inferred from exten...", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Horizontal bar plot of top aligned and opposed genes by alignment score",
-        requires=["flow_gene_alignment result"],
-        modifies_adata=[],
-    ),
-    "pl.jacobian_heatmap": ToolSchema(
-        name="pl.jacobian_heatmap",
-        description="Mean Jacobian matrix heatmap from flow Jacobian analysis.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("jacobian_result", ParamType.OBJECT, "Result dict from tl.flow_jacobian()"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Plotly heatmap of mean Jacobian matrix",
-        requires=["flow_jacobian result"],
-        modifies_adata=[],
-    ),
-    "pl.soft_assignment_flow": ToolSchema(
-        name="pl.soft_assignment_flow",
-        description="Sankey diagram of feature flow between archetype pairs based on soft assignment.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top features to include", default=15),
-            Parameter(
-                "feature_type",
-                ParamType.STRING,
-                "Feature source: 'genes' for adata.X, or obsm key",
-                default="genes",
-            ),
-            Parameter(
-                "pairs",
-                ParamType.ARRAY,
-                "Specific archetype pairs to show. None = all pairs",
-                required=False,
-                default=None,
-            ),
-            Parameter("alpha", ParamType.FLOAT, "FDR significance threshold", default=0.05),
-            Parameter("degree", ParamType.INTEGER, "Regression degree for feature selection", default=1),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-            Parameter("save", ParamType.STRING, "Path to save figure", required=False, default=None),
-        ],
-        returns="go.Figure",
-        returns_description="Sankey diagram showing feature flow between archetype pairs",
-        requires=["peach_simplex_regression in adata.uns"],
-        modifies_adata=[],
-    ),
-    "pl.soft_assignment_heatmap": ToolSchema(
-        name="pl.soft_assignment_heatmap",
-        description="Soft archetype assignment correspondence heatmap via kNN matching between two conditions.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData (source)"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter(
-                "adata_b_key",
-                ParamType.ADATA_REF,
-                "Second AnnData (target). None = same adata",
-                required=False,
-                default=None,
-            ),
-            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
-            Parameter("n_neighbors", ParamType.INTEGER, "Number of nearest neighbors for matching", default=10),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Heatmap of soft archetype assignment correspondence between conditions",
-        requires=["cell_archetype_weights in adata.obsm", "FlowWithinResult"],
-        modifies_adata=[],
-    ),
-    "pl.trajectory_ribbon": ToolSchema(
-        name="pl.trajectory_ribbon",
-        description="Transported cells colored by time step, showing flow trajectory evolution.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData"),
-            Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult from pc.tl.flow_within()"),
-            Parameter(
-                "flow_model",
-                ParamType.OBJECT,
-                "FlowModel for intermediate steps. None = linear interpolation",
-                required=False,
-                default=None,
-            ),
-            Parameter("n_sample", ParamType.INTEGER, "Number of cells to sample for trajectory", default=100),
-            Parameter("n_steps", ParamType.INTEGER, "Number of time steps to visualize", default=20),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="2D scatter of sampled cells at multiple time steps, colored by t",
-        requires=["X_pca in adata.obsm", "FlowWithinResult"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # pl (PLOTTING) - GMM / Decomposition (v0.5.0)
-    # =========================================================================
-    "pl.component_heatmap": ToolSchema(
-        name="pl.component_heatmap",
-        description="Per-component feature profiles heatmap from GMM decomposition.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with GMM results"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top features per component", default=20),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Heatmap of top features per GMM component",
-        requires=["peach_gmm in adata.uns"],
-        modifies_adata=[],
-    ),
-    "pl.component_neighborhood_graph": ToolSchema(
-        name="pl.component_neighborhood_graph",
-        description="2D network graph of GMM components based on PCA proximity.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with GMM results"),
-            Parameter("pca_key", ParamType.STRING, "Key in obsm for PCA coordinates", default="X_pca"),
-            Parameter(
-                "edge_threshold",
-                ParamType.FLOAT,
-                "Min edge weight to display. None = auto-threshold",
-                required=False,
-                default=None,
-            ),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-            Parameter("save", ParamType.STRING, "Path to save figure", required=False, default=None),
-        ],
-        returns="go.Figure",
-        returns_description="Network graph of GMM components with edges weighted by proximity",
-        requires=["peach_gmm in adata.uns", "X_pca in adata.obsm"],
-        modifies_adata=[],
-    ),
-    "pl.component_stability": ToolSchema(
-        name="pl.component_stability",
-        description="Bar plot of component stability scores from GMM decomposition.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with GMM results"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Bar plot of per-component stability scores",
-        requires=["peach_gmm in adata.uns"],
-        modifies_adata=[],
+        returns="Figure",
     ),
     "pl.gmm_bic_curve": ToolSchema(
         name="pl.gmm_bic_curve",
-        description="BIC vs number of components line plot for GMM model selection.",
+        description="Line plot of BIC vs number of components.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with GMM results"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have GMM results in ``uns['peach_gmm']``.", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Line plot of BIC values vs number of components",
-        requires=["peach_gmm in adata.uns"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # pl (PLOTTING) - Regression & Characterization (v0.5.0)
-    # =========================================================================
-    "pl.archetype_radar": ToolSchema(
-        name="pl.archetype_radar",
-        description="Radar plot of archetype phenotype characterization from regression coefficients.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top features per archetype to display", default=10),
-            Parameter(
-                "feature_type",
-                ParamType.STRING,
-                "Feature source: 'genes' for adata.X, or obsm key",
-                default="genes",
-            ),
-            Parameter("min_degree", ParamType.INTEGER, "Minimum regression degree for feature inclusion", default=1),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-            Parameter("save", ParamType.STRING, "Path to save figure", required=False, default=None),
-        ],
-        returns="go.Figure",
-        returns_description="Radar plot with per-archetype phenotype profiles",
-        requires=["peach_simplex_regression in adata.uns"],
-        modifies_adata=[],
-    ),
-    "pl.interaction_heatmap": ToolSchema(
-        name="pl.interaction_heatmap",
-        description="Interaction coefficients heatmap from degree-2 simplex regression.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter("top_n", ParamType.INTEGER, "Number of top interaction features to display", default=50),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Heatmap of interaction coefficients (features x archetype pairs)",
-        requires=["peach_simplex_regression in adata.uns with max_degree >= 2"],
-        modifies_adata=[],
-    ),
-    "pl.regression_volcano": ToolSchema(
-        name="pl.regression_volcano",
-        description="R-squared vs max vertex contrast scatter (volcano-style) for regression features.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter("alpha", ParamType.FLOAT, "Significance threshold for coloring", default=0.05),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Scatter of R^2 vs max vertex contrast, colored by significance",
-        requires=["peach_simplex_regression in adata.uns"],
-        modifies_adata=[],
-    ),
-    "pl.vertex_radar": ToolSchema(
-        name="pl.vertex_radar",
-        description="Spider plot of vertex coefficients for a single feature across all archetypes.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with regression results"),
-            Parameter("feature", ParamType.STRING, "Feature name to plot"),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Spider/radar plot of vertex regression coefficients for a single feature",
-        requires=["peach_simplex_regression in adata.uns"],
-        modifies_adata=[],
-    ),
-    "pl.ternary_facet_grid": ToolSchema(
-        name="pl.ternary_facet_grid",
-        description="Multiple ternary facets for all or selected archetype triples.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with archetype weights"),
-            Parameter(
-                "color_by",
-                ParamType.STRING,
-                "Color by gene, obs column, or obsm column",
-                required=False,
-                default=None,
-            ),
-            Parameter(
-                "facets",
-                ParamType.STRING,
-                "Which triples to show: 'all' or specific indices",
-                default="all",
-            ),
-            Parameter("ncols", ParamType.INTEGER, "Number of columns in facet grid", default=3),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="list[go.Figure]",
-        returns_description="List of ternary Plotly figures, one per archetype triple",
-        requires=["cell_archetype_weights in adata.obsm"],
-        modifies_adata=[],
-    ),
-    # =========================================================================
-    # pl (PLOTTING) - Spatial Visualization (v0.5.0)
-    # =========================================================================
-    "pl.cross_correlations": ToolSchema(
-        name="pl.cross_correlations",
-        description="Diverging dot plot of per-archetype Spearman cross-correlations "
-        "from interaction boundary analysis.",
-        parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with boundary results"),
-            Parameter(
-                "uns_key",
-                ParamType.STRING,
-                "Key in adata.uns for interaction boundary results",
-                default="archetype_interaction_boundaries",
-            ),
-            Parameter("title", ParamType.STRING, "Plot title", required=False, default=None),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
-        ],
-        returns="go.Figure",
-        returns_description="Diverging dot plot of Spearman rho per archetype weight",
-        requires=["archetype_interaction_boundaries in adata.uns"],
-        modifies_adata=[],
+        returns="Figure",
     ),
     "pl.interaction_boundaries": ToolSchema(
         name="pl.interaction_boundaries",
-        description="Spatial map of interaction boundary scores overlaid on tissue coordinates.",
+        description="Spatial map of interaction boundary scores between cell types.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial coords and boundary scores"),
-            Parameter("spatial_key", ParamType.STRING, "Key in obsm for spatial coordinates", default="spatial"),
-            Parameter("score_key", ParamType.STRING, "Key in obs for boundary score", default="boundary_score"),
-            Parameter("point_size", ParamType.FLOAT, "Size of scatter points", default=2.0),
-            Parameter("colorscale", ParamType.STRING, "Plotly colorscale", default="Inferno"),
-            Parameter("title", ParamType.STRING, "Plot title", required=False, default=None),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with spatial coordinates and boundary scores.", required=True, default=None),
+        Parameter("spatial_key", ParamType.STRING, "str, default: \"spatial\" Key in ``adata.obsm`` with 2D spatial coordinates.", required=False, default='spatial'),
+        Parameter("score_key", ParamType.STRING, "str, default: \"boundary_score\" Column in ``adata.obs`` with boundary scores.", required=False, default='boundary_score'),
+        Parameter("point_size", ParamType.FLOAT, "float, default: 2.0 Size of scatter points.", required=False, default=2.0),
+        Parameter("colorscale", ParamType.STRING, "str, default: \"Inferno\" Plotly colorscale. Inferno: dark=low, bright=high bou...", required=False, default='Inferno'),
+        Parameter("title", ParamType.STRING, "str | None, default: None Plot title. Auto-generated from boundary result if ...", required=False, default=None),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save the figure.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool, default: True Whether to display the figure.", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Plotly scatter of cells at spatial positions colored by boundary score",
-        requires=["spatial coordinates in adata.obsm", "boundary_score in adata.obs"],
-        modifies_adata=[],
+        returns="Figure",
+    ),
+    "pl.interaction_heatmap": ToolSchema(
+        name="pl.interaction_heatmap",
+        description="Heatmap of interaction coefficients (beta_{jk}) for top features.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have degree-2 regression results in ``uns['peach_simplex_regress...", required=True, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int Number of top features to display, ranked by R-squared.", required=False, default=50),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.jacobian_heatmap": ToolSchema(
+        name="pl.jacobian_heatmap",
+        description="Mean Jacobian matrix as heatmap.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data matrix (used for consistency with PEACH API).", required=True, default=None),
+        Parameter("jacobian_result", ParamType.STRING, "FlowJacobianResult Result from ``pc.tl.flow_jacobian()``.", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure to this path (format inferred from exten...", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.lineage_drivers": ToolSchema(
+        name="pl.lineage_drivers",
+        description="Plot heatmap of top driver genes for a lineage.",
+        parameters=[
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data matrix", required=True, default=None),
+        Parameter("lineage", ParamType.STRING, "str Target lineage name (e.g., 'archetype_5')", required=True, default=None),
+        Parameter("n_genes", ParamType.INTEGER, "int, optional (default: 20) Number of top genes to plot", required=False, default=20),
+        Parameter("driver_key", ParamType.STRING, "str, optional Key in adata.varm containing driver gene scores. If None, compu...", required=False, default=None),
+        Parameter("figsize", ParamType.ARRAY, "tuple, optional (default: (10, 8)) Figure size **kwargs Additional arguments ...", required=False, default=(10, 8)),
+        ],
+        returns="unspecified",
+    ),
+    "pl.mmd_heatmap": ToolSchema(
+        name="pl.mmd_heatmap",
+        description="Heatmap of K x K MMD matrix between archetypes.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have MMD results in uns['peach_archetype_mmd'].", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.nhood_enrichment": ToolSchema(
+        name="pl.nhood_enrichment",
+        description="Heatmap of archetype neighborhood enrichment z-scores.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with neighborhood enrichment results.", required=True, default=None),
+        Parameter("uns_key", ParamType.STRING, "str, default: \"archetype_nhood_enrichment\" Key in ``adata.uns`` containing en...", required=False, default='archetype_nhood_enrichment'),
+        Parameter("cluster_key", ParamType.STRING, "str, default: \"archetypes\" Column in ``adata.obs`` with archetype labels (use...", required=False, default='archetypes'),
+        Parameter("title", ParamType.STRING, "str, default: \"Archetype Neighborhood Enrichment\" Plot title.", required=False, default='Archetype Neighborhood Enrichment'),
+        Parameter("colorscale", ParamType.STRING, "str, default: \"RdBu_r\" Plotly colorscale. RdBu_r: red=enriched, blue=depleted.", required=False, default='RdBu_r'),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save the figure.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool, default: True Whether to display the figure.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.pattern_dotplot": ToolSchema(
+        name="pl.pattern_dotplot",
+        description="Create dotplot for pattern analysis results.",
+        parameters=[
+        Parameter("pattern_df", ParamType.STRING, "pd.DataFrame Results from archetype_exclusive_patterns, specialization_patter...", required=True, default=None),
+        Parameter("pattern_type", ParamType.STRING, "str, optional Type of pattern for title generation (\"exclusive\", \"specializat...", required=False, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int, default: 20 Number of top features to show.", required=False, default=20),
+        Parameter("min_effect_size", ParamType.FLOAT, "float, default: 0.5 Minimum absolute effect size to include.", required=False, default=0.5),
+        Parameter("max_pvalue", ParamType.FLOAT, "float, default: 0.05 Maximum p-value to include.", required=False, default=0.05),
+        Parameter("figsize", ParamType.FLOAT, "tuple, default: (12, 8) Figure size.", required=False, default=(12, 8)),
+        Parameter("title", ParamType.STRING, "str, optional Custom title. If None, auto-generated based on pattern_type.", required=False, default=None),
+        Parameter("save_path", ParamType.STRING, "str, optional Path to save the figure. **kwargs Additional arguments passed t...", required=False, default=None),
+        ],
+        returns="Figure",
+    ),
+    "pl.pattern_heatmap": ToolSchema(
+        name="pl.pattern_heatmap",
+        description="Create heatmap showing pattern expression across archetypes.",
+        parameters=[
+        Parameter("pattern_df", ParamType.STRING, "pd.DataFrame Pattern analysis results", required=True, default=None),
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data object with archetype assignments and scores", required=True, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int, default: 30 Number of top features to show", required=False, default=30),
+        Parameter("cluster_patterns", ParamType.BOOLEAN, "bool, default: True Whether to cluster patterns (rows)", required=False, default=True),
+        Parameter("cluster_features", ParamType.BOOLEAN, "bool, default: True Whether to cluster features (columns)", required=False, default=True),
+        Parameter("figsize", ParamType.FLOAT, "tuple, default: (10, 12) Figure size", required=False, default=(10, 12)),
+        Parameter("cmap", ParamType.STRING, "str, default: 'RdBu_r' Colormap for the heatmap", required=False, default='RdBu_r'),
+        Parameter("save_path", ParamType.STRING, "str, optional Path to save the figure **kwargs Additional arguments passed to...", required=False, default=None),
+        ],
+        returns="Figure",
+    ),
+    "pl.pattern_summary": ToolSchema(
+        name="pl.pattern_summary",
+        description="Bar chart of pattern counts from classification results.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have pattern classification results in ``uns['peach_feature_patt...", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.pattern_summary_barplot": ToolSchema(
+        name="pl.pattern_summary_barplot",
+        description="Create summary barplot showing pattern counts across different analyses.",
+        parameters=[
+        Parameter("pattern_results", ParamType.OBJECT, "dict Dictionary with pattern DataFrames from different analyses e.g., {'exclu...", required=True, default=None),
+        Parameter("figsize", ParamType.FLOAT, "tuple, default: (14, 6) Figure size", required=False, default=(14, 6)),
+        Parameter("save_path", ParamType.STRING, "str, optional Path to save the figure", required=False, default=None),
+        ],
+        returns="Figure",
+    ),
+    "pl.r2_barplot": ToolSchema(
+        name="pl.r2_barplot",
+        description="Horizontal bar plot of features ranked by R-squared, with per-archetype",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have regression results in ``uns['peach_simplex_regression']``.", required=True, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int Number of top features to display.", required=False, default=30),
+        Parameter("per_archetype", ParamType.BOOLEAN, "bool If True (default), show grouped bars with per-archetype coefficient magn...", required=False, default=True),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.regression_volcano": ToolSchema(
+        name="pl.regression_volcano",
+        description="Scatter plot: R-squared vs max vertex contrast (max beta - min beta),",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have regression results in ``uns['peach_simplex_regression']``.", required=True, default=None),
+        Parameter("alpha", ParamType.FLOAT, "float Significance threshold for FDR-corrected p-values (default 0.05). Featu...", required=False, default=0.05),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.soft_assignment_flow": ToolSchema(
+        name="pl.soft_assignment_flow",
+        description="Sankey diagram of feature flow between archetype pairs.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must contain simplex regression results in ``adata.uns`` (run ``pc.tl...", required=True, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int Number of top features per pair, selected by |delta| for exclusive featur...", required=False, default=15),
+        Parameter("feature_type", ParamType.STRING, "str ``\"genes\"`` or ``\"pathways\"`` — controls which regression result to load ...", required=False, default='genes'),
+        Parameter("pairs", ParamType.INTEGER, "list of (int, int) or None Archetype pairs to include. If None, all K*(K-1)/2...", required=False, default=None),
+        Parameter("alpha", ParamType.FLOAT, "float FDR significance threshold. Only features with FDR < alpha are included...", required=False, default=0.05),
+        Parameter("degree", ParamType.INTEGER, "int Which regression degree to display. ``1`` = linear (vertex) exclusive fea...", required=False, default=1),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        Parameter("save", ParamType.STRING, "str or None If provided, save figure to this path (format inferred from exten...", required=False, default=None),
+        ],
+        returns="Figure",
+    ),
+    "pl.soft_assignment_heatmap": ToolSchema(
+        name="pl.soft_assignment_heatmap",
+        description="Heatmap of soft archetype assignment correspondence between source and target.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Source annotated data matrix with archetype weights in ``adata.obsm['...", required=True, default=None),
+        Parameter("flow_result", ParamType.OBJECT, "dict Output of ``pc.tl.flow_within()`` or ``pc.tl.flow_between()``.", required=True, default=None),
+        Parameter("adata_b", ParamType.ADATA_REF, "AnnData or None Separate target AnnData. If None, target cells come from ``ad...", required=False, default=None),
+        Parameter("pca_key", ParamType.STRING, "str Key in ``adata.obsm`` for PCA coordinates.", required=False, default='X_pca'),
+        Parameter("n_neighbors", ParamType.INTEGER, "int Number of nearest neighbors for soft matching.", required=False, default=10),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.spatial_archetypes": ToolSchema(
+        name="pl.spatial_archetypes",
+        description="Scatter plot of cells on spatial coordinates, colored by archetype.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with spatial coordinates and archetype assignments.", required=True, default=None),
+        Parameter("spatial_key", ParamType.STRING, "str, default: \"spatial\" Key in ``adata.obsm`` with 2D spatial coordinates.", required=False, default='spatial'),
+        Parameter("color_key", ParamType.STRING, "str, default: \"archetypes\" Column in ``adata.obs`` to color cells by.", required=False, default='archetypes'),
+        Parameter("point_size", ParamType.FLOAT, "float, default: 2.0 Size of scatter points.", required=False, default=2.0),
+        Parameter("opacity", ParamType.FLOAT, "float, default: 0.7 Point opacity.", required=False, default=0.7),
+        Parameter("title", ParamType.STRING, "str, default: \"Spatial Archetype Map\" Plot title.", required=False, default='Spatial Archetype Map'),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save the figure.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool, default: True Whether to display the figure.", required=False, default=True),
+        Parameter("colors", ParamType.ARRAY, "list[str] | None, default: None Custom color list. If None, uses a perceptual...", required=False, default=None),
+        Parameter("legend_marker_size", ParamType.FLOAT, "float, default: 12.0 Size of legend marker dots for readability.", required=False, default=12.0),
+        ],
+        returns="Figure",
     ),
     "pl.spatial_autocorr": ToolSchema(
         name="pl.spatial_autocorr",
-        description="Lollipop plot of spatial autocorrelation per archetype weight.",
+        description="Dot plot of spatial autocorrelation per archetype weight.",
         parameters=[
-            Parameter("adata_key", ParamType.ADATA_REF, "Reference to AnnData with spatial autocorrelation results"),
-            Parameter(
-                "uns_key",
-                ParamType.STRING,
-                "Key in adata.uns for spatial autocorrelation results",
-                default="archetype_spatial_autocorr",
-            ),
-            Parameter("title", ParamType.STRING, "Plot title", required=False, default=None),
-            Parameter("save_path", ParamType.STRING, "Path to save as HTML", required=False, default=None),
-            Parameter("show", ParamType.BOOLEAN, "Display plot", default=True),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with spatial autocorrelation results in ``adata.uns[un...", required=True, default=None),
+        Parameter("uns_key", ParamType.STRING, "str, default: \"archetype_spatial_autocorr\" Key in ``adata.uns`` with autocorr...", required=False, default='archetype_spatial_autocorr'),
+        Parameter("title", ParamType.STRING, "str | None, default: None Plot title. Auto-detected from data if None.", required=False, default=None),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save the figure.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool, default: True Whether to display the figure.", required=False, default=True),
         ],
-        returns="go.Figure",
-        returns_description="Lollipop plot of Moran's I / Geary's C per archetype weight",
-        requires=["archetype_spatial_autocorr in adata.uns"],
-        modifies_adata=[],
+        returns="Figure",
     ),
-    # =========================================================================
-    # _core (ADVANCED) - Remaining Core Functions
-    # =========================================================================
-    "_core.PCHA": ToolSchema(
-        name="_core.PCHA",
-        description="Principal Convex Hull Analysis - find archetypes as convex hull vertices.",
+    "pl.ternary_facet": ToolSchema(
+        name="pl.ternary_facet",
+        description="Ternary plot for 3 selected archetypes.",
         parameters=[
-            Parameter("X", ParamType.OBJECT, "Data matrix [n_samples, n_features]"),
-            Parameter("n_archetypes", ParamType.INTEGER, "Number of archetypes to find"),
-            Parameter("n_iter", ParamType.INTEGER, "Number of iterations", default=100),
-            Parameter("delta", ParamType.FLOAT, "Convergence threshold", default=1e-6),
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have archetype weights in ``obsm['cell_archetype_weights']``.", required=True, default=None),
+        Parameter("archetypes", ParamType.INTEGER, "tuple of 3 ints Which archetypes to show. Default ``(0, 1, 2)``.", required=False, default=(0, 1, 2)),
+        Parameter("color_by", ParamType.STRING, "str or None Gene name (from ``var_names``), obs column name, or ``'density'``...", required=False, default=None),
+        Parameter("style", ParamType.STRING, "str ``'scatter'`` (default), ``'contour'``, or ``'relief'``. Currently only s...", required=False, default='scatter'),
+        Parameter("resolution", ParamType.INTEGER, "int Grid resolution for contour/relief styles.", required=False, default=50),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``. Set False for non-interactive use. **kwa...", required=False, default=True),
         ],
-        returns="PCHAResults",
-        returns_description="archetypes [n_arch, n_feat], A [n_cells, n_arch], B [n_arch, n_cells], archetype_r2",
-        requires=[],
-        modifies_adata=[],
+        returns="Figure",
+    ),
+    "pl.ternary_facet_grid": ToolSchema(
+        name="pl.ternary_facet_grid",
+        description="Generate multiple ternary facets for all or selected archetype triples.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have archetype weights in ``obsm['cell_archetype_weights']``.", required=True, default=None),
+        Parameter("color_by", ParamType.STRING, "str or None Passed to each :func:`ternary_facet` call.", required=False, default=None),
+        Parameter("facets", ParamType.INTEGER, "``'all'`` or list of (i, j, k) tuples If ``'all'``, generates C(K, 3) plots f...", required=False, default='all'),
+        Parameter("ncols", ParamType.INTEGER, "int Columns in grid layout (reserved for future subplot support).", required=False, default=3),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, saves a combined HTML. Individual figures are not sa...", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()`` on each figure. Set False for non-interac...", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.training_metrics": ToolSchema(
+        name="pl.training_metrics",
+        description="Visualize training metrics over epochs.",
+        parameters=[
+        Parameter("history", ParamType.OBJECT, "dict Training history dictionary from pc.tl.train_archetypal(). Expected keys...", required=True, default=None),
+        Parameter("height", ParamType.INTEGER, "int, default: 400 Base plot height in pixels (actual height is 2x for 3 rows).", required=False, default=400),
+        Parameter("width", ParamType.INTEGER, "int, default: 800 Plot width in pixels.", required=False, default=800),
+        Parameter("display", ParamType.BOOLEAN, "bool, default: True Whether to display the plot immediately via fig.show(). *...", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.trajectory_ribbon": ToolSchema(
+        name="pl.trajectory_ribbon",
+        description="Sample of transported cells colored by time step.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data matrix with PCA coordinates.", required=True, default=None),
+        Parameter("flow_result", ParamType.STRING, "FlowWithinResult Result from ``pc.tl.flow_within()``.", required=True, default=None),
+        Parameter("flow_model", ParamType.STRING, "FlowModel or None Trained flow model. If provided, full trajectory is computed.", required=False, default=None),
+        Parameter("n_sample", ParamType.INTEGER, "int Number of cells to sample for the trajectory.", required=False, default=100),
+        Parameter("n_steps", ParamType.INTEGER, "int Number of time steps for the trajectory.", required=False, default=20),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure to this path (format inferred from exten...", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.velocity_quiver": ToolSchema(
+        name="pl.velocity_quiver",
+        description="2D PCA quiver plot showing transport direction.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data matrix with PCA coordinates.", required=True, default=None),
+        Parameter("flow_result", ParamType.STRING, "FlowWithinResult Result from ``pc.tl.flow_within()``.", required=True, default=None),
+        Parameter("pca_key", ParamType.STRING, "str Key in ``adata.obsm`` for PCA coordinates.", required=False, default='X_pca'),
+        Parameter("n_arrows", ParamType.INTEGER, "int Number of arrows to draw (subsampled from source cells).", required=False, default=200),
+        Parameter("arrow_alpha", ParamType.FLOAT, "float Opacity for arrow color (0.0 = transparent, 1.0 = opaque).", required=False, default=0.3),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure to this path (format inferred from exten...", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+    "pl.vertex_radar": ToolSchema(
+        name="pl.vertex_radar",
+        description="Spider/radar plot of vertex coefficients for one feature.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have regression results in ``uns['peach_simplex_regression']``.", required=True, default=None),
+        Parameter("feature", ParamType.STRING, "str Feature name to visualize.", required=True, default=None),
+        Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
+        Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
+        ],
+        returns="Figure",
+    ),
+
+    # --- pp module ---
+    "pp.compute_pathway_scores": ToolSchema(
+        name="pp.compute_pathway_scores",
+        description="Compute pathway activity scores using MSigDB pathways.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object", required=True, default=None),
+        Parameter("net", ParamType.STRING, "pd.DataFrame, optional Pathway network dataframe. If None, will load using so...", required=False, default=None),
+        Parameter("use_layer", ParamType.STRING, "str, optional Layer in adata to use for scoring", required=False, default=None),
+        Parameter("obsm_key", ParamType.STRING, "str, default: \"pathway_scores\" Key in adata.obsm to store pathway scores", required=False, default='pathway_scores'),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print progress", required=False, default=True),
+        ],
+        returns="None",
+    ),
+    "pp.generate_synthetic": ToolSchema(
+        name="pp.generate_synthetic",
+        description="Generate synthetic convex data for testing.",
+        parameters=[
+        Parameter("n_points", ParamType.INTEGER, "int, default: 1000 Number of data points to generate (matches _core parameter)", required=False, default=1000),
+        Parameter("n_dimensions", ParamType.INTEGER, "int, default: 50 Number of dimensions/features (matches _core parameter)", required=False, default=50),
+        Parameter("n_archetypes", ParamType.INTEGER, "int, default: 4 Number of archetypes", required=False, default=4),
+        Parameter("noise", ParamType.FLOAT, "float, default: 0.1 Noise level (matches _core parameter)", required=False, default=0.1),
+        Parameter("seed", ParamType.INTEGER, "int, default: 1205 Random seed for reproducibility", required=False, default=1205),
+        Parameter("archetype_type", ParamType.STRING, "str, default: \"random\" Type of archetype generation ('random', 'corners', 'sp...", required=False, default='random'),
+        Parameter("scale", ParamType.FLOAT, "float, default: 20.0 Scale factor for data generation", required=False, default=20.0),
+        Parameter("return_torch", ParamType.BOOLEAN, "bool, default: True Whether to return PyTorch tensors", required=False, default=True),
+        ],
+        returns="AnnData",
+    ),
+    "pp.load_data": ToolSchema(
+        name="pp.load_data",
+        description="Load AnnData for archetypal analysis.",
+        parameters=[
+        Parameter("path", ParamType.STRING, "str Path to the data file (matches _core parameter name)", required=True, default=None),
+        Parameter("use_raw", ParamType.BOOLEAN, "bool, default: True Whether to use raw data", required=False, default=True),
+        Parameter("dim_reduction_key", ParamType.STRING, "str, default: \"X_PCA\" Key for dimension reduction in adata.obsm", required=False, default='X_PCA'),
+        Parameter("batch_size", ParamType.INTEGER, "int, default: 128 Batch size for data loading", required=False, default=128),
+        ],
+        returns="AnnData",
+    ),
+    "pp.load_pathway_networks": ToolSchema(
+        name="pp.load_pathway_networks",
+        description="Load pathway networks from MSigDB or OmniPath.",
+        parameters=[
+        Parameter("sources", ParamType.ARRAY, "List[str], default: [\"c5_bp\"] Pathway sources to load. MSigDB collections: 'h...", required=False, default=['c5_bp']),
+        Parameter("organism", ParamType.STRING, "str, default: \"human\" Organism to load pathways for: 'human' or 'mouse'", required=False, default='human'),
+        Parameter("geneset_repo", ParamType.STRING, "str, default: \"msigdb\" Repository to use: 'msigdb' (recommended) or 'omnipath'", required=False, default='msigdb'),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print loading progress **kwargs Additional arg...", required=False, default=True),
+        ],
+        returns="unspecified",
+    ),
+    "pp.prepare_atacseq": ToolSchema(
+        name="pp.prepare_atacseq",
+        description="TF-IDF + LSI preprocessing for scATAC-seq peak count data.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with peak count matrix in ``adata.X``. Typicall...", required=True, default=None),
+        Parameter("n_components", ParamType.INTEGER, "int, default: 50 Number of LSI components to compute. 30-50 is standard for s...", required=False, default=50),
+        Parameter("drop_first", ParamType.BOOLEAN, "bool, default: True Drop first SVD component. The first component in scATAC-s...", required=False, default=True),
+        Parameter("log_tf", ParamType.BOOLEAN, "bool, default: True Use log(1 + TF) variant of term frequency. Standard in sc...", required=False, default=True),
+        Parameter("store_key", ParamType.STRING, "str, default: \"X_lsi\" Key in ``adata.obsm`` to store the LSI embeddings.", required=False, default='X_lsi'),
+        Parameter("random_state", ParamType.INTEGER, "int, default: 42 Random seed for reproducibility of truncated SVD.", required=False, default=42),
+        ],
+        returns="None",
+    ),
+    "pp.prepare_training": ToolSchema(
+        name="pp.prepare_training",
+        description="Create DataLoader from AnnData for training with HPC optimizations.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with PCA coordinates", required=True, default=None),
+        Parameter("batch_size", ParamType.INTEGER, "int, default: 128 Batch size for training", required=False, default=128),
+        Parameter("shuffle", ParamType.BOOLEAN, "bool, default: True Whether to shuffle data in DataLoader", required=False, default=True),
+        Parameter("pca_key", ParamType.STRING, "str, default: None Key in adata.obsm containing PCA coordinates (auto-detecte...", required=False, default=None),
+        Parameter("num_workers", ParamType.INTEGER, "int or 'auto', default: 'auto' Number of subprocesses for data loading. 'auto...", required=False, default='auto'),
+        Parameter("pin_memory", ParamType.BOOLEAN, "bool or 'auto', default: 'auto' Use pinned memory for faster GPU transfer. 'a...", required=False, default='auto'),
+        Parameter("persistent_workers", ParamType.BOOLEAN, "bool or 'auto', default: 'auto' Keep workers alive between epochs. 'auto' set...", required=False, default='auto'),
+        Parameter("prefetch_factor", ParamType.INTEGER, "int, default: 2 Number of batches loaded in advance by each worker", required=False, default=2),
+        ],
+        returns="DataLoader",
+    ),
+
+    # --- tl module ---
+    "tl.archetypal_coordinates": ToolSchema(
+        name="tl.archetypal_coordinates",
+        description="Extract archetypal coordinates for all cells.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with trained model coordinates", required=True, default=None),
+        Parameter("pca_key", ParamType.STRING, "str, default: \"X_pca\" Key in adata.obsm containing PCA coordinates", required=False, default='X_pca'),
+        Parameter("archetype_coords_key", ParamType.STRING, "str, default: \"archetype_coordinates\" Key in adata.uns containing archetype c...", required=False, default='archetype_coordinates'),
+        Parameter("obsm_key", ParamType.STRING, "str, default: \"archetype_distances\" Key to store distance matrix in adata.obsm", required=False, default='archetype_distances'),
+        Parameter("uns_prefix", ParamType.STRING, "str, default: \"archetype\" Prefix for keys stored in adata.uns", required=False, default='archetype'),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print progress messages **kwargs Additional ar...", required=False, default=True),
+        ],
+        returns="dict",
+    ),
+    "tl.archetype_co_occurrence": ToolSchema(
+        name="tl.archetype_co_occurrence",
+        description="Compute distance-dependent co-occurrence of archetype groups.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with spatial coordinates and archetype assignments.", required=True, default=None),
+        Parameter("cluster_key", ParamType.STRING, "str, default: \"archetypes\" Column in ``adata.obs`` with archetype labels.", required=False, default='archetypes'),
+        Parameter("spatial_key", ParamType.STRING, "str, default: \"spatial\" Key in ``adata.obsm`` with spatial coordinates.", required=False, default='spatial'),
+        Parameter("interval", ParamType.INTEGER, "int, default: 50 Number of distance intervals to evaluate. **kwargs Additiona...", required=False, default=50),
+        ],
+        returns="dict",
+    ),
+    "tl.archetype_contrasts": ToolSchema(
+        name="tl.archetype_contrasts",
+        description="Pairwise Wald contrasts between archetype regression coefficients.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have archetype weights and regression results.", required=True, default=None),
+        Parameter("robust_se", ParamType.BOOLEAN, "bool Use HC3 heteroscedasticity-consistent covariance.", required=False, default=True),
+        Parameter("feature_type", ParamType.STRING, "str Which regression result to use: \"genes\" (default) or \"pathways\".", required=False, default='genes'),
+        Parameter("copy", ParamType.BOOLEAN, "bool", required=False, default=False),
+        ],
+        returns="dict",
+    ),
+    "tl.archetype_driver_regression": ToolSchema(
+        name="tl.archetype_driver_regression",
+        description="Flipped regression: features predict archetype weights (in ILR space).",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have archetype weights in obsm['cell_archetype_weights'].", required=True, default=None),
+        Parameter("feature_matrix", ParamType.STRING, "None, str, or array-like Feature matrix (predictors). Default: adata.obsm['pa...", required=False, default=None),
+        Parameter("feature_names", ParamType.STRING, "list[str] or None Feature names. Inferred if None.", required=False, default=None),
+        Parameter("max_degree", ParamType.INTEGER, "int 1 = main effects only, 2 = with pairwise interactions.", required=False, default=2),
+        Parameter("n_bootstrap", ParamType.INTEGER, "int Number of bootstrap samples for CIs. 0 to disable.", required=False, default=1000),
+        Parameter("robust_se", ParamType.BOOLEAN, "bool If True, use HC3 heteroscedasticity-consistent standard errors.", required=False, default=True),
+        Parameter("max_interaction_features", ParamType.INTEGER, "int Maximum number of features allowed for degree=2 interactions. Raises Valu...", required=False, default=50),
+        Parameter("copy", ParamType.BOOLEAN, "bool If True, operate on a copy of adata.", required=False, default=False),
+        ],
+        returns="dict",
+    ),
+    "tl.archetype_exclusive_patterns": ToolSchema(
+        name="tl.archetype_exclusive_patterns",
+        description="Identify features exclusively high in single archetypes.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with archetypal assignments.", required=True, default=None),
+        Parameter("data_obsm_key", ParamType.STRING, "str, default: \"pathway_scores\" Key in adata.obsm for scores. Use None for gen...", required=False, default='pathway_scores'),
+        Parameter("obs_key", ParamType.STRING, "str, default: \"archetypes\" Column in adata.obs with archetypal assignments.", required=False, default='archetypes'),
+        Parameter("test_method", ParamType.STRING, "str, default: \"mannwhitneyu\" Statistical test method.", required=False, default='mannwhitneyu'),
+        Parameter("fdr_method", ParamType.STRING, "str, default: \"benjamini_hochberg\" FDR correction method.", required=False, default='benjamini_hochberg'),
+        Parameter("fdr_scope", ParamType.STRING, "{'global', 'per_archetype', 'none'}, default: 'global' Scope of FDR correction.", required=False, default='global'),
+        Parameter("min_effect_size", ParamType.FLOAT, "float, default: 0.05 Minimum effect size (mean_diff for pathways, log_fc for ...", required=False, default=0.05),
+        Parameter("min_cells", ParamType.INTEGER, "int, default: 10 Minimum cells per archetype.", required=False, default=10),
+        Parameter("use_pairwise", ParamType.BOOLEAN, "bool, default: True If True, use rigorous pairwise comparisons. If False, use...", required=False, default=True),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Print progress.", required=False, default=True),
+        ],
+        returns="DataFrame",
+    ),
+    "tl.archetype_feature_similarity": ToolSchema(
+        name="tl.archetype_feature_similarity",
+        description="Feature-level archetype similarity: Spearman on FDR-significant beta vectors.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have regression results in uns['peach_simplex_regression'].", required=True, default=None),
+        Parameter("adata_b", ParamType.ADATA_REF, "AnnData or None If provided, compute between-fit Spearman on shared features.", required=False, default=None),
+        Parameter("copy", ParamType.BOOLEAN, "bool", required=False, default=False),
+        ],
+        returns="dict",
+    ),
+    "tl.archetype_interaction_boundaries": ToolSchema(
+        name="tl.archetype_interaction_boundaries",
+        description="Detect spatial fronts where archetype weight mixtures diverge between cell types.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with: - Spatial neighbor graph in ``adata.obsp['spatia...", required=True, default=None),
+        Parameter("cell_type_col", ParamType.STRING, "str, default: \"Cell_Type\" Column in ``adata.obs`` with cell type labels.", required=False, default='Cell_Type'),
+        Parameter("weights_key", ParamType.STRING, "str, default: \"archetype_weights\" Key in ``adata.obsm`` with archetype weight...", required=False, default='cell_archetype_weights'),
+        Parameter("cell_type_a", ParamType.STRING, "str | None, default: None First cell type for pairwise comparison. If None, u...", required=False, default=None),
+        Parameter("cell_type_b", ParamType.STRING, "str | None, default: None Second cell type.", required=False, default=None),
+        ],
+        returns="dict",
+    ),
+    "tl.archetype_mmd": ToolSchema(
+        name="tl.archetype_mmd",
+        description="K x K MMD similarity matrix between archetype cell populations.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have archetype weights in obsm['cell_archetype_weights'] and PCA...", required=True, default=None),
+        Parameter("adata_b", ParamType.ADATA_REF, "AnnData or None If provided, compute K_A x K_B between-fit comparison.", required=False, default=None),
+        Parameter("pca_key", ParamType.STRING, "str Key in obsm for cell coordinates.", required=False, default='X_pca'),
+        Parameter("n_permutations", ParamType.INTEGER, "int Permutations for p-value computation.", required=False, default=1000),
+        Parameter("seed", ParamType.INTEGER, "int", required=False, default=42),
+        Parameter("copy", ParamType.BOOLEAN, "bool", required=False, default=False),
+        ],
+        returns="dict",
+    ),
+    "tl.archetype_nhood_enrichment": ToolSchema(
+        name="tl.archetype_nhood_enrichment",
+        description="Test spatial neighborhood enrichment between archetype groups.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with spatial graph (run ``spatial_neighbors`` first) a...", required=True, default=None),
+        Parameter("cluster_key", ParamType.STRING, "str, default: \"archetypes\" Column in ``adata.obs`` with archetype labels.", required=False, default='archetypes'),
+        Parameter("n_perms", ParamType.INTEGER, "int, default: 1000 Number of permutations for significance testing.", required=False, default=1000),
+        Parameter("seed", ParamType.INTEGER, "int, default: 42 Random seed for permutation reproducibility. **kwargs Additi...", required=False, default=42),
+        ],
+        returns="dict",
+    ),
+    "tl.archetype_pair_enrichment": ToolSchema(
+        name="tl.archetype_pair_enrichment",
+        description="Test spatial co-localization of archetype weight pairs.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have spatial coordinates, archetype weights, and spatial neighbors.", required=True, default=None),
+        Parameter("archetype_pairs", ParamType.ARRAY, "list of (i,j) tuples, 'all', or None Which pairs to test. 'all' or None = all...", required=False, default=None),
+        Parameter("weight_threshold", ParamType.FLOAT, "float Minimum weight to consider a cell \"participating\" in an archetype.", required=False, default=0.3),
+        Parameter("n_permutations", ParamType.INTEGER, "int Number of permutations for the test.", required=False, default=1000),
+        Parameter("spatial_key", ParamType.STRING, "str Key in adata.obsm for spatial coordinates.", required=False, default='spatial'),
+        ],
+        returns="dict",
+    ),
+    "tl.archetype_spatial_autocorr": ToolSchema(
+        name="tl.archetype_spatial_autocorr",
+        description="Compute spatial autocorrelation (Moran's I or Geary's C) per archetype weight.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with spatial graph (run ``spatial_neighbors`` first) a...", required=True, default=None),
+        Parameter("weights_key", ParamType.STRING, "str, default: \"archetype_weights\" Key in ``adata.obsm`` with archetype weight...", required=False, default='cell_archetype_weights'),
+        Parameter("mode", ParamType.STRING, "str, default: \"moran\" Autocorrelation statistic: \"moran\" (Moran's I) or \"gear...", required=False, default='moran'),
+        Parameter("n_perms", ParamType.INTEGER, "int, default: 100 Number of permutations for p-value estimation. Set to None ...", required=False, default=100),
+        Parameter("n_jobs", ParamType.INTEGER, "int, default: 1 Number of parallel jobs. Default 1 for macOS compatibility. *...", required=False, default=1),
+        ],
+        returns="unspecified",
+    ),
+    "tl.archetype_summary": ToolSchema(
+        name="tl.archetype_summary",
+        description="Generate structured summary for one or all archetypes.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have simplex regression results in uns['peach_simplex_regression'].", required=True, default=None),
+        Parameter("archetype_idx", ParamType.INTEGER, "int or None Specific archetype index, or None for all.", required=False, default=None),
+        Parameter("top_n", ParamType.INTEGER, "int Top enriched/depleted features to report.", required=False, default=20),
+        Parameter("include_drivers", ParamType.BOOLEAN, "bool Include flipped regression results if available.", required=False, default=True),
+        Parameter("include_gmm", ParamType.BOOLEAN, "bool Include GMM components near this archetype.", required=False, default=True),
+        ],
+        returns="dict",
+    ),
+    "tl.assign_archetypes": ToolSchema(
+        name="tl.assign_archetypes",
+        description="Assign cells to archetypes based on distances.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with archetype distances", required=True, default=None),
+        Parameter("percentage_per_archetype", ParamType.FLOAT, "float, default: 0.1 Percentage of cells to assign to each archetype", required=False, default=0.1),
+        Parameter("obsm_key", ParamType.STRING, "str, default: \"archetype_distances\" Key in adata.obsm containing distance matrix", required=False, default='archetype_distances'),
+        Parameter("obs_key", ParamType.STRING, "str, default: \"archetypes\" Key to store assignments in adata.obs", required=False, default='archetypes'),
+        Parameter("include_central_archetype", ParamType.BOOLEAN, "bool, default: True Whether to include a central archetype (cells far from al...", required=False, default=True),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print progress messages **kwargs Additional ar...", required=False, default=True),
+        ],
+        returns="None",
+    ),
+    "tl.assign_to_centroids": ToolSchema(
+        name="tl.assign_to_centroids",
+        description="Assign cells to nearest centroid based on distance (top bin_prop% closest).",
+        parameters=[
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data object. Must have: - PCA coordinates in adata.obsm[pca...", required=True, default=None),
+        Parameter("condition_column", ParamType.STRING, "str Name of the condition column used in compute_conditional_centroids. This ...", required=True, default=None),
+        Parameter("pca_key", ParamType.STRING, "str, default: \"X_pca\" Key in adata.obsm containing PCA coordinates.", required=False, default='X_pca'),
+        Parameter("centroid_key", ParamType.STRING, "str, default: \"conditional_centroids\" Key in adata.uns containing centroid re...", required=False, default='conditional_centroids'),
+        Parameter("bin_prop", ParamType.FLOAT, "float, default: 0.15 Proportion of cells to assign to each centroid (top 15% ...", required=False, default=0.15),
+        Parameter("obs_key", ParamType.STRING, "str, default: \"centroid_assignments\" Key in adata.obs to store assignments.", required=False, default='centroid_assignments'),
+        Parameter("exclude_archetypes", ParamType.ARRAY, "list, optional Archetype labels to exclude from assignment.", required=False, default=None),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print progress messages.", required=False, default=True),
+        ],
+        returns="None",
+    ),
+    "tl.classify_feature_patterns": ToolSchema(
+        name="tl.classify_feature_patterns",
+        description="Classify features into biological pattern types from regression coefficients.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have simplex regression results in uns['peach_simplex_regression...", required=True, default=None),
+        Parameter("regression_result", ParamType.STRING, "SimplexRegressionResult or None If None, reads from adata.uns['peach_simplex_...", required=False, default=None),
+        Parameter("fdr_threshold", ParamType.FLOAT, "float FDR-corrected p-value threshold for significance (default 0.05).", required=False, default=0.05),
+        Parameter("exclusive_ratio", ParamType.FLOAT, "float Minimum ratio of max(|beta|) to second_max(|beta|) for \"archetype-exclu...", required=False, default=2.0),
+        ],
+        returns="dict",
+    ),
+    "tl.component_regression": ToolSchema(
+        name="tl.component_regression",
+        description="Run simplex regression separately per GMM component.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have archetype weights in obsm['cell_archetype_weights'] and GMM...", required=True, default=None),
+        Parameter("feature_type", ParamType.STRING, "str 'genes' uses adata.X, or name of an obsm key for other feature types.", required=False, default='genes'),
+        Parameter("n_bootstrap", ParamType.INTEGER, "int Number of bootstrap replicates for confidence intervals.", required=False, default=100),
+        Parameter("robust_se", ParamType.BOOLEAN, "bool If True, use HC3 heteroscedasticity-consistent standard errors.", required=False, default=True),
+        ],
+        returns="dict",
+    ),
+    "tl.compute_conditional_centroids": ToolSchema(
+        name="tl.compute_conditional_centroids",
+        description="Compute centroid positions in PCA space for each level of a categorical condition.",
+        parameters=[
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data object with PCA coordinates in adata.obsm[pca_key].", required=True, default=None),
+        Parameter("condition_column", ParamType.STRING, "str Name of categorical column in adata.obs to group by.", required=True, default=None),
+        Parameter("pca_key", ParamType.STRING, "str, default: \"X_pca\" Key in adata.obsm containing PCA coordinates.", required=False, default='X_pca'),
+        Parameter("store_key", ParamType.STRING, "str, default: \"conditional_centroids\" Key in adata.uns to store results.", required=False, default='conditional_centroids'),
+        Parameter("exclude_archetypes", ParamType.ARRAY, "list, optional Archetype labels to exclude from centroid calculation.", required=False, default=None),
+        Parameter("groupby", ParamType.STRING, "str, optional Second categorical column for multi-group trajectories. If prov...", required=False, default=None),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print progress messages.", required=False, default=True),
+        ],
+        returns="unspecified",
+    ),
+    "tl.compute_lineage_drivers": ToolSchema(
+        name="tl.compute_lineage_drivers",
+        description="Identify genes driving commitment to a specific lineage.",
+        parameters=[
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data matrix with fate probabilities computed", required=True, default=None),
+        Parameter("lineage", ParamType.STRING, "str Target lineage name (e.g., 'archetype_5')", required=True, default=None),
+        Parameter("n_genes", ParamType.INTEGER, "int, optional (default: 100) Number of top genes to return", required=False, default=100),
+        Parameter("method", ParamType.STRING, "str, optional (default: 'cellrank') Method for computing drivers: - 'cellrank...", required=False, default='cellrank'),
+        ],
+        returns="unspecified",
+    ),
+    "tl.compute_lineage_pseudotimes": ToolSchema(
+        name="tl.compute_lineage_pseudotimes",
+        description="Convert fate probabilities to lineage-specific pseudotimes.",
+        parameters=[
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data matrix. Must contain: - `adata.obsm['fate_probabilitie...", required=True, default=None),
+        Parameter("lineage_names", ParamType.STRING, "list of str, optional Specific lineages to compute pseudotime for. If None, c...", required=False, default=None),
+        Parameter("fate_prob_key", ParamType.STRING, "str, optional (default: 'fate_probabilities') Key in adata.obsm containing fa...", required=False, default='fate_probabilities'),
+        ],
+        returns="unspecified",
+    ),
+    "tl.compute_transition_frequencies": ToolSchema(
+        name="tl.compute_transition_frequencies",
+        description="Compute frequency of transitions between archetypal states.",
+        parameters=[
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data object with CellRank results. Must contain: - `adata.o...", required=True, default=None),
+        Parameter("start_weight_threshold", ParamType.FLOAT, "float, default=0.5 Minimum barycentric weight to consider a cell as \"starting...", required=False, default=0.5),
+        Parameter("fate_prob_threshold", ParamType.FLOAT, "float, default=0.3 Minimum fate probability to consider a cell as \"transition...", required=False, default=0.3),
+        Parameter("lineages", ParamType.STRING, "list of str, optional Specific lineages/archetypes to analyze. If None, uses ...", required=False, default=None),
+        ],
+        returns="unspecified",
+    ),
+    "tl.conditional_associations": ToolSchema(
+        name="tl.conditional_associations",
+        description="Test associations between archetypes and categorical metadata.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with: - ``obs[obs_key]`` : Archetype assignment...", required=True, default=None),
+        Parameter("obs_column", ParamType.STRING, "str Column name in adata.obs containing categorical variable.", required=True, default=None),
+        Parameter("archetype_assignments", ParamType.STRING, "None, optional Deprecated. Archetype assignments now read from adata.obs[obs_...", required=False, default=None),
+        Parameter("obs_key", ParamType.STRING, "str, default: \"archetypes\" Column in adata.obs containing archetypal assignme...", required=False, default='archetypes'),
+        Parameter("test_method", ParamType.STRING, "str, default: \"hypergeometric\" Statistical test method (currently only 'hyper...", required=False, default='hypergeometric'),
+        Parameter("fdr_method", ParamType.STRING, "str, default: \"benjamini_hochberg\" FDR correction method.", required=False, default='benjamini_hochberg'),
+        Parameter("min_cells", ParamType.INTEGER, "int, default: 5 Minimum cells required per archetype-condition combination.", required=False, default=5),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print progress.", required=False, default=True),
+        ],
+        returns="DataFrame",
+    ),
+    "tl.extract_archetype_weights": ToolSchema(
+        name="tl.extract_archetype_weights",
+        description="Extract cell archetype weights from trained Deep_AA model.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with PCA coordinates", required=True, default=None),
+        Parameter("model", ParamType.STRING, "Deep_AA model, optional Trained model. If None, will look for model in adata....", required=False, default=None),
+        Parameter("pca_key", ParamType.STRING, "str, default: \"X_pca\" Key in adata.obsm containing PCA coordinates", required=False, default='X_pca'),
+        Parameter("weights_key", ParamType.STRING, "str, default: \"cell_archetype_weights\" Key to store weights in adata.obsm", required=False, default='cell_archetype_weights'),
+        Parameter("batch_size", ParamType.INTEGER, "int, default: 256 Batch size for processing", required=False, default=256),
+        Parameter("device", ParamType.STRING, "str, default: \"cpu\" Device for computation ('cpu', 'cuda', or 'mps')", required=False, default='cpu'),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print progress", required=False, default=True),
+        ],
+        returns="np.ndarray",
+    ),
+    "tl.feature_simplex_decomposition": ToolSchema(
+        name="tl.feature_simplex_decomposition",
+        description="Decompose cell populations by mixture model in weight space.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have archetype weights in obsm['cell_archetype_weights'].", required=True, default=None),
+        Parameter("feature_matrix", ParamType.STRING, "None, str, or array-like Feature matrix for component characterization. None ...", required=False, default=None),
+        Parameter("feature_names", ParamType.STRING, "list[str] or None Feature names. Inferred from adata.var_names if None and us...", required=False, default=None),
+        Parameter("n_components_range", ParamType.STRING, "tuple[int, int] or None (min_components, max_components). Default: (K, 3*K).", required=False, default=None),
+        Parameter("model_selection", ParamType.STRING, "str 'bic', 'icl', or 'bic_elbow'. 'bic': argmin of BIC. 'icl': argmin of ICL ...", required=False, default='bic'),
+        Parameter("model_type", ParamType.STRING, "str 'dirichlet' (default): Dirichlet mixture directly on the simplex. 'gaussi...", required=False, default='dirichlet'),
+        Parameter("covariance_type", ParamType.STRING, "str sklearn GMM covariance type. One of 'full', 'tied', 'diag', 'spherical'. ...", required=False, default='full'),
+        Parameter("n_initializations", ParamType.INTEGER, "int Number of random initializations for stability analysis.", required=False, default=20),
+        Parameter("stability_threshold", ParamType.FLOAT, "float Minimum stability score to retain a component (fraction of runs where c...", required=False, default=0.7),
+        Parameter("reassignment_confidence", ParamType.FLOAT, "float Minimum posterior probability required to reassign an unstable cell to ...", required=False, default=0.0),
+        Parameter("characterize_features", ParamType.BOOLEAN, "bool If True, compute per-component mean feature profiles.", required=False, default=True),
+        Parameter("ilr_epsilon", ParamType.FLOAT, "float Smoothing epsilon for ILR transform. Only used when model_type='gaussian'.", required=False, default=0.001),
+        Parameter("random_state", ParamType.INTEGER, "int Random seed for reproducibility.", required=False, default=42),
+        Parameter("copy", ParamType.BOOLEAN, "bool If True, operate on a copy of adata.", required=False, default=False),
+        ],
+        returns="dict",
+    ),
+    "tl.feature_simplex_regression": ToolSchema(
+        name="tl.feature_simplex_regression",
+        description="Simplex regression of features on archetype weights (Scheffe polynomials).",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must have archetype weights in obsm['cell_archetype_weights'].", required=True, default=None),
+        Parameter("feature_matrix", ParamType.STRING, "None, str, or array-like Feature matrix to regress. None = adata.X.", required=False, default=None),
+        Parameter("feature_names", ParamType.STRING, "list[str] or None Feature names. Inferred if None.", required=False, default=None),
+        Parameter("max_degree", ParamType.INTEGER, "int 1 = linear only, 2 = with pairwise interactions. Both degrees reported.", required=False, default=2),
+        Parameter("permutation_test", ParamType.BOOLEAN, "bool If True, run permutation test for model significance.", required=False, default=False),
+        Parameter("n_permutations", ParamType.INTEGER, "int Number of permutations (if permutation_test=True).", required=False, default=1000),
+        Parameter("n_bootstrap", ParamType.INTEGER, "int Number of bootstrap samples for CIs. 0 to disable.", required=False, default=1000),
+        Parameter("robust_se", ParamType.BOOLEAN, "bool If True, use HC3 heteroscedasticity-consistent SEs.", required=False, default=True),
+        Parameter("store_residuals", ParamType.BOOLEAN, "bool If True, store residual matrix in adata.obsm['peach_residuals'].", required=False, default=True),
+        Parameter("comprehensive_degree", ParamType.BOOLEAN, "bool If True, run degree d=2..K-1 fits with incremental F-tests, storing resu...", required=False, default=False),
+        Parameter("store_to_adata", ParamType.BOOLEAN, "bool If True (default), store results in adata.uns. Set to False when calling...", required=False, default=True),
+        Parameter("copy", ParamType.BOOLEAN, "bool If True, operate on a copy of adata.", required=False, default=False),
+        ],
+        returns="dict",
+    ),
+    "tl.flow_between": ToolSchema(
+        name="tl.flow_between",
+        description="Inter-model flow between separate AnnDatas.",
+        parameters=[
+        Parameter("adatas", ParamType.ADATA_REF, "list[AnnData]", required=True, default=None),
+        Parameter("condition_key", ParamType.STRING, "str", required=False, default='condition'),
+        Parameter("condition_labels", ParamType.ARRAY, "list[str] or None", required=False, default=None),
+        Parameter("pairs", ParamType.ARRAY, "list[tuple] or None (source_label, target_label) pairs. Default: consecutive ...", required=False, default=None),
+        Parameter("pca_key", ParamType.STRING, "str", required=False, default='X_pca'),
+        Parameter("hidden_dims", ParamType.ARRAY, "", required=False, default=(128, 128, 128)),
+        Parameter("lr", ParamType.FLOAT, "", required=False, default=0.001),
+        Parameter("n_epochs", ParamType.INTEGER, "", required=False, default=1000),
+        Parameter("batch_size", ParamType.INTEGER, "", required=False, default=256),
+        Parameter("n_steps", ParamType.INTEGER, "", required=False, default=50),
+        Parameter("device", ParamType.STRING, "", required=False, default='cpu'),
+        Parameter("solver_method", ParamType.STRING, "", required=False, default='dopri5'),
+        Parameter("use_ot", ParamType.BOOLEAN, "bool If True, use minibatch Sinkhorn OT coupling for training pairs.", required=False, default=False),
+        Parameter("random_state", ParamType.INTEGER, "", required=False, default=42),
+        ],
+        returns="dict",
+    ),
+    "tl.flow_bifurcation": ToolSchema(
+        name="tl.flow_bifurcation",
+        description="Eigenvalue-based bifurcation scoring along the flow trajectory.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData", required=True, default=None),
+        Parameter("flow_result", ParamType.OBJECT, "dict Output of :func:`flow_within`.", required=True, default=None),
+        Parameter("flow_model", ParamType.STRING, "FlowModel The trained FlowModel. **Must** be the same model that produced ``f...", required=True, default=None),
+        Parameter("n_timepoints", ParamType.INTEGER, "int Number of timepoints to evaluate along the trajectory.", required=False, default=10),
+        Parameter("evaluation_points", ParamType.STRING, "np.ndarray or None Points to evaluate. Default: source cells from ``flow_resu...", required=False, default=None),
+        ],
+        returns="dict",
+    ),
+    "tl.flow_feature_graph": ToolSchema(
+        name="tl.flow_feature_graph",
+        description="Static feature coupling graph collapsed over time.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must contain ``adata.varm['PCs']`` (PCA loadings).", required=True, default=None),
+        Parameter("flow_result", ParamType.OBJECT, "dict Output of :func:`flow_within` (must include ``source_mask``, ``pca_key``).", required=True, default=None),
+        Parameter("flow_model", ParamType.STRING, "FlowModel The trained FlowModel. **Must** be the same model that produced ``f...", required=True, default=None),
+        Parameter("n_top_genes", ParamType.INTEGER, "int Number of top genes (by alignment score magnitude) to retain.", required=False, default=200),
+        Parameter("n_timepoints", ParamType.INTEGER, "int Number of evenly spaced timepoints in [0, 1] for Jacobian evaluation.", required=False, default=20),
+        Parameter("n_eval_points", ParamType.INTEGER, "int Number of source cells to subsample for Jacobian computation.", required=False, default=300),
+        Parameter("edge_threshold", ParamType.FLOAT, "float or None Absolute threshold for sparsifying the adjacency matrix. If Non...", required=False, default=None),
+        Parameter("random_state", ParamType.INTEGER, "int Seed for reproducible subsampling.", required=False, default=42),
+        ],
+        returns="dict",
+    ),
+    "tl.flow_gene_alignment": ToolSchema(
+        name="tl.flow_gene_alignment",
+        description="Compute gene alignment with flow velocity.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData", required=True, default=None),
+        Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult", required=True, default=None),
+        Parameter("t", ParamType.FLOAT, "float or None Time point to evaluate velocity. When ``t`` is not None and ``f...", required=False, default=None),
+        Parameter("n_top", ParamType.INTEGER, "int Top aligned/opposed genes to report.", required=False, default=50),
+        Parameter("pca_loadings_key", ParamType.STRING, "str or None Key in adata.varm for PCA loadings. Default: 'PCs'.", required=False, default=None),
+        Parameter("n_permutations", ParamType.INTEGER, "int Number of permutations for null distribution. Default: 0 (disabled).", required=False, default=0),
+        Parameter("per_cell", ParamType.BOOLEAN, "bool If True, also compute per-cell per-gene alignment scores for the top ``n...", required=False, default=True),
+        Parameter("n_top_features", ParamType.INTEGER, "int Maximum number of genes to include in the per-cell alignment matrix. Gene...", required=False, default=2500),
+        Parameter("normalize", ParamType.BOOLEAN, "bool If True, use cosine similarity (normalize both loadings and velocity to ...", required=False, default=True),
+        Parameter("random_state", ParamType.INTEGER, "int Random seed for permutation tests. Default: 42.", required=False, default=42),
+        ],
+        returns="dict",
+    ),
+    "tl.flow_jacobian": ToolSchema(
+        name="tl.flow_jacobian",
+        description="Compute Jacobian of the flow velocity field.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData", required=True, default=None),
+        Parameter("flow_result", ParamType.OBJECT, "FlowWithinResult", required=True, default=None),
+        Parameter("flow_model", ParamType.STRING, "FlowModel The trained FlowModel. **Must** be the same model that produced ``f...", required=True, default=None),
+        Parameter("t", ParamType.FLOAT, "float Time point at which to evaluate the Jacobian. Default: 0.5.", required=False, default=0.5),
+        Parameter("evaluation_points", ParamType.STRING, "np.ndarray or None Points at which to evaluate the Jacobian. Default: source ...", required=False, default=None),
+        Parameter("pca_loadings_key", ParamType.STRING, "str or None Key in adata.varm for PCA loadings. Default: 'PCs'.", required=False, default=None),
+        Parameter("aggregate", ParamType.STRING, "str Aggregation method for mean Jacobian: 'mean', 'median', or None (per-cell).", required=False, default='mean'),
+        Parameter("per_cell_features", ParamType.BOOLEAN, "bool If True and PCA loadings are available, compute per-cell per-gene expans...", required=False, default=True),
+        Parameter("n_top_features", ParamType.INTEGER, "int Maximum number of genes to include in the per-cell expansion matrix. Gene...", required=False, default=2500),
+        Parameter("n_permutations", ParamType.INTEGER, "int Number of permutations for expansion significance testing. When > 0, shuf...", required=False, default=0),
+        Parameter("permutation_seed", ParamType.INTEGER, "int Random seed for permutation shuffling. Default: 42.", required=False, default=42),
+        ],
+        returns="dict",
+    ),
+    "tl.flow_significance": ToolSchema(
+        name="tl.flow_significance",
+        description="Permutation test for flow significance.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData", required=True, default=None),
+        Parameter("flow_result", ParamType.OBJECT, "dict Output of :func:`flow_within`. Must contain ``mmd_before`` and ``mmd_aft...", required=True, default=None),
+        Parameter("n_permutations", ParamType.INTEGER, "int Number of label-permuted null models to train.", required=False, default=100),
+        Parameter("n_epochs_per_perm", ParamType.INTEGER, "int Epochs per null model.", required=False, default=200),
+        Parameter("statistic", ParamType.STRING, "", required=False, default='mmd'),
+        Parameter("hidden_dims", ParamType.ARRAY, "", required=False, default=(128, 128, 128)),
+        Parameter("lr", ParamType.FLOAT, "", required=False, default=0.001),
+        Parameter("batch_size", ParamType.INTEGER, "", required=False, default=256),
+        Parameter("n_steps", ParamType.INTEGER, "", required=False, default=50),
+        Parameter("device", ParamType.STRING, "", required=False, default='cpu'),
+        Parameter("solver_method", ParamType.STRING, "", required=False, default='euler'),
+        Parameter("random_state", ParamType.INTEGER, "", required=False, default=42),
+        ],
+        returns="dict",
+    ),
+    "tl.flow_temporal_feature_graph": ToolSchema(
+        name="tl.flow_temporal_feature_graph",
+        description="Temporal feature graph with spatiotemporal nodes.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Must contain ``adata.varm['PCs']`` (PCA loadings).", required=True, default=None),
+        Parameter("flow_result", ParamType.OBJECT, "dict Output of :func:`flow_within`.", required=True, default=None),
+        Parameter("flow_model", ParamType.STRING, "FlowModel The trained FlowModel. **Must** be the same model that produced ``f...", required=True, default=None),
+        Parameter("n_top_genes", ParamType.INTEGER, "int Number of top genes (by alignment score magnitude) to retain.", required=False, default=200),
+        Parameter("n_timepoints", ParamType.INTEGER, "int Number of evenly spaced timepoints in [0, 1].", required=False, default=20),
+        Parameter("n_eval_points", ParamType.INTEGER, "int Number of source cells to subsample for Jacobian computation.", required=False, default=300),
+        Parameter("archetype_pairs", ParamType.ARRAY, "list of tuple[int, int] or None If provided, restrict evaluation to source ce...", required=False, default=None),
+        Parameter("random_state", ParamType.INTEGER, "int Seed for reproducible subsampling.", required=False, default=42),
+        ],
+        returns="dict",
+    ),
+    "tl.flow_within": ToolSchema(
+        name="tl.flow_within",
+        description="Intra-model flow between obs-defined cell subsets.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData", required=True, default=None),
+        Parameter("source", ParamType.OBJECT, "dict Obs column filter, e.g. {'treatment': 'Base'}.", required=True, default=None),
+        Parameter("target", ParamType.OBJECT, "dict Obs column filter, e.g. {'treatment': 'PD1'}.", required=True, default=None),
+        Parameter("pca_key", ParamType.STRING, "str Key in adata.obsm for PCA coordinates. hidden_dims, lr, n_epochs, batch_s...", required=False, default='X_pca'),
+        Parameter("hidden_dims", ParamType.ARRAY, "", required=False, default=(128, 128, 128)),
+        Parameter("lr", ParamType.FLOAT, "", required=False, default=0.001),
+        Parameter("n_epochs", ParamType.INTEGER, "", required=False, default=1000),
+        Parameter("batch_size", ParamType.INTEGER, "", required=False, default=256),
+        Parameter("n_steps", ParamType.INTEGER, "int ODE integration steps.", required=False, default=50),
+        Parameter("device", ParamType.STRING, "str", required=False, default='cpu'),
+        Parameter("solver_method", ParamType.STRING, "str ODE solver method: 'dopri5' (default, adaptive), 'euler', 'midpoint', 'he...", required=False, default='dopri5'),
+        Parameter("name", ParamType.STRING, "str or None Name for storage key.", required=False, default=None),
+        Parameter("random_state", ParamType.INTEGER, "int", required=False, default=42),
+        Parameter("return_model", ParamType.BOOLEAN, "bool If True, include the trained FlowModel in the result dict under key ``'m...", required=False, default=False),
+        Parameter("use_ot", ParamType.BOOLEAN, "bool If True, use minibatch Sinkhorn OT coupling for training pairs. Requires...", required=False, default=False),
+        Parameter("holdout_fraction", ParamType.FLOAT, "float Fraction of source cells to hold out for validation (0 to 1). If > 0, t...", required=False, default=0.0),
+        Parameter("copy", ParamType.BOOLEAN, "bool", required=False, default=False),
+        ],
+        returns="dict",
+    ),
+    "tl.gene_associations": ToolSchema(
+        name="tl.gene_associations",
+        description="Test gene expression associations with archetypal assignments.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with: - ``obsm[obsm_key]`` : Archetype distance...", required=True, default=None),
+        Parameter("bin_prop", ParamType.FLOAT, "float, default: 0.1 Proportion of cells closest to each archetype to use for ...", required=False, default=0.1),
+        Parameter("obsm_key", ParamType.STRING, "str, default: \"archetype_distances\" Key in adata.obsm containing archetype di...", required=False, default='archetype_distances'),
+        Parameter("obs_key", ParamType.STRING, "str, default: \"archetypes\" Column in adata.obs containing archetypal assignme...", required=False, default='archetypes'),
+        Parameter("use_layer", ParamType.STRING, "str | None, default: None Layer for gene expression. If None, uses adata.X. A...", required=False, default=None),
+        Parameter("test_method", ParamType.STRING, "str, default: \"mannwhitneyu\" Statistical test method. Currently supports 'man...", required=False, default='mannwhitneyu'),
+        Parameter("fdr_method", ParamType.STRING, "str, default: \"benjamini_hochberg\" FDR correction method: 'benjamini_hochberg...", required=False, default='benjamini_hochberg'),
+        Parameter("fdr_scope", ParamType.STRING, "{'global', 'per_archetype', 'none'}, default: 'global' Scope of FDR correctio...", required=False, default='global'),
+        Parameter("test_direction", ParamType.STRING, "str, default: \"two-sided\" Direction of statistical test: 'two-sided', 'greate...", required=False, default='two-sided'),
+        Parameter("min_logfc", ParamType.FLOAT, "float, default: 0.01 Minimum absolute log fold change threshold for filtering.", required=False, default=0.01),
+        Parameter("min_cells", ParamType.INTEGER, "int, default: 10 Minimum cells required per archetype for testing.", required=False, default=10),
+        Parameter("comparison_group", ParamType.STRING, "str, default: 'all' Comparison group for statistical tests: - ``'all'`` : Com...", required=False, default='all'),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print progress messages.", required=False, default=True),
+        ],
+        returns="DataFrame",
+    ),
+    "tl.gene_simplex_regression": ToolSchema(
+        name="tl.gene_simplex_regression",
+        description="Convenience: simplex regression on adata.X (gene expression).",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "", required=True, default=None),
+        ],
+        returns="dict",
+    ),
+    "tl.hyperparameter_search": ToolSchema(
+        name="tl.hyperparameter_search",
+        description="Perform cross-validation hyperparameter search for archetypal analysis.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with PCA coordinates in ``adata.obsm[pca_key]``...", required=True, default=None),
+        Parameter("n_archetypes_range", ParamType.INTEGER, "list[int], default: [3, 4, 5, 6] Range of archetype numbers to test. Each val...", required=False, default=[3, 4, 5, 6]),
+        Parameter("cv_folds", ParamType.INTEGER, "int, default: 3 Number of cross-validation folds. Higher values give more rel...", required=False, default=3),
+        Parameter("max_epochs_cv", ParamType.INTEGER, "int, default: 15 Maximum training epochs per CV fold. Early stopping typicall...", required=False, default=15),
+        Parameter("pca_key", ParamType.STRING, "str, default: \"X_pca\" Key in ``adata.obsm`` containing PCA coordinates. Auto-...", required=False, default='X_pca'),
+        Parameter("device", ParamType.STRING, "str, default: \"cpu\" Computing device ('cpu', 'cuda', or 'mps'). Default is 'c...", required=False, default='cpu'),
+        Parameter("base_model_config", ParamType.OBJECT, "dict | None, default: None Additional base model configuration. If None, uses...", required=False, default=None),
+        ],
+        returns="CVSummary",
+    ),
+    "tl.pathway_associations": ToolSchema(
+        name="tl.pathway_associations",
+        description="Test pathway activity associations with archetypal assignments.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with: - ``obsm[pathway_obsm_key]`` : Pathway sc...", required=True, default=None),
+        Parameter("pathway_obsm_key", ParamType.STRING, "str, default: \"pathway_scores\" Key in adata.obsm containing pathway activity ...", required=False, default='pathway_scores'),
+        Parameter("obsm_key", ParamType.STRING, "str, default: \"archetype_distances\" Key in adata.obsm containing archetype di...", required=False, default='archetype_distances'),
+        Parameter("obs_key", ParamType.STRING, "str, default: \"archetypes\" Column in adata.obs containing archetypal assignme...", required=False, default='archetypes'),
+        Parameter("test_method", ParamType.STRING, "str, default: \"mannwhitneyu\" Statistical test method.", required=False, default='mannwhitneyu'),
+        Parameter("fdr_method", ParamType.STRING, "str, default: \"benjamini_hochberg\" FDR correction method.", required=False, default='benjamini_hochberg'),
+        Parameter("fdr_scope", ParamType.STRING, "{'global', 'per_archetype', 'none'}, default: 'global' Scope of FDR correction.", required=False, default='global'),
+        Parameter("test_direction", ParamType.STRING, "str, default: \"two-sided\" Direction of statistical test.", required=False, default='two-sided'),
+        Parameter("min_logfc", ParamType.FLOAT, "float, default: 0.01 Minimum effect size threshold (mean_diff for pathways).", required=False, default=0.01),
+        Parameter("min_cells", ParamType.INTEGER, "int, default: 10 Minimum cells required per archetype.", required=False, default=10),
+        Parameter("comparison_group", ParamType.STRING, "str, default: 'all' Comparison group: 'all' or 'archetypes_only'.", required=False, default='all'),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Whether to print progress.", required=False, default=True),
+        ],
+        returns="DataFrame",
+    ),
+    "tl.pathway_simplex_regression": ToolSchema(
+        name="tl.pathway_simplex_regression",
+        description="Convenience: simplex regression on adata.obsm['pathway_scores'].",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "", required=True, default=None),
+        ],
+        returns="dict",
+    ),
+    "tl.pattern_analysis": ToolSchema(
+        name="tl.pattern_analysis",
+        description="Comprehensive archetypal pattern analysis.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with archetypal assignments and scores.", required=True, default=None),
+        Parameter("data_obsm_key", ParamType.STRING, "str, default: \"pathway_scores\" Key in adata.obsm containing scores for patter...", required=False, default='pathway_scores'),
+        Parameter("obs_key", ParamType.STRING, "str, default: \"archetypes\" Column in adata.obs containing archetypal assignme...", required=False, default='archetypes'),
+        Parameter("include_individual_tests", ParamType.BOOLEAN, "bool, default: True Run individual archetype 1-vs-all tests.", required=False, default=True),
+        Parameter("include_pattern_tests", ParamType.BOOLEAN, "bool, default: True Run systematic pattern tests (specialists, tradeoffs).", required=False, default=True),
+        Parameter("include_exclusivity_analysis", ParamType.BOOLEAN, "bool, default: True Analyze mutual exclusivity patterns.", required=False, default=True),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Print analysis progress.", required=False, default=True),
+        ],
+        returns="dict",
+    ),
+    "tl.setup_cellrank": ToolSchema(
+        name="tl.setup_cellrank",
+        description="Set up CellRank workflow for archetypal or centroid-based trajectory analysis.",
+        parameters=[
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data matrix. Must contain: - `adata.obs[terminal_obs_key]` ...", required=True, default=None),
+        Parameter("high_purity_threshold", ParamType.FLOAT, "float, optional (default: 0.80) Percentile threshold for defining high-purity...", required=False, default=0.8),
+        Parameter("n_neighbors", ParamType.INTEGER, "int, optional (default: 30) Number of neighbors for k-NN graph construction", required=False, default=30),
+        Parameter("n_pcs", ParamType.INTEGER, "int, optional (default: 11) Number of principal components to use", required=False, default=11),
+        Parameter("compute_paga", ParamType.BOOLEAN, "bool, optional (default: True) Whether to compute PAGA connectivity", required=False, default=True),
+        Parameter("solver", ParamType.STRING, "str, optional (default: 'gmres') Solver for fate probability computation ('gm...", required=False, default='gmres'),
+        Parameter("tol", ParamType.FLOAT, "float, optional (default: 1e-6) Tolerance for iterative solver", required=False, default=1e-06),
+        Parameter("terminal_obs_key", ParamType.STRING, "str, optional (default: 'archetypes') Key in adata.obs containing terminal st...", required=False, default='archetypes'),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, optional (default: True) Print progress messages", required=False, default=True),
+        ],
+        returns="unspecified",
+    ),
+    "tl.single_trajectory_analysis": ToolSchema(
+        name="tl.single_trajectory_analysis",
+        description="Analyze single archetype-to-archetype trajectory.",
+        parameters=[
+        Parameter("adata", ParamType.STRING, "AnnData Annotated data matrix. Must contain (from setup_cellrank): - `adata.o...", required=True, default=None),
+        Parameter("trajectory", ParamType.ARRAY, "tuple Archetype pair as (source_idx, target_idx), e.g., (0, 3) for archetype_...", required=True, default=None),
+        Parameter("trajectories", ParamType.ARRAY, "list of tuple, optional Multiple trajectory pairs to analyze sequentially. If...", required=False, default=None),
+        Parameter("selection_method", ParamType.STRING, "str, default: 'discrete' How to select source cells: - 'discrete' : Filter by...", required=False, default='discrete'),
+        Parameter("source_weight_threshold", ParamType.FLOAT, "float, default: 0.4 Minimum barycentric weight for source archetype (only use...", required=False, default=0.4),
+        Parameter("target_fate_threshold", ParamType.FLOAT, "float, default: 0.4 Minimum fate probability for target archetype selection.", required=False, default=0.4),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Print progress messages.", required=False, default=True),
+        ],
+        returns="unspecified",
+    ),
+    "tl.spatial_neighbors": ToolSchema(
+        name="tl.spatial_neighbors",
+        description="Build spatial neighbor graph from tissue coordinates.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data with spatial coordinates in ``adata.obsm[spatial_key]``.", required=True, default=None),
+        Parameter("spatial_key", ParamType.STRING, "str, default: \"spatial\" Key in ``adata.obsm`` containing 2D spatial coordinates.", required=False, default='spatial'),
+        Parameter("n_neighs", ParamType.INTEGER, "int, default: 30 Number of nearest neighbors for the spatial graph.", required=False, default=30),
+        Parameter("coord_type", ParamType.STRING, "str, default: \"generic\" Coordinate type. Use \"generic\" for Slide-seq/MERFISH ...", required=False, default='generic'),
+        ],
+        returns="None",
+    ),
+    "tl.specialization_patterns": ToolSchema(
+        name="tl.specialization_patterns",
+        description="Identify specialization features relative to centroid archetype.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with archetypal assignments.", required=True, default=None),
+        Parameter("data_obsm_key", ParamType.STRING, "str, default: \"pathway_scores\" Key in adata.obsm for scores.", required=False, default='pathway_scores'),
+        Parameter("obs_key", ParamType.STRING, "str, default: \"archetypes\" Column in adata.obs with archetypal assignments.", required=False, default='archetypes'),
+        Parameter("test_method", ParamType.STRING, "str, default: \"mannwhitneyu\" Statistical test method.", required=False, default='mannwhitneyu'),
+        Parameter("fdr_method", ParamType.STRING, "str, default: \"benjamini_hochberg\" FDR correction method.", required=False, default='benjamini_hochberg'),
+        Parameter("fdr_scope", ParamType.STRING, "{'global', 'per_archetype', 'none'}, default: 'global' Scope of FDR correction.", required=False, default='global'),
+        Parameter("min_cells", ParamType.INTEGER, "int, default: 10 Minimum cells per archetype.", required=False, default=10),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Print progress.", required=False, default=True),
+        ],
+        returns="DataFrame",
+    ),
+    "tl.tradeoff_patterns": ToolSchema(
+        name="tl.tradeoff_patterns",
+        description="Identify mutual exclusivity and tradeoff patterns.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object with archetypal assignments.", required=True, default=None),
+        Parameter("data_obsm_key", ParamType.STRING, "str, default: \"pathway_scores\" Key in adata.obsm for scores.", required=False, default='pathway_scores'),
+        Parameter("obs_key", ParamType.STRING, "str, default: \"archetypes\" Column in adata.obs with archetypal assignments.", required=False, default='archetypes'),
+        Parameter("tradeoffs", ParamType.STRING, "{'pairs', 'patterns'}, default: 'pairs' Type of tradeoff analysis: - ``'pairs...", required=False, default='pairs'),
+        Parameter("test_method", ParamType.STRING, "str, default: \"mannwhitneyu\" Statistical test method.", required=False, default='mannwhitneyu'),
+        Parameter("fdr_method", ParamType.STRING, "str, default: \"benjamini_hochberg\" FDR correction method.", required=False, default='benjamini_hochberg'),
+        Parameter("fdr_scope", ParamType.STRING, "{'global', 'per_archetype', 'none'}, default: 'global' Scope of FDR correction.", required=False, default='global'),
+        Parameter("min_cells", ParamType.INTEGER, "int, default: 10 Minimum cells per group.", required=False, default=10),
+        Parameter("min_effect_size", ParamType.FLOAT, "float, default: 0.1 Minimum effect size for tradeoffs.", required=False, default=0.1),
+        Parameter("verbose", ParamType.BOOLEAN, "bool, default: True Print progress. **kwargs Additional parameters: - ``max_p...", required=False, default=True),
+        ],
+        returns="DataFrame",
+    ),
+    "tl.train_archetypal": ToolSchema(
+        name="tl.train_archetypal",
+        description="Train Deep Archetypal Analysis model to discover cellular archetypes.",
+        parameters=[
+        Parameter("adata", ParamType.ADATA_REF, "AnnData Annotated data object containing single-cell expression data. Must ha...", required=True, default=None),
+        Parameter("n_archetypes", ParamType.INTEGER, "int, default: 5 Number of archetypal patterns to learn. Should be chosen base...", required=False, default=5),
+        Parameter("n_epochs", ParamType.INTEGER, "int, default: 50 Number of training epochs. Larger datasets may require more ...", required=False, default=50),
+        Parameter("layer", ParamType.STRING, "str | None, default: None AnnData layer to use for training. If None, uses PC...", required=False, default=None),
+        Parameter("pca_key", ParamType.STRING, "str, default: \"X_pca\" Key in ``adata.obsm`` containing PCA coordinates. The m...", required=False, default='X_pca'),
+        Parameter("hidden_dims", ParamType.INTEGER, "list[int] | None, default: None Encoder/decoder layer dimensions. If None, us...", required=False, default=None),
+        Parameter("inflation_factor", ParamType.FLOAT, "float, default: 1.5 PCHA inflation factor for archetype initialization. Value...", required=False, default=1.5),
+        Parameter("model_config", ParamType.OBJECT, "dict | None, default: None Additional model configuration parameters (for adv...", required=False, default=None),
+        Parameter("optimizer_config", ParamType.OBJECT, "dict | None, default: None Optimizer configuration parameters: - ``lr`` : flo...", required=False, default=None),
+        Parameter("device", ParamType.STRING, "str, default: \"cpu\" Compute device for training. One of \"cpu\", \"cuda\", \"mps\".", required=False, default='cpu'),
+        Parameter("save_path", ParamType.STRING, "str | None, default: None Path to save model checkpoints during training.", required=False, default=None),
+        Parameter("archetypal_weight", ParamType.FLOAT, "float | None, default: None Weight for archetypal loss component. Uses model'...", required=False, default=None),
+        Parameter("kld_weight", ParamType.FLOAT, "float | None, default: None Weight for KL divergence loss. Uses model's confi...", required=False, default=None),
+        Parameter("reconstruction_weight", ParamType.FLOAT, "float, default: 0.0 Legacy reconstruction weight parameter.", required=False, default=0.0),
+        Parameter("vae_recon_weight", ParamType.FLOAT, "float, default: 0.0 VAE reconstruction weight.", required=False, default=0.0),
+        Parameter("diversity_weight", ParamType.FLOAT, "float, default: 0.0 Weight for archetype diversity loss.", required=False, default=0.0),
+        Parameter("activation_func", ParamType.STRING, "str, default: \"relu\" Activation function for the model.", required=False, default='relu'),
+        Parameter("track_stability", ParamType.BOOLEAN, "bool, default: True Whether to monitor archetype drift during training. Adds ...", required=False, default=True),
+        Parameter("validate_constraints", ParamType.BOOLEAN, "bool, default: True Whether to validate archetypal constraints during trainin...", required=False, default=True),
+        Parameter("lr_factor", ParamType.FLOAT, "float, default: 0.1 Factor for learning rate reduction on plateau.", required=False, default=0.1),
+        Parameter("lr_patience", ParamType.INTEGER, "int, default: 10 Number of epochs with no improvement before reducing learnin...", required=False, default=10),
+        Parameter("seed", ParamType.INTEGER, "int, default: 42 Random seed for reproducibility.", required=False, default=42),
+        Parameter("constraint_tolerance", ParamType.FLOAT, "float, default: 1e-3 Tolerance for constraint validation.", required=False, default=0.001),
+        Parameter("stability_history_size", ParamType.INTEGER, "int, default: 20 Number of epochs to track for stability analysis.", required=False, default=20),
+        Parameter("store_coords_key", ParamType.STRING, "str, default: \"archetype_coordinates\" Key to store learned archetype position...", required=False, default='archetype_coordinates'),
+        Parameter("early_stopping", ParamType.BOOLEAN, "bool, default: False Whether to use early stopping based on validation metrics.", required=False, default=False),
+        Parameter("early_stopping_patience", ParamType.INTEGER, "int, default: 10 Patience for early stopping (number of checks without improv...", required=False, default=10),
+        Parameter("early_stopping_metric", ParamType.STRING, "str, default: \"archetype_r2\" Metric to monitor for early stopping. One of: 'a...", required=False, default='archetype_r2'),
+        Parameter("min_improvement", ParamType.FLOAT, "float, default: 1e-4 Minimum improvement required to reset patience counter.", required=False, default=0.0001),
+        Parameter("validation_check_interval", ParamType.INTEGER, "int, default: 5 How often to check validation metrics (in epochs).", required=False, default=5),
+        Parameter("validation_data_loader", ParamType.STRING, "DataLoader | None, default: None Validation data loader for early stopping. U...", required=False, default=None),
+        ],
+        returns="dict",
     ),
 }
 
 
-# =============================================================================
-# HELPER FUNCTIONS
-# =============================================================================
-
-
 def get_tool_schema(func_name: str) -> ToolSchema:
-    """Get tool schema for a function.
-
-    Args:
-        func_name: Function name (e.g., "tl.train_archetypal")
-
-    Returns
-    -------
-        ToolSchema with parameters and return info
-
-    Raises
-    ------
-        KeyError: If function not found
-    """
     if func_name in TOOL_SCHEMAS:
         return TOOL_SCHEMAS[func_name]
     raise KeyError(f"No schema for '{func_name}'. Available: {list(TOOL_SCHEMAS.keys())}")
 
 
 def generate_tool_definitions(func_names: list[str] | None = None) -> list[dict[str, Any]]:
-    """Generate tool definitions for specified functions.
-
-    Args:
-        func_names: List of function names, or None for all functions
-
-    Returns
-    -------
-        List of tool definitions in JSON schema format
-    """
     if func_names is None:
         func_names = list(TOOL_SCHEMAS.keys())
-
     return [TOOL_SCHEMAS[name].to_tool_definition() for name in func_names]
 
 
 def print_tool_summary():
-    """Print summary of all available tools."""
     print("=" * 70)
     print("PEACH TOOLS SUMMARY")
     print("=" * 70)
-
-    for module in ["pp", "tl", "pl", "_core"]:
-        tools = [k for k in TOOL_SCHEMAS.keys() if k.startswith(module)]
-        if tools:
-            print(f"\n{module.upper()} ({len(tools)} tools):")
-            for name in tools:
-                schema = TOOL_SCHEMAS[name]
-                n_required = sum(1 for p in schema.parameters if p.required)
-                n_optional = len(schema.parameters) - n_required
-                print(f"  {name.split('.')[-1]:30} → {schema.returns:20} ({n_required} req, {n_optional} opt)")
+    for name, schema in sorted(TOOL_SCHEMAS.items()):
+        n_params = len(schema.parameters)
+        print(f"  {name:45s} {n_params:2d} params -> {schema.returns}")
+    print(f"\nTotal: {len(TOOL_SCHEMAS)} tools")
 
 
-# =============================================================================
-# SESSION STATE MANAGEMENT
-# =============================================================================
-
-
-class PeachSession:
-    """Session state for PEACH tool execution.
-
-    Maintains loaded AnnData objects and trained models across tool calls.
-
-    Usage:
-        session = PeachSession()
-        session.load_adata("my_data", adata)
-        session.store_model("my_model", trained_model)
-
-        # Later calls can reference by key
-        adata = session.get_adata("my_data")
-    """
-
-    def __init__(self):
-        self._adata_registry: dict[str, Any] = {}
-        self._model_registry: dict[str, Any] = {}
-        self._results_registry: dict[str, Any] = {}
-
-    def load_adata(self, key: str, adata: Any) -> None:
-        """Register an AnnData object."""
-        self._adata_registry[key] = adata
-
-    def get_adata(self, key: str) -> Any:
-        """Get AnnData by key."""
-        if key not in self._adata_registry:
-            raise KeyError(f"AnnData '{key}' not found. Available: {list(self._adata_registry.keys())}")
-        return self._adata_registry[key]
-
-    def store_model(self, key: str, model: Any) -> None:
-        """Register a trained model."""
-        self._model_registry[key] = model
-
-    def get_model(self, key: str) -> Any:
-        """Get model by key."""
-        if key not in self._model_registry:
-            raise KeyError(f"Model '{key}' not found. Available: {list(self._model_registry.keys())}")
-        return self._model_registry[key]
-
-    def store_results(self, key: str, results: Any) -> None:
-        """Store results (e.g., TrainingResults, CVSummary)."""
-        self._results_registry[key] = results
-
-    def get_results(self, key: str) -> Any:
-        """Get stored results."""
-        if key not in self._results_registry:
-            raise KeyError(f"Results '{key}' not found. Available: {list(self._results_registry.keys())}")
-        return self._results_registry[key]
-
-    def list_all(self) -> dict[str, list[str]]:
-        """List all registered objects."""
-        return {
-            "adata": list(self._adata_registry.keys()),
-            "models": list(self._model_registry.keys()),
-            "results": list(self._results_registry.keys()),
-        }
-
-
-# Global session instance (for simple use cases)
-_default_session = PeachSession()
-
-
-def get_session() -> PeachSession:
-    """Get the default session instance."""
-    return _default_session
