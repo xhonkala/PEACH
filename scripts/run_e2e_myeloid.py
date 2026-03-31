@@ -613,46 +613,30 @@ def step3_simplex_regression(adata, report):
                         "individual gene expression (per-gene fit quality). This differs from archetypal R\u00b2 "
                         "(step 2), which measures how well the model reconstructs the full PCA space.")
 
-    # R2 barplot (plotly)
+    # --- 1. Archetype-exclusive features ---
     try:
-        fig_r2 = pc.pl.r2_barplot(adata, top_n=30, show=False)
-        html += safe_plotly_html(report, fig_r2, "Top 30 genes by R-squared (per-archetype |beta|)")
+        fig_excl = pc.pl.archetype_regression_dotplot(
+            adata, top_n=10, exclusive_only=True, show=False)
+        html += safe_plotly_html(report, fig_excl,
+            "Archetype-exclusive genes (top 10 per archetype, ranked by |β|, "
+            "exclusive = max|β| ≥ 2× second-highest)")
     except Exception as e:
-        html += error_html(f"R2 barplot failed: {e}")
+        html += error_html(f"Exclusive dotplot failed: {e}")
 
-    # Coefficient heatmap
+    # --- 2. Top features by R² ---
     try:
-        fig_coef = pc.pl.coefficient_heatmap(adata, top_n=50, show=False)
-        html += safe_plotly_html(report, fig_coef, "Vertex coefficient heatmap (top 50 by R-squared)")
+        fig_top = pc.pl.archetype_regression_dotplot(
+            adata, top_n=10, exclusive_only=False, show=False)
+        html += safe_plotly_html(report, fig_top,
+            "Top genes per archetype (all features, ranked by |β|)")
     except Exception as e:
-        html += error_html(f"Coefficient heatmap failed: {e}")
+        html += error_html(f"Top features dotplot failed: {e}")
 
-    # Regression volcano
-    try:
-        fig_volc = pc.pl.regression_volcano(adata, show=False)
-        html += safe_plotly_html(report, fig_volc, "Regression volcano: R-squared vs vertex contrast")
-    except Exception as e:
-        html += error_html(f"Regression volcano failed: {e}")
-
-    # Interaction heatmap (degree 2)
-    try:
-        fig_int = pc.pl.interaction_heatmap(adata, top_n=30, show=False)
-        html += safe_plotly_html(report, fig_int, "Interaction coefficient heatmap (degree 2)")
-    except Exception as e:
-        html += error_html(f"Interaction heatmap failed: {e}")
-
-    # Archetype regression dotplot
-    try:
-        fig_dot = pc.pl.archetype_regression_dotplot(adata, top_n=10, show=False)
-        html += safe_plotly_html(report, fig_dot,
-                                 "Gene regression dotplot: all features, top 10 per archetype (ranked by |β|)")
-    except Exception as e:
-        html += error_html(f"Regression dotplot failed: {e}")
-
-    # Archetype radar
+    # --- 3. Radar plot ---
     try:
         fig_radar = pc.pl.archetype_radar(adata, top_n=8, order_by_similarity=True, show=False)
-        html += safe_plotly_html(report, fig_radar, "Archetype radar: all features, top 8 per archetype (ranked by |β|)")
+        html += safe_plotly_html(report, fig_radar,
+            "Archetype radar (top 8 features, spokes ordered by coefficient similarity)")
     except Exception as e:
         html += error_html(f"Archetype radar failed: {e}")
 
@@ -825,37 +809,23 @@ def step3_simplex_regression(adata, report):
                 pw_df["FDR_q"] = pw_df["FDR_q"].apply(fmt_pval)
                 html += report.df_to_html(pw_df, caption="Top 20 pathways by R² (pathway simplex regression)")
 
-            # Pathway coefficient heatmap (matplotlib)
+            # Pathway exclusive dotplot
             try:
-                pw_coefs = pw_reg.get("vertex_coefficients")
-                if pw_coefs is not None and len(pw_names) > 0:
-                    pw_coefs = np.asarray(pw_coefs)
-                    n_show = min(25, pw_coefs.shape[0])
-                    mean_abs = np.abs(pw_coefs).max(axis=1)
-                    top_idx = np.argsort(mean_abs)[-n_show:][::-1]
-                    K_pw = pw_coefs.shape[1]
-                    fig, ax = plt.subplots(figsize=(max(5, K_pw * 1.5), max(4, n_show * 0.35)))
-                    im = ax.imshow(pw_coefs[top_idx], aspect="auto", cmap="RdBu_r")
-                    ax.set_xticks(range(K_pw))
-                    ax.set_xticklabels([f"A{k+1}" for k in range(K_pw)])
-                    ax.set_yticks(range(n_show))
-                    ax.set_yticklabels([pw_names[i] for i in top_idx], fontsize=8)
-                    plt.colorbar(im, ax=ax, label="Coefficient", shrink=0.6)
-                    ax.set_title("Pathway coefficients (top by max |beta|)")
-                    fig.tight_layout()
-                    html += report.fig_to_img(fig, caption="Pathway coefficient heatmap (top 25 by max |beta|)")
-                    plt.close("all")
-            except Exception as e:
-                html += error_html(f"Pathway coefficient heatmap failed: {e}")
-                plt.close("all")
-
-            # Pathway regression dotplot (exclusive pathways)
-            try:
-                fig_pw_dot = pc.pl.archetype_regression_dotplot(
+                fig_pw_excl = pc.pl.archetype_regression_dotplot(
                     adata, top_n=10, exclusive_only=True,
                     feature_type="pathways", show=False)
-                html += safe_plotly_html(report, fig_pw_dot,
-                                         "Pathway regression dotplot: exclusive pathways, top 10 per archetype (ranked by |β|)")
+                html += safe_plotly_html(report, fig_pw_excl,
+                    "Archetype-exclusive pathways (ranked by |β|)")
+            except Exception as e:
+                html += error_html(f"Pathway exclusive dotplot failed: {e}")
+
+            # Pathway top features dotplot
+            try:
+                fig_pw_top = pc.pl.archetype_regression_dotplot(
+                    adata, top_n=10, exclusive_only=False,
+                    feature_type="pathways", show=False)
+                html += safe_plotly_html(report, fig_pw_top,
+                    "Top pathways per archetype (all, ranked by |β|)")
             except Exception as e:
                 html += error_html(f"Pathway dotplot failed: {e}")
 
@@ -865,7 +835,7 @@ def step3_simplex_regression(adata, report):
                     adata, top_n=8, feature_type="pathways",
                     order_by_similarity=True, show=False)
                 html += safe_plotly_html(report, fig_pw_radar,
-                                         "Pathway radar: all pathways, top 8 per archetype (ranked by |β|, similarity-ordered)")
+                    "Pathway radar (similarity-ordered)")
             except Exception as e:
                 html += error_html(f"Pathway radar failed: {e}")
 
