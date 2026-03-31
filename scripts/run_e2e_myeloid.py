@@ -89,10 +89,36 @@ log = logging.getLogger("e2e_myeloid")
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-DATA_PATH = "/Users/honkala/Desktop/FRTNBC/data/tnbc_myeloid_preprocessed.h5ad"
-OUTPUT_DIR = "outputs/e2e_myeloid"
+DATA_PATH = "/Users/honkala/Desktop/peach/data/hsc_10k.h5ad"
+OUTPUT_DIR = "outputs/e2e_hsc"
 _DATE_TAG = time.strftime("%Y%m%d")
-REPORT_PATH = os.path.join(OUTPUT_DIR, f"e2e_myeloid_report_{_DATE_TAG}.html")
+REPORT_PATH = os.path.join(OUTPUT_DIR, f"e2e_hsc_report_{_DATE_TAG}.html")
+
+# ---------------------------------------------------------------------------
+# Cell type constants (HSC myeloid trajectory)
+# ---------------------------------------------------------------------------
+CT_SHORT = {
+    "hematopoietic stem cell": "HSC",
+    "common myeloid progenitor": "CMP",
+    "CD14-positive monocyte": "Mono",
+}
+CT_LONG = {v: k for k, v in CT_SHORT.items()}
+
+FLOW_PAIRS = [
+    ("HSC", "CMP"),
+    ("CMP", "Mono"),
+    ("HSC", "Mono"),
+]
+
+LINEAGE_GROUPS = {
+    "progenitors": ["HSC", "CMP"],
+    "myeloid": ["CMP", "Mono"],
+    "full_trajectory": ["HSC", "CMP", "Mono"],
+}
+
+N_PCS = 13
+MIN_CELLS_MODEL = 400
+MIN_CELLS_FLOW = 200
 
 
 # ============================================================================
@@ -287,57 +313,97 @@ def define_splits(adata) -> dict:
 # Step functions
 # ============================================================================
 
-def step1_dataset_prep(adata, report, splits):
-    """Step 1: Dataset preparation -- pathways, splits, overview."""
+def _dense_X(adata):
+    """Get dense X matrix."""
+    return adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X
+
+
+def step1_dataset_prep(adata, report):
+    """Step 1: Dataset preparation -- subset, PCA recompute, pathways, overview."""
     import peach as pc
+    import scanpy as sc
 
     html = ""
 
+    # -- Subset to 3 cell types -----------------------------------------------
+    ct_mask = adata.obs["cell_type"].isin(list(CT_SHORT.keys()))
+    n_before = adata.shape[0]
+    adata_sub = adata[ct_mask].copy()
+    log.info(f"Subset: {n_before} -> {adata_sub.shape[0]} cells ({len(CT_SHORT)} cell types)")
+
+    # Add short cell type labels
+    adata_sub.obs["cell_type_short"] = adata_sub.obs["cell_type"].map(CT_SHORT)
+
+    # Cell type counts
+    ct_counts = adata_sub.obs["cell_type_short"].value_counts()
+    ct_rows = [{"Cell type": ct, "N cells": int(n)} for ct, n in ct_counts.items()]
+    html += report.df_to_html(pd.DataFrame(ct_rows), caption="Cell type counts (subset)")
+
+    # -- Recompute PCA on subset -----------------------------------------------
+    log.info(f"Recomputing PCA on subset ({adata_sub.shape[0]} cells, {N_PCS} components)...")
+    sc.pp.pca(adata_sub, n_comps=N_PCS)
+    html += report.text(f"PCA recomputed on {adata_sub.shape[0]} cells with {N_PCS} components.")
+
+    # -- Convert var_names from Ensembl IDs to gene symbols --------------------
+    # Required for pathway scoring -- MSigDB uses symbols. Do this after PCA so
+    # loadings are already stored under the Ensembl-named axis.
+    if "gene_symbols" in adata_sub.var.columns:
+        symbols = adata_sub.var["gene_symbols"].values.copy()
+        # Handle duplicates by appending suffix
+        seen = {}
+        for i, s in enumerate(symbols):
+            if s in seen:
+                seen[s] += 1
+                symbols[i] = f"{s}_{seen[s]}"
+            else:
+                seen[s] = 0
+        adata_sub.var_names = pd.Index(symbols)
+        log.info(f"Converted var_names to gene symbols ({adata_sub.n_vars} genes)")
+        html += report.text(
+            f"var_names converted from Ensembl IDs to gene symbols ({adata_sub.n_vars} genes). "
+            "Duplicate symbols disambiguated with numeric suffix."
+        )
+
     # Overview cards
-    n_cells, n_genes = adata.shape
+    n_cells, n_genes = adata_sub.shape
     cards = [
-        metric_card(n_cells, "Cells"),
-        metric_card(n_genes, "Genes (HVG)"),
-        metric_card(adata.obsm["X_pca"].shape[1], "PCA dims"),
+        metric_card(n_cells, "Cells (subset)"),
+        metric_card(n_genes, "Genes"),
+        metric_card(N_PCS, "PCA dims"),
+        metric_card(len(CT_SHORT), "Cell types"),
     ]
-    if "treatment" in adata.obs.columns:
-        cards.append(metric_card(adata.obs["treatment"].nunique(), "Treatment levels"))
-    if "pCR" in adata.obs.columns:
-        cards.append(metric_card(adata.obs["pCR"].nunique(), "Response levels"))
-    if "subcluster" in adata.obs.columns:
-        cards.append(metric_card(adata.obs["subcluster"].nunique(), "Subclusters"))
     html += metric_grid(cards)
 
-    # Split sizes table
-    split_rows = []
-    for name, mask in splits.items():
-        split_rows.append({"Split": name, "N cells": int(mask.sum())})
-    split_df = pd.DataFrame(split_rows)
-    html += report.df_to_html(split_df, caption="Split sizes")
-
     # X data summary
-    X = adata.X if not hasattr(adata.X, "toarray") else adata.X.toarray()
+    X = _dense_X(adata_sub)
     html += report.text(
         f"X range: [{X.min():.2f}, {X.max():.2f}] | "
         f"X mean: {X.mean():.3f} | X std: {X.std():.3f} | "
-        f"Note: X is scaled (not raw logcounts)."
+        f"Note: X is sparse logcounts (not z-scored)."
+    )
+
+    # Gene name check
+    example_vars = list(adata_sub.var_names[:5])
+    html += report.text(
+        f"Gene ID format after conversion: symbol (e.g. {example_vars[0]}). "
+        f"var_names are now gene symbols; display functions use them directly."
     )
 
     # Pathway scores
     try:
-        log.info("Loading Hallmark pathway networks...")
-        net = pc.pp.load_pathway_networks(sources=["hallmark"], verbose=False)
+        log.info("Loading C5:BP (GO Biological Process) pathway networks...")
+        net = pc.pp.load_pathway_networks(sources=["c5_bp"], verbose=False)
         log.info("Computing pathway scores...")
-        pc.pp.compute_pathway_scores(adata, net=net, verbose=False)
-        n_pathways = adata.obsm["pathway_scores"].shape[1]
-        pathway_names = adata.uns.get("pathway_scores_pathways", [])
-        html += report.text(f"Pathway scores computed: {n_pathways} Hallmark pathways.")
+        pc.pp.compute_pathway_scores(adata_sub, net=net, verbose=False)
+        n_pathways = adata_sub.obsm["pathway_scores"].shape[1]
+        pathway_names = adata_sub.uns.get("pathway_scores_pathways", [])
+        html += report.text(f"Pathway scores computed: {n_pathways} C5:BP (GO Biological Process) pathways.")
         if len(pathway_names) > 0:
             html += report.text(f"Example pathways: {', '.join(pathway_names[:5])}...")
 
         # Pathway score distribution
         fig, ax = plt.subplots(figsize=(10, 3))
-        scores = np.asarray(adata.obsm["pathway_scores"])
+        scores = np.asarray(adata_sub.obsm["pathway_scores"])
         ax.hist(scores.ravel(), bins=80, color="#0072B2", alpha=0.7, edgecolor="none")
         ax.set_xlabel("Pathway score")
         ax.set_ylabel("Count")
@@ -351,20 +417,12 @@ def step1_dataset_prep(adata, report, splits):
         html += error_html(f"Pathway scoring failed: {e}. Continuing without pathways.")
         log.warning(f"Pathway scoring failed: {e}")
 
-    # Slice PCA to 15 components — z-scored data spreads variance broadly
-    # across PCs; PEACH works better with fewer dimensions
-    n_pcs_use = 15
-    if adata.obsm["X_pca"].shape[1] > n_pcs_use:
-        log.info(f"Slicing PCA: {adata.obsm['X_pca'].shape[1]} -> {n_pcs_use} components")
-        adata.obsm["X_pca"] = adata.obsm["X_pca"][:, :n_pcs_use]
-        adata.varm["PCs"] = adata.varm["PCs"][:, :n_pcs_use]
-        html += report.text(f"PCA sliced to {n_pcs_use} components (z-scored data spreads variance broadly).")
-
     # Prepare training data
     log.info("Preparing training data...")
-    pc.pp.prepare_training(adata, batch_size=128)
+    pc.pp.prepare_training(adata_sub, batch_size=128)
 
     report.add_section("Dataset Preparation", html, step_num=1)
+    return adata_sub
 
 
 def step2_hyperparameter_fit(adata, report):
@@ -483,16 +541,16 @@ def step2_hyperparameter_fit(adata, report):
 
     # Archetypal space scatter (plotly)
     try:
-        fig_space = pc.pl.archetypal_space(adata, color_by="treatment",
-                                           title="Archetypal space (treatment)")
-        html += safe_plotly_html(report, fig_space, "Archetypal space colored by treatment")
+        fig_space = pc.pl.archetypal_space(adata, color_by="cell_type_short",
+                                           title="Archetypal space (cell type)")
+        html += safe_plotly_html(report, fig_space, "Archetypal space colored by cell type")
     except Exception as e:
         html += error_html(f"Archetypal space plot failed: {e}")
 
     try:
-        fig_space2 = pc.pl.archetypal_space(adata, color_by="pCR",
-                                            title="Archetypal space (response)")
-        html += safe_plotly_html(report, fig_space2, "Archetypal space colored by pCR response")
+        fig_space2 = pc.pl.archetypal_space(adata, color_by="archetypes",
+                                            title="Archetypal space (archetypes)")
+        html += safe_plotly_html(report, fig_space2, "Archetypal space colored by archetype assignment")
     except Exception as e:
         html += error_html(f"Archetypal space (pCR) failed: {e}")
 
@@ -846,7 +904,7 @@ def step4_hypergeometric(adata, report):
     html = ""
     cond_results = {}
 
-    for col in ["treatment", "pCR", "subcluster"]:
+    for col in ["cell_type_short"]:
         if col not in adata.obs.columns:
             continue
         log.info(f"Conditional associations: {col}...")
@@ -891,17 +949,17 @@ def step4_hypergeometric(adata, report):
             html += error_html(f"Conditional associations for {col} failed: {e}")
 
     # Proportion bars
-    if "archetypes" in adata.obs.columns and "treatment" in adata.obs.columns:
+    if "archetypes" in adata.obs.columns and "cell_type_short" in adata.obs.columns:
         try:
-            ct = pd.crosstab(adata.obs["archetypes"], adata.obs["treatment"], normalize="index")
+            ct = pd.crosstab(adata.obs["archetypes"], adata.obs["cell_type_short"], normalize="index")
             fig, ax = plt.subplots(figsize=(10, 5))
             ct.plot(kind="bar", stacked=True, ax=ax, colormap="Set2", edgecolor="none")
             ax.set_ylabel("Proportion")
-            ax.set_title("Treatment composition per archetype")
-            ax.legend(title="Treatment", bbox_to_anchor=(1.02, 1), loc="upper left")
+            ax.set_title("Cell type composition per archetype")
+            ax.legend(title="Cell type", bbox_to_anchor=(1.02, 1), loc="upper left")
             ax.spines[["top", "right"]].set_visible(False)
             fig.tight_layout()
-            html += report.fig_to_img(fig, caption="Stacked bar: treatment proportions per archetype")
+            html += report.fig_to_img(fig, caption="Stacked bar: cell type proportions per archetype")
             plt.close("all")
         except Exception as e:
             html += error_html(f"Proportion bar failed: {e}")
@@ -1397,7 +1455,7 @@ def step6b_diversity_metrics(adata, report):
                                   caption="Archetype weight entropy (higher = less committed)")
 
     # Per-condition diversity
-    for condition_col in ["treatment", "pCR"]:
+    for condition_col in ["cell_type_short"]:
         if condition_col not in adata.obs.columns:
             continue
         html += report.text(
@@ -1844,7 +1902,7 @@ def step9_component_characterization(adata, report):
                 [f"comp_{int(a)}" if a >= 0 else "unassigned" for a in assignments]
             )
 
-            for col in ["treatment", "pCR"]:
+            for col in ["cell_type_short"]:
                 if col not in adata.obs.columns:
                     continue
                 log.info(f"Component conditional associations: {col}...")
@@ -1883,9 +1941,6 @@ def step9_component_characterization(adata, report):
 # ============================================================================
 # Per-subset helpers (shared by steps 10-17)
 # ============================================================================
-
-MIN_CELLS_MODEL = 500
-MIN_CELLS_FLOW = 300
 
 
 def _subset_adata(adata, mask, label: str):
@@ -1933,7 +1988,7 @@ def run_subset_regression(adata_sub, label: str) -> dict | None:
     except Exception as e:
         log.warning(f"  {label}: pattern classification failed: {e}")
 
-    for col in ["treatment", "pCR", "subcluster"]:
+    for col in ["cell_type_short"]:
         if col in adata_sub.obs.columns and adata_sub.obs[col].nunique() > 1:
             try:
                 pc.tl.conditional_associations(adata_sub, obs_column=col, verbose=False)
@@ -3055,16 +3110,20 @@ def main():
     import peach as pc
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    report = HTMLReport(f"PEACH v0.5 -- Myeloid End-to-End Analysis ({_DATE_TAG})")
+    report = HTMLReport(f"PEACH v0.5 -- HSC Myeloid Trajectory ({_DATE_TAG})")
 
     # Load data
     log.info(f"Loading data from {DATA_PATH}...")
     adata = sc.read_h5ad(DATA_PATH)
     log.info(f"Loaded: {adata.shape[0]} cells x {adata.shape[1]} genes")
 
-    # Define splits
-    splits = define_splits(adata)
-    log.info(f"Defined {len(splits)} splits")
+    # Define splits (safe -- HSC data won't have treatment/pCR)
+    try:
+        splits = define_splits(adata)
+        log.info(f"Defined {len(splits)} splits")
+    except Exception as e:
+        log.warning(f"define_splits failed (expected for HSC data): {e}")
+        splits = {}
 
     # Storage for cross-step results
     gene_reg = None
@@ -3073,14 +3132,14 @@ def main():
     # -- Step 1 --------------------------------------------------------------
     t0 = time.time()
     try:
-        step1_dataset_prep(adata, report, splits)
+        adata = step1_dataset_prep(adata, report)
         log.info(f"Step 1 done in {time.time() - t0:.1f}s")
     except Exception as e:
         log.error(f"Step 1 failed: {e}", exc_info=True)
         report.add_section("Dataset Preparation", error_html(f"Step 1 failed: {e}"), step_num=1)
 
     # Save checkpoint
-    safe_save_h5ad(adata,os.path.join(OUTPUT_DIR, "adata_step1.h5ad"))
+    safe_save_h5ad(adata, os.path.join(OUTPUT_DIR, "adata_step1.h5ad"))
 
     # -- Step 2 --------------------------------------------------------------
     t0 = time.time()
