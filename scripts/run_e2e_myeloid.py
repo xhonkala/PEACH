@@ -79,6 +79,17 @@ def fmt_pval(p, threshold=1e-300):
     return f"{p:.2e}"
 
 
+def display_arch(label):
+    """Convert 0-indexed obs label (archetype_0) to 1-indexed display string (A1)."""
+    if isinstance(label, str) and label.startswith("archetype_"):
+        try:
+            idx = int(label.split("_")[1])
+            return f"A{idx + 1}"
+        except (ValueError, IndexError):
+            pass
+    return str(label)
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -1195,7 +1206,7 @@ def step6_within_fit_comparisons(adata, report):
 
         if n_src < 50 or n_tgt < 50:
             flow_rows.append({
-                "Source": src_label, "Target": tgt_label,
+                "Source": display_arch(src_label), "Target": display_arch(tgt_label),
                 "N_source": n_src, "N_target": n_tgt,
                 "MMD_before": float("nan"), "MMD_after": float("nan"),
                 "MMD_reduction": float("nan"),
@@ -1219,7 +1230,7 @@ def step6_within_fit_comparisons(adata, report):
             mmd_a = fr["mmd_after"]
             reduction = 1 - mmd_a / max(mmd_b, 1e-10)
             flow_rows.append({
-                "Source": src_label, "Target": tgt_label,
+                "Source": display_arch(src_label), "Target": display_arch(tgt_label),
                 "N_source": n_src, "N_target": n_tgt,
                 "MMD_before": round(mmd_b, 4), "MMD_after": round(mmd_a, 4),
                 "MMD_reduction": round(reduction, 4),
@@ -1228,7 +1239,7 @@ def step6_within_fit_comparisons(adata, report):
         except Exception as e:
             log.warning(f"Flow {src_label}->{tgt_label} failed: {e}")
             flow_rows.append({
-                "Source": src_label, "Target": tgt_label,
+                "Source": display_arch(src_label), "Target": display_arch(tgt_label),
                 "N_source": n_src, "N_target": n_tgt,
                 "MMD_before": float("nan"), "MMD_after": float("nan"),
                 "MMD_reduction": float("nan"),
@@ -1240,11 +1251,17 @@ def step6_within_fit_comparisons(adata, report):
 
     # Build K×K dissimilarity matrix (1 - MMD reduction)
     # Higher MMD reduction = easier to transport = more similar; so 1 - MMD_reduction = dissimilarity
+    # DataFrame Source/Target use display labels (A1, A2, ...) via display_arch()
+    arch_short = [f"A{i+1}" for i in range(K)]
     sim_matrix = np.full((K, K), np.nan)
     for _, row in flow_df.iterrows():
         if row["Status"] == "OK":
-            i = arch_labels.index(row["Source"])
-            j = arch_labels.index(row["Target"])
+            # Source/Target are display labels (A1, A2, ...) — look up by display index
+            try:
+                i = arch_short.index(row["Source"])
+                j = arch_short.index(row["Target"])
+            except ValueError:
+                continue
             val = row["MMD_reduction"]
             sim_matrix[i, j] = 1.0 - val  # dissimilarity: higher = more different
             sim_matrix[j, i] = 1.0 - val
@@ -1253,7 +1270,6 @@ def step6_within_fit_comparisons(adata, report):
     # Heatmap
     try:
         import plotly.graph_objects as go
-        arch_short = [f"A{i+1}" for i in range(K)]
         fig = go.Figure(data=go.Heatmap(
             z=sim_matrix, x=arch_short, y=arch_short,
             colorscale="Blues",
@@ -1316,7 +1332,7 @@ def step6b_diversity_metrics(adata, report):
         cells = X_shifted[mask]
         per_cell_ent = np.array([shannon_entropy(c / c.sum()) for c in cells])
         alpha_rows.append({
-            "Archetype": label,
+            "Archetype": display_arch(label),
             "N cells": int(mask.sum()),
             "Mean Shannon H": f"{per_cell_ent.mean():.4f}",
             "Median Shannon H": f"{np.median(per_cell_ent):.4f}",
@@ -1394,7 +1410,7 @@ def step6b_diversity_metrics(adata, report):
             pw_cells = pw_scores[mask]
             pw_var = pw_cells.var(axis=0).mean()
             pw_alpha_rows.append({
-                "Archetype": label,
+                "Archetype": display_arch(label),
                 "Mean pathway score variance": f"{pw_var:.4f}",
             })
         html += report.df_to_html(pd.DataFrame(pw_alpha_rows),
@@ -1417,7 +1433,7 @@ def step6b_diversity_metrics(adata, report):
             mask = (adata.obs["archetypes"] == label).values
             ent = weight_entropy[mask]
             entropy_rows.append({
-                "Archetype": label,
+                "Archetype": display_arch(label),
                 "Mean weight entropy": f"{ent.mean():.4f}",
                 "Median": f"{np.median(ent):.4f}",
             })
@@ -1448,22 +1464,42 @@ def step6b_diversity_metrics(adata, report):
 
 
 def step7_driver_regression(adata, report):
-    """Step 7: Driver regression (features predict archetype weights)."""
+    """Step 7: Driver regression (features predict archetype weights).
+
+    Runs gene driver regression for concordance with simplex regression (same
+    feature space). If pathway scores are available, also runs a separate
+    pathway driver regression and reports it independently.
+    """
     import peach as pc
 
     html = ""
 
-    # Use pathway scores if available, else genes
+    # -----------------------------------------------------------------------
+    # PRIMARY: Gene driver regression (same feature space as simplex regression)
+    # This is the one used for concordance comparison.
+    # -----------------------------------------------------------------------
+    log.info("Running gene driver regression (for concordance with simplex regression)...")
+    try:
+        gene_driver_result = pc.tl.archetype_driver_regression(
+            adata,
+            feature_matrix=None,  # None -> uses adata.X (genes)
+            feature_names=None,
+            max_degree=1,
+            n_bootstrap=500,
+            robust_se=True,
+        )
+        driver_result = gene_driver_result  # used in concordance section below
+        feat_label = "genes"
+    except Exception as e:
+        gene_driver_result = None
+        driver_result = None
+        feat_label = "genes"
+        html += error_html(f"Gene driver regression failed: {e}")
+
+    # -----------------------------------------------------------------------
+    # SECONDARY: Pathway driver regression (separate analysis, not used for concordance)
+    # -----------------------------------------------------------------------
     has_pathways = "pathway_scores" in adata.obsm
-    feat_label = "pathway_scores" if has_pathways else None
-    feat_matrix_arg = feat_label  # default: pass key string
-    feat_names_arg = None  # default: infer from adata
-
-    if not has_pathways:
-        html += report.text("Warning: No pathway scores available. "
-                            "Driver regression on full gene set may be underdetermined.")
-
-    # Filter pathways by variance to avoid singular design matrix
     if has_pathways:
         pw_scores = adata.obsm.get("pathway_scores")
         if pw_scores is not None:
@@ -1473,24 +1509,37 @@ def step7_driver_regression(adata, report):
             top_pw_idx = np.argsort(pw_var)[-n_keep:]
             pw_names_all = adata.uns.get("pathway_scores_pathways",
                                          [f"pw_{i}" for i in range(pw_scores.shape[1])])
-            feat_names_arg = [pw_names_all[i] for i in top_pw_idx]
-            feat_matrix_arg = pw_scores[:, top_pw_idx]
+            pw_feat_names = [pw_names_all[i] for i in top_pw_idx]
+            pw_feat_matrix = pw_scores[:, top_pw_idx]
             log.info(f"  Pathway driver regression: keeping {n_keep}/{pw_scores.shape[1]} "
                      f"pathways by variance (K={K_arch})")
-            html += report.text(f"Pathway variance filter: {n_keep}/{pw_scores.shape[1]} pathways "
-                                f"retained (top by variance, max(20, K×4)={n_keep}).")
+            html += report.text(f"Pathway driver regression (separate analysis): "
+                                f"{n_keep}/{pw_scores.shape[1]} pathways retained "
+                                f"(top by variance, max(20, K×4)={n_keep}).")
+            try:
+                pathway_driver_result = pc.tl.archetype_driver_regression(
+                    adata,
+                    feature_matrix=pw_feat_matrix,
+                    feature_names=pw_feat_names,
+                    max_degree=1,
+                    n_bootstrap=500,
+                    robust_se=True,
+                )
+                pw_r2 = np.asarray(pathway_driver_result["r_squared"])
+                html += report.text(
+                    f"Pathway driver regression R² (ILR components): "
+                    f"mean = {pw_r2.mean():.4f}, "
+                    f"range [{pw_r2.min():.4f}, {pw_r2.max():.4f}]. "
+                    "(Note: concordance comparison below uses gene driver regression.)")
+            except Exception as e:
+                html += error_html(f"Pathway driver regression failed: {e}")
 
-    log.info(f"Running driver regression (feature_matrix={feat_label}, degree=1)...")
+    if driver_result is None:
+        report.add_section("Driver Regression", html, step_num=7)
+        return
+
+    log.info(f"Reporting gene driver regression results (feature_matrix={feat_label}, degree=1)...")
     try:
-        driver_result = pc.tl.archetype_driver_regression(
-            adata,
-            feature_matrix=feat_matrix_arg,
-            feature_names=feat_names_arg,
-            max_degree=1,  # degree=2 creates too many interaction terms
-            n_bootstrap=500,
-            robust_se=True,
-        )
-
         r2_vals = np.asarray(driver_result["r_squared"])
         K_minus_1 = len(r2_vals)
         main_coefs = np.asarray(driver_result["main_coefficients"])  # [K, n_feat]
@@ -1743,11 +1792,33 @@ def step9_component_characterization(adata, report):
             html += error_html(f"Component heatmap failed: {e}")
 
         # Pathway characterization per component
+        # Note: component_regression ignores feature_type in its current implementation
+        # (always uses adata.X). We call feature_simplex_regression directly per component
+        # with feature_matrix="pathway_scores" to correctly use pathway features.
         if "pathway_scores" in adata.obsm:
             try:
                 log.info("  Component pathway characterization...")
-                pw_comp = pc.tl.component_regression(adata, feature_type="pathway_scores")
-                pw_comp_regs = pw_comp.get("component_regs", {})
+                from peach.tl.feature_regression import feature_simplex_regression as _fsr
+                gmm_for_pw = adata.uns.get("peach_gmm")
+                pw_comp_regs = {}
+                if gmm_for_pw is not None:
+                    _assignments = np.asarray(gmm_for_pw["component_assignments"])
+                    _n_stable = gmm_for_pw["n_components_stable"]
+                    for _c in range(_n_stable):
+                        _mask = _assignments == _c
+                        if _mask.sum() < 20:
+                            continue
+                        _adata_sub = adata[_mask].copy()
+                        _reg = _fsr(
+                            _adata_sub,
+                            feature_matrix="pathway_scores",
+                            n_bootstrap=100,
+                            robust_se=True,
+                            store_to_adata=False,
+                            store_residuals=False,
+                        )
+                        pw_comp_regs[_c] = _reg
+                pw_comp = {"component_regs": pw_comp_regs, "n_components": _n_stable if gmm_for_pw else 0}
                 if pw_comp_regs:
                     html += report.text("Pathway characterization per component:")
                     pw_comp_rows = []
@@ -2005,6 +2076,8 @@ def step10_per_dose_models(adata, report):
 
     if "treatment" not in adata.obs.columns:
         html += error_html("No 'treatment' column -- skipping per-dose models.")
+        html += report.text("Per-lineage models: HSC data uses biological lineage groups "
+                            "instead of treatment doses. Lineage analysis is a future addition.")
         report.add_section("Per-Dose Models", html, step_num=10)
         return dose_adatas
 
@@ -2228,20 +2301,31 @@ def step12_between_dose_flow(adata, dose_adatas, report):
     flow_results = {}
 
     if "treatment" not in adata.obs.columns:
-        html += error_html("No 'treatment' column -- skipping between-dose flow.")
-        report.add_section("Between-Dose Flow", html, step_num=12)
-        return flow_results
+        if "cell_type_short" in adata.obs.columns:
+            # Use biological transition pairs (cell type) instead of dose pairs
+            dose_pairs = FLOW_PAIRS
+            html += report.text(
+                "Using biological transition pairs (cell type) instead of treatment doses: "
+                + ", ".join(f"{s}→{t}" for s, t in dose_pairs)
+            )
+            obs_key = "cell_type_short"
+        else:
+            html += error_html("No 'treatment' or 'cell_type_short' column -- skipping between-dose flow.")
+            report.add_section("Between-Dose Flow", html, step_num=12)
+            return flow_results
+    else:
+        dose_pairs = _make_dose_pairs()
+        obs_key = "treatment"
 
-    dose_pairs = _make_dose_pairs()
-    available_doses = set(adata.obs["treatment"].unique())
+    available_doses = set(adata.obs[obs_key].unique())
 
     for src, tgt in dose_pairs:
         if src not in available_doses or tgt not in available_doses:
-            html += report.text(f"Skipping {src}->{tgt}: dose not present.")
+            html += report.text(f"Skipping {src}->{tgt}: group not present.")
             continue
 
-        n_src = int((adata.obs["treatment"] == src).sum())
-        n_tgt = int((adata.obs["treatment"] == tgt).sum())
+        n_src = int((adata.obs[obs_key] == src).sum())
+        n_tgt = int((adata.obs[obs_key] == tgt).sum())
         if n_src < MIN_CELLS_FLOW or n_tgt < MIN_CELLS_FLOW:
             html += error_html(f"{src}->{tgt}: insufficient cells ({n_src}, {n_tgt}), skipping.")
             continue
@@ -2252,8 +2336,8 @@ def step12_between_dose_flow(adata, dose_adatas, report):
         try:
             fr = pc.tl.flow_within(
                 adata,
-                source={"treatment": src},
-                target={"treatment": tgt},
+                source={obs_key: src},
+                target={obs_key: tgt},
                 n_epochs=600,
                 hidden_dims=(128, 128, 128),
                 batch_size=256,
