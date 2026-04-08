@@ -237,6 +237,8 @@ def flow_gene_alignment(
     n_top: int = 50,
     pca_loadings_key: str | None = None,
     n_permutations: int = 0,
+    null_type: str = "both",
+    null_mode: str | None = None,
     per_cell: bool = True,
     n_top_features: int = 2500,
     normalize: bool = True,
@@ -260,6 +262,25 @@ def flow_gene_alignment(
         Key in adata.varm for PCA loadings. Default: 'PCs'.
     n_permutations : int
         Number of permutations for null distribution. Default: 0 (disabled).
+    null_type : str
+        Which null model(s) to run when ``n_permutations > 0``. One of
+        ``"rotation"`` (random orthogonal rotation of the PCA loading matrix),
+        ``"shuffle"`` (row-wise shuffle of gene-to-loading assignments), or
+        ``"both"`` (run both and return results for each). Default: ``"both"``.
+
+        - **Rotation null** tests: given the gene-gene correlation structure
+          encoded in the loadings, is the observed alignment with the flow
+          direction greater than chance? Preserves the covariance geometry of
+          the loadings while randomising the coordinate frame. Produces an
+          omnibus p-value (``rotation_omnibus_pvalue``).
+        - **Shuffle null** tests: is THIS specific gene's loading aligned with
+          flow, beyond what a random gene in its place would achieve? Breaks
+          gene-gene correlation structure but enables per-gene testing. Produces
+          per-gene p-values (``alignment_pvalues``, ``alignment_pvalues_fdr``).
+    null_mode : str or None
+        Alias for ``null_type``. When provided, overrides ``null_type``.
+        Accepts the same values: ``"rotation"``, ``"shuffle"``, ``"both"``.
+        Default: ``None`` (fall back to ``null_type``).
     per_cell : bool
         If True, also compute per-cell per-gene alignment scores for the top
         ``n_top_features`` genes (by absolute aggregated score). Returns
@@ -276,6 +297,9 @@ def flow_gene_alignment(
     random_state : int
         Random seed for permutation tests. Default: 42.
     """
+    # null_mode overrides null_type when provided (alias for API consistency)
+    if null_mode is not None:
+        null_type = null_mode
     # Get PCA loadings
     if pca_loadings_key is None:
         pca_loadings_key = "PCs"
@@ -359,29 +383,79 @@ def flow_gene_alignment(
         result["per_cell_gene_indices"] = top_feat_idx
 
     if n_permutations > 0:
-        rng = np.random.default_rng(random_state)
-        null_scores = np.zeros((n_permutations, len(alignment_scores)))
-        for i in range(n_permutations):
-            perm_loadings = loadings_trimmed[rng.permutation(len(loadings_trimmed))]
-            if normalize:
-                perm_norms = np.linalg.norm(perm_loadings, axis=1, keepdims=True)
-                perm_loadings_norm = perm_loadings / np.maximum(perm_norms, 1e-10)
-                null_scores[i] = perm_loadings_norm @ vel_norm_agg
-            else:
-                null_scores[i] = perm_loadings @ mean_velocity
-
-        pvalues = np.array([
-            (np.sum(np.abs(null_scores[:, g]) >= np.abs(alignment_scores[g])) + 1)
-            / (n_permutations + 1)
-            for g in range(len(alignment_scores))
-        ])
         from statsmodels.stats.multitest import multipletests
-        _, pvalues_fdr, _, _ = multipletests(pvalues, method="fdr_bh")
+        rng = np.random.default_rng(random_state)
+        n_pcs_perm = loadings_trimmed.shape[1]
+        n_genes = len(alignment_scores)
 
-        result["alignment_pvalues"] = pvalues
-        result["alignment_pvalues_fdr"] = pvalues_fdr
-        result["null_mean"] = null_scores.mean(axis=0)
-        result["null_std"] = null_scores.std(axis=0)
+        run_rotation = null_type in ("rotation", "both")
+        run_shuffle = null_type in ("shuffle", "both")
+
+        # --- Rotation null: loadings @ Q (random orthogonal) ---
+        # Tests: is the loading manifold's orientation relative to velocity special?
+        # Omnibus test — preserves gene-gene correlation, randomizes coordinate frame.
+        if run_rotation:
+            rot_null_scores = np.zeros((n_permutations, n_genes))
+            for i in range(n_permutations):
+                Z = rng.standard_normal((n_pcs_perm, n_pcs_perm))
+                Q, _ = np.linalg.qr(Z)
+                rotated = loadings_trimmed @ Q
+                if normalize:
+                    rot_norms = np.linalg.norm(rotated, axis=1, keepdims=True)
+                    rot_null_scores[i] = (rotated / np.maximum(rot_norms, 1e-10)) @ vel_norm_agg
+                else:
+                    rot_null_scores[i] = rotated @ mean_velocity
+
+            # Omnibus p-value: is the max observed |alignment| greater than max
+            # |alignment| under rotation null?
+            obs_max = np.max(np.abs(alignment_scores))
+            null_maxes = np.max(np.abs(rot_null_scores), axis=1)
+            omnibus_p = (np.sum(null_maxes >= obs_max) + 1) / (n_permutations + 1)
+
+            result["rotation_omnibus_pvalue"] = omnibus_p
+            result["rotation_null_mean"] = rot_null_scores.mean(axis=0)
+            result["rotation_null_std"] = rot_null_scores.std(axis=0)
+
+        # --- Shuffle null: permute gene-to-loading assignments ---
+        # Tests: is THIS gene specifically aligned, vs a random gene in its place?
+        # Per-gene test — breaks gene-gene correlation but tests gene identity.
+        if run_shuffle:
+            shuf_null_scores = np.zeros((n_permutations, n_genes))
+            for i in range(n_permutations):
+                perm_loadings = loadings_trimmed[rng.permutation(n_genes)]
+                if normalize:
+                    perm_norms = np.linalg.norm(perm_loadings, axis=1, keepdims=True)
+                    shuf_null_scores[i] = (perm_loadings / np.maximum(perm_norms, 1e-10)) @ vel_norm_agg
+                else:
+                    shuf_null_scores[i] = perm_loadings @ mean_velocity
+
+            shuf_pvalues = np.array([
+                (np.sum(np.abs(shuf_null_scores[:, g]) >= np.abs(alignment_scores[g])) + 1)
+                / (n_permutations + 1)
+                for g in range(n_genes)
+            ])
+
+            # Pre-filter FDR: only correct within top genes by |alignment score|.
+            # Testing all genes inflates the BH family to ~20K where most are null,
+            # crushing per-gene significance. Instead, pre-select the top 5% by
+            # absolute score, then apply BH over that smaller focused family.
+            abs_scores = np.abs(alignment_scores)
+            top_k = min(n_genes, max(50, int(n_genes * 0.05)))  # at least 50, or 5%, capped at n_genes
+            top_mask = abs_scores >= np.sort(abs_scores)[-top_k]
+            shuf_pvalues_fdr = np.ones(n_genes)
+            if top_mask.sum() > 0:
+                _, fdr_top, _, _ = multipletests(
+                    shuf_pvalues[top_mask], method="fdr_bh"
+                )
+                shuf_pvalues_fdr[top_mask] = fdr_top
+
+            result["alignment_pvalues"] = shuf_pvalues
+            result["alignment_pvalues_fdr"] = shuf_pvalues_fdr
+            result["alignment_fdr_n_tested"] = int(top_mask.sum())
+            result["null_mean"] = shuf_null_scores.mean(axis=0)
+            result["null_std"] = shuf_null_scores.std(axis=0)
+
+        result["null_type"] = null_type
 
     return result
 
@@ -398,6 +472,8 @@ def flow_jacobian(
     per_cell_features: bool = True,
     n_top_features: int = 2500,
     n_permutations: int = 0,
+    null_type: str = "both",
+    null_mode: str | None = None,
     permutation_seed: int = 42,
 ) -> dict:
     """Compute Jacobian of the flow velocity field.
@@ -431,13 +507,32 @@ def flow_jacobian(
         Genes are selected by absolute aggregated feature expansion. Default: 2500.
     n_permutations : int
         Number of permutations for expansion significance testing. When > 0,
-        shuffles gene-to-PCA-loading assignments and recomputes the quadratic
-        form L^T J L to build a null distribution. The Jacobian J is fixed;
-        only loading vectors change, making permutations cheap. Results stored
-        as ``expansion_pvalues`` and ``expansion_pvalues_fdr``. Default: 0.
+        recomputes the quadratic form L^T J L under a null model to build a
+        null distribution. The Jacobian J is fixed; only loading vectors change,
+        making permutations cheap. Results stored as ``expansion_pvalues`` and
+        ``expansion_pvalues_fdr``. Default: 0.
+    null_type : str
+        Which null model(s) to run when ``n_permutations > 0``. One of
+        ``"rotation"`` (random orthogonal rotation of normalised loading rows),
+        ``"shuffle"`` (row-wise shuffle of gene-to-loading assignments), or
+        ``"both"`` (run both). Default: ``"both"``.
+
+        - **Rotation null** tests: is the expansion/contraction structure
+          globally present given the loading covariance? Produces an omnibus
+          p-value (``expansion_rotation_omnibus_pvalue``).
+        - **Shuffle null** tests: is THIS gene's loading specifically expanded
+          by the Jacobian? Produces per-gene p-values (``expansion_pvalues``,
+          ``expansion_pvalues_fdr``).
+    null_mode : str or None
+        Alias for ``null_type``. When provided, overrides ``null_type``.
+        Accepts the same values: ``"rotation"``, ``"shuffle"``, ``"both"``.
+        Default: ``None`` (fall back to ``null_type``).
     permutation_seed : int
         Random seed for permutation shuffling. Default: 42.
     """
+    # null_mode overrides null_type when provided (alias for API consistency)
+    if null_mode is not None:
+        null_type = null_mode
     if evaluation_points is None:
         evaluation_points = adata.obsm[flow_result["pca_key"]][flow_result["source_mask"]]
 
@@ -505,37 +600,68 @@ def flow_jacobian(
         result["per_cell_expansion_gene_names"] = top_feat_names
         result["per_cell_expansion_gene_indices"] = top_feat_idx
 
-    # Permutation test for feature expansion significance
+    # Permutation tests for feature expansion significance
     if n_permutations > 0 and pca_loadings_key in adata.varm and len(feature_expansion) > 0:
         from peach._core.utils.permutation import fdr_correct, permutation_pvalue
 
         n_genes = loadings_normalized.shape[0]
+        n_pcs_jac = loadings_normalized.shape[1]
         rng = np.random.default_rng(permutation_seed)
-        null_expansion = np.empty((n_permutations, n_genes))
 
-        for p in range(n_permutations):
-            # Shuffle gene-to-loading assignments (permute rows of loading matrix)
-            perm_idx = rng.permutation(n_genes)
-            shuffled_loadings = loadings_normalized[perm_idx]
-            # Recompute L^T J L for each gene with shuffled loadings
-            null_expansion[p] = np.einsum(
-                'gi,ij,gj->g', shuffled_loadings, mean_jac, shuffled_loadings
+        run_rotation = null_type in ("rotation", "both")
+        run_shuffle = null_type in ("shuffle", "both")
+
+        # --- Rotation null: L @ Q (random orthogonal) ---
+        # Omnibus test: is expansion/contraction structure globally present?
+        if run_rotation:
+            rot_null = np.empty((n_permutations, n_genes))
+            for p in range(n_permutations):
+                Z = rng.standard_normal((n_pcs_jac, n_pcs_jac))
+                Q, _ = np.linalg.qr(Z)
+                rotated = loadings_normalized @ Q
+                rot_null[p] = np.einsum('gi,ij,gj->g', rotated, mean_jac, rotated)
+
+            obs_max_exp = np.max(np.abs(feature_expansion))
+            null_maxes_exp = np.max(np.abs(rot_null), axis=1)
+            omnibus_p_exp = (np.sum(null_maxes_exp >= obs_max_exp) + 1) / (n_permutations + 1)
+            result["expansion_rotation_omnibus_pvalue"] = omnibus_p_exp
+
+        # --- Shuffle null: permute gene-to-loading rows ---
+        # Per-gene test: is THIS gene's expansion specifically significant?
+        if run_shuffle:
+            shuf_null = np.empty((n_permutations, n_genes))
+            for p in range(n_permutations):
+                perm_idx = rng.permutation(n_genes)
+                shuffled = loadings_normalized[perm_idx]
+                shuf_null[p] = np.einsum('gi,ij,gj->g', shuffled, mean_jac, shuffled)
+
+            perm_pvals = permutation_pvalue(
+                feature_expansion, shuf_null, alternative="two-sided"
             )
 
-        perm_pvals = permutation_pvalue(
-            feature_expansion, null_expansion, alternative="two-sided"
-        )
-        _, perm_fdr = fdr_correct(perm_pvals)
+            # Pre-filter FDR: correct within top genes by |expansion| only.
+            # Same rationale as gene alignment: full-gene BH crushes everything.
+            abs_exp = np.abs(feature_expansion)
+            top_k_exp = min(n_genes, max(50, int(n_genes * 0.05)))  # at least 50, or 5%, capped at n_genes
+            top_exp_mask = abs_exp >= np.sort(abs_exp)[-top_k_exp]
+            perm_fdr = np.ones(n_genes)
+            if top_exp_mask.sum() > 0:
+                _, fdr_top_exp = fdr_correct(perm_pvals[top_exp_mask])
+                perm_fdr[top_exp_mask] = fdr_top_exp
 
-        result["expansion_pvalues"] = perm_pvals
-        result["expansion_pvalues_raw"] = perm_pvals
-        result["expansion_pvalues_fdr"] = perm_fdr
-        n_raw_sig = int((perm_pvals < 0.01).sum())
-        result["expansion_n_raw_significant"] = n_raw_sig
+            result["expansion_pvalues"] = perm_pvals
+            result["expansion_pvalues_raw"] = perm_pvals
+            result["expansion_pvalues_fdr"] = perm_fdr
+            n_raw_sig = int((perm_pvals < 0.01).sum())
+            result["expansion_n_raw_significant"] = n_raw_sig
+
         result["n_permutations"] = n_permutations
+        result["expansion_null_type"] = null_type
         logger.info(
-            f"Jacobian permutation: {n_raw_sig}/{n_genes} genes at raw p<0.01, "
-            f"{(perm_fdr < 0.05).sum()}/{n_genes} at FDR q<0.05 ({n_permutations} permutations)"
+            f"Jacobian permutation ({null_type}): "
+            f"{result.get('expansion_n_raw_significant', '?')}/{n_genes} genes at raw p<0.01, "
+            f"{(result.get('expansion_pvalues_fdr', np.ones(1)) < 0.05).sum()}/{n_genes} "
+            f"at FDR q<0.05 ({n_permutations} permutations)"
         )
 
     return result

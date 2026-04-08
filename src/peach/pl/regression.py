@@ -43,6 +43,7 @@ def coefficient_heatmap(
     *,
     top_n: int = 50,
     fdr_threshold: float = 0.05,
+    group_by_archetype: bool = False,
     save_path: str | None = None,
     show: bool = True,
 ) -> go.Figure:
@@ -58,6 +59,11 @@ def coefficient_heatmap(
         FDR significance threshold. Only features with FDR q < threshold
         are shown (ranked by R-squared). Falls back to all features ranked
         by R-squared if none are significant.
+    group_by_archetype : bool, default: False
+        If True, rearrange rows so features are grouped by the archetype
+        where their coefficient is highest (|beta| argmax). Features within
+        each archetype group are ordered by descending R-squared. When False,
+        rows are ordered strictly by descending R-squared.
     save_path : str or None
         If provided, save figure as HTML to this path.
     show : bool
@@ -82,9 +88,19 @@ def coefficient_heatmap(
         top_idx = np.argsort(r2)[-top_n:][::-1]  # fallback
     top_coefs = coefs[top_idx]
     top_names = [names[i] for i in top_idx]
+    top_r2 = r2[top_idx]
 
     K = coefs.shape[1]
     arch_names = [f"Archetype {k+1}" for k in range(K)]
+
+    # Optional: regroup rows so each archetype's strongest features cluster together
+    if group_by_archetype and len(top_idx) > 0:
+        argmax_arch = np.argmax(np.abs(top_coefs), axis=1)  # which archetype each feature belongs to
+        # Sort: primary key = argmax archetype, secondary key = descending R2
+        reorder = np.lexsort((-top_r2, argmax_arch))
+        top_coefs = top_coefs[reorder]
+        top_names = [top_names[i] for i in reorder]
+        top_r2 = top_r2[reorder]
 
     fig = go.Figure(data=go.Heatmap(
         z=top_coefs,
@@ -95,7 +111,8 @@ def coefficient_heatmap(
         colorbar=dict(title="beta", thickness=12, len=0.6),
     ))
     n_shown = min(top_n, len(top_names))
-    apply_style(fig, title=f"Vertex coefficients -- top {n_shown} by R-squared",
+    group_tag = " (grouped by archetype)" if group_by_archetype else ""
+    apply_style(fig, title=f"Vertex coefficients -- top {n_shown} by R-squared{group_tag}",
                 height=max(400, n_shown * 18))
 
     return save_and_show(fig, save_path=save_path, show=show)
@@ -473,6 +490,8 @@ def archetype_regression_dotplot(
     *,
     top_n: int = 10,
     exclusive_only: bool = False,
+    exclusive_threshold: float = 2.0,
+    rank_by: str = "r2",
     degree: int = 1,
     feature_type: str = "genes",
     save_path: str | None = None,
@@ -480,7 +499,7 @@ def archetype_regression_dotplot(
 ) -> go.Figure:
     """Dotplot of top genes per archetype from regression coefficients.
 
-    Rows: top genes per archetype (by |beta|, union across archetypes).
+    Rows: top genes per archetype (union across archetypes).
     Columns: archetypes (and optionally interaction pairs for degree=2).
     Dot size: |beta coefficient|.
     Dot color: -log10(vertex p-value).
@@ -493,8 +512,11 @@ def archetype_regression_dotplot(
         Number of top features per archetype to include.
     exclusive_only : bool
         If True, only show features where the max coefficient is at least
-        2x the second-highest coefficient across archetypes. This filters
-        to archetype-exclusive features.
+        ``exclusive_threshold`` times the second-highest coefficient across
+        archetypes. This filters to archetype-exclusive features.
+    rank_by : str
+        How to rank features: ``"r2"`` (per-feature R², default) or
+        ``"beta"`` (absolute vertex coefficient).
     degree : int
         1 = show only degree-1 (vertex) coefficients.
         2 = also show interaction term coefficients from degree-2 regression
@@ -510,16 +532,29 @@ def archetype_regression_dotplot(
     coefs = np.asarray(reg["vertex_coefficients"])  # [n_features, K]
     names = list(reg["feature_names"])
     pvals = np.asarray(reg.get("vertex_pvalues", np.ones_like(coefs)))
+    r2 = np.asarray(reg.get("r_squared_degree1", np.zeros(coefs.shape[0])))
 
     K = coefs.shape[1]
 
-    # Collect union of top_n genes per archetype (by |beta|)
+    # Collect union of top_n genes per archetype
     selected = set()
-    for k in range(K):
-        top_idx = np.argsort(np.abs(coefs[:, k]))[-top_n:]
-        selected.update(top_idx)
-    # Group features by dominant archetype, then rank by |beta| within group
-    selected = sorted(selected, key=lambda i: (np.argmax(np.abs(coefs[i])), -np.max(np.abs(coefs[i]))))
+    if rank_by == "r2":
+        # For each archetype, take features with highest R² where that archetype
+        # has the dominant coefficient
+        for k in range(K):
+            dom_mask = np.argmax(np.abs(coefs), axis=1) == k
+            dom_indices = np.where(dom_mask)[0]
+            if len(dom_indices) > 0:
+                top_idx = dom_indices[np.argsort(r2[dom_indices])[-top_n:]]
+                selected.update(top_idx)
+        # Group by dominant archetype, rank by R² within group
+        selected = sorted(selected, key=lambda i: (np.argmax(np.abs(coefs[i])), -r2[i]))
+    else:
+        for k in range(K):
+            top_idx = np.argsort(np.abs(coefs[:, k]))[-top_n:]
+            selected.update(top_idx)
+        # Group by dominant archetype, rank by |beta| within group
+        selected = sorted(selected, key=lambda i: (np.argmax(np.abs(coefs[i])), -np.max(np.abs(coefs[i]))))
 
     # Filter to exclusive features if requested
     if exclusive_only:
@@ -527,7 +562,7 @@ def archetype_regression_dotplot(
         for i in selected:
             abs_betas = np.sort(np.abs(coefs[i]))[::-1]
             if len(abs_betas) >= 2 and abs_betas[1] > 0:
-                if abs_betas[0] / abs_betas[1] >= 2.0:
+                if abs_betas[0] / abs_betas[1] >= exclusive_threshold:
                     exclusive.append(i)
             elif len(abs_betas) >= 1 and abs_betas[0] > 0:
                 # Only one non-zero -- trivially exclusive
@@ -693,6 +728,8 @@ def archetype_radar(
     # 1b. Optionally reorder archetype spokes by similarity
     #     (Spearman correlation → Fiedler vector → 1D ordering)
     # ------------------------------------------------------------------
+    # Compute spoke angles: similarity-based or uniform
+    spoke_angles = None  # None = use categorical labels (uniform)
     if order_by_similarity and K > 2:
         from scipy.stats import spearmanr
         from scipy.sparse.csgraph import laplacian
@@ -702,16 +739,26 @@ def archetype_radar(
         for i in range(K):
             for j in range(K):
                 corr_matrix[i, j], _ = spearmanr(coefs[:, i], coefs[:, j])
-        # Similarity-based Laplacian → Fiedler vector for 1D embedding
-        sim_matrix = np.maximum(0, corr_matrix)  # clip negatives for Laplacian
+        # Similarity → Fiedler vector for 1D circular embedding
+        sim_matrix = np.maximum(0, corr_matrix)
         np.fill_diagonal(sim_matrix, 0)
         L = laplacian(sim_matrix, normed=True)
         _eigenvalues, eigenvectors = np.linalg.eigh(L)
         fiedler = eigenvectors[:, 1]  # second smallest eigenvalue
         order = np.argsort(fiedler)
-        # Reorder archetype columns and update labels
+        # Reorder archetype columns
         coefs = coefs[:, order]
         arch_labels_ordered = [f"A{order[k]+1}" for k in range(K)]
+        # Non-uniform angles: map Fiedler values to [0, 360) proportionally
+        # so similar archetypes (close in Fiedler space) are angularly close
+        fiedler_ordered = fiedler[order]
+        fiedler_norm = fiedler_ordered - fiedler_ordered.min()
+        fiedler_range = fiedler_norm.max()
+        if fiedler_range > 0:
+            # Map to [0, 360) with spacing proportional to Fiedler gaps
+            spoke_angles = (fiedler_norm / fiedler_range) * 330  # leave 30° gap to avoid overlap
+        else:
+            spoke_angles = np.linspace(0, 360, K, endpoint=False)
     else:
         arch_labels_ordered = [f"A{k+1}" for k in range(K)]
 
@@ -768,38 +815,48 @@ def archetype_radar(
     # 3. Build radar plot
     # ------------------------------------------------------------------
     abs_coefs = np.abs(coefs[selected_idx])  # [n_sel, K]
-    theta_labels = arch_labels + [arch_labels[0]]  # close polygon
 
     fig = go.Figure()
-    for fi, feat_label in enumerate(sel_names):
-        r_vals = abs_coefs[fi].tolist()
-        r_vals_closed = r_vals + [r_vals[0]]
-        color = CATEGORICAL_PALETTE[fi % len(CATEGORICAL_PALETTE)]
-
-        fig.add_trace(
-            go.Scatterpolar(
-                r=r_vals_closed,
-                theta=theta_labels,
-                fill="toself",
-                fillcolor=_hex_to_rgba(color, 0.08),
+    if spoke_angles is not None:
+        # Non-uniform angles: use numeric theta with custom tick labels
+        theta_vals = list(spoke_angles) + [spoke_angles[0]]
+        for fi, feat_label in enumerate(sel_names):
+            r_vals = abs_coefs[fi].tolist() + [abs_coefs[fi, 0]]
+            color = CATEGORICAL_PALETTE[fi % len(CATEGORICAL_PALETTE)]
+            fig.add_trace(go.Scatterpolar(
+                r=r_vals, theta=theta_vals,
+                fill="toself", fillcolor=_hex_to_rgba(color, 0.08),
                 line=dict(color=color, width=1.5),
-                name=feat_label,
-                legendgroup=feat_label,
-                showlegend=True,
-                hovertemplate=(
-                    feat_label + "<br>%{theta}: %{r:.3f}<extra></extra>"
-                ),
-            ),
-        )
+                name=feat_label, legendgroup=feat_label, showlegend=True,
+                hovertemplate=feat_label + "<br>%{r:.3f}<extra></extra>",
+            ))
+    else:
+        # Uniform angles: categorical theta
+        theta_labels = arch_labels + [arch_labels[0]]
+        for fi, feat_label in enumerate(sel_names):
+            r_vals = abs_coefs[fi].tolist() + [abs_coefs[fi, 0]]
+            color = CATEGORICAL_PALETTE[fi % len(CATEGORICAL_PALETTE)]
+            fig.add_trace(go.Scatterpolar(
+                r=r_vals, theta=theta_labels,
+                fill="toself", fillcolor=_hex_to_rgba(color, 0.08),
+                line=dict(color=color, width=1.5),
+                name=feat_label, legendgroup=feat_label, showlegend=True,
+                hovertemplate=feat_label + "<br>%{theta}: %{r:.3f}<extra></extra>",
+            ))
 
     radar_size = max(450, 350 + n_features * 10)
     apply_style(fig, title="Archetype phenotype radar",
                 height=radar_size, width=radar_size)
     # Re-apply polar styling (apply_style resets to cartesian defaults)
+    angular_axis = dict(linewidth=0, gridcolor="#eee")
+    if spoke_angles is not None:
+        # Custom tick positions for non-uniform angles
+        angular_axis["tickvals"] = list(spoke_angles)
+        angular_axis["ticktext"] = arch_labels
     fig.update_layout(
         polar=dict(
             radialaxis=dict(visible=True, gridcolor="#eee", linewidth=0),
-            angularaxis=dict(linewidth=0, gridcolor="#eee"),
+            angularaxis=angular_axis,
             bgcolor="white",
         ),
         legend=dict(

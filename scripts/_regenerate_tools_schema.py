@@ -270,6 +270,15 @@ class ToolSchema:
             except Exception as e:
                 print(f'    # ERROR generating schema for {mod_name}.{name}: {e}')
 
+    # Manually-registered _core.utils functions (not under pp/tl/pl)
+    print("\n    # --- _core.utils module (manually registered, not auto-generated) ---")
+    try:
+        from peach._core.utils.archetype_comparison import compute_archetype_correspondence
+        entry = generate_schema_entry("_core.utils", "compute_archetype_correspondence", compute_archetype_correspondence)
+        print(entry)
+    except Exception as e:
+        print(f'    # ERROR generating schema for _core.utils.compute_archetype_correspondence: {e}')
+
     print("}")
     print()
 

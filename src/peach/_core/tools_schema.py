@@ -184,7 +184,9 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         parameters=[
         Parameter("adata", ParamType.ADATA_REF, "AnnData Must have regression results in ``uns['peach_simplex_regression']``.", required=True, default=None),
         Parameter("top_n", ParamType.INTEGER, "int Number of top features per archetype to include.", required=False, default=10),
-        Parameter("exclusive_only", ParamType.BOOLEAN, "bool If True, only show features where the max coefficient is at least 2x the...", required=False, default=False),
+        Parameter("exclusive_only", ParamType.BOOLEAN, "bool If True, only show features where the max coefficient is at least ``excl...", required=False, default=False),
+        Parameter("exclusive_threshold", ParamType.FLOAT, "", required=False, default=2.0),
+        Parameter("rank_by", ParamType.STRING, "str How to rank features: ``\"r2\"`` (per-feature R², default) or ``\"beta\"`` (a...", required=False, default='r2'),
         Parameter("degree", ParamType.INTEGER, "int 1 = show only degree-1 (vertex) coefficients. 2 = also show interaction t...", required=False, default=1),
         Parameter("feature_type", ParamType.STRING, "", required=False, default='genes'),
         Parameter("save_path", ParamType.STRING, "str or None", required=False, default=None),
@@ -222,6 +224,7 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         Parameter("adata", ParamType.ADATA_REF, "AnnData Must have regression results in ``uns['peach_simplex_regression']``.", required=True, default=None),
         Parameter("top_n", ParamType.INTEGER, "int Number of top features to display, ranked by R-squared.", required=False, default=50),
         Parameter("fdr_threshold", ParamType.FLOAT, "float FDR significance threshold. Only features with FDR q < threshold are sh...", required=False, default=0.05),
+        Parameter("group_by_archetype", ParamType.BOOLEAN, "bool, default: False If True, rearrange rows so features are grouped by the a...", required=False, default=False),
         Parameter("save_path", ParamType.STRING, "str or None If provided, save figure as HTML to this path.", required=False, default=None),
         Parameter("show", ParamType.BOOLEAN, "bool Whether to call ``fig.show()``.", required=False, default=True),
         ],
@@ -1167,6 +1170,8 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         Parameter("n_top", ParamType.INTEGER, "int Top aligned/opposed genes to report.", required=False, default=50),
         Parameter("pca_loadings_key", ParamType.STRING, "str or None Key in adata.varm for PCA loadings. Default: 'PCs'.", required=False, default=None),
         Parameter("n_permutations", ParamType.INTEGER, "int Number of permutations for null distribution. Default: 0 (disabled).", required=False, default=0),
+        Parameter("null_type", ParamType.STRING, "str Which null model(s) to run: 'rotation' (omnibus, preserves correlation structure), 'shuffle' (per-gene, breaks correlation), or 'both'.", required=False, default='both'),
+        Parameter("null_mode", ParamType.STRING, "str or None Alias for null_type. When provided, overrides null_type. Accepts 'rotation', 'shuffle', 'both'.", required=False, default=None),
         Parameter("per_cell", ParamType.BOOLEAN, "bool If True, also compute per-cell per-gene alignment scores for the top ``n...", required=False, default=True),
         Parameter("n_top_features", ParamType.INTEGER, "int Maximum number of genes to include in the per-cell alignment matrix. Gene...", required=False, default=2500),
         Parameter("normalize", ParamType.BOOLEAN, "bool If True, use cosine similarity (normalize both loadings and velocity to ...", required=False, default=True),
@@ -1187,7 +1192,9 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         Parameter("aggregate", ParamType.STRING, "str Aggregation method for mean Jacobian: 'mean', 'median', or None (per-cell).", required=False, default='mean'),
         Parameter("per_cell_features", ParamType.BOOLEAN, "bool If True and PCA loadings are available, compute per-cell per-gene expans...", required=False, default=True),
         Parameter("n_top_features", ParamType.INTEGER, "int Maximum number of genes to include in the per-cell expansion matrix. Gene...", required=False, default=2500),
-        Parameter("n_permutations", ParamType.INTEGER, "int Number of permutations for expansion significance testing. When > 0, shuf...", required=False, default=0),
+        Parameter("n_permutations", ParamType.INTEGER, "int Number of permutations for expansion significance testing. When > 0, recomputes quadratic form L^T J L under a null model.", required=False, default=0),
+        Parameter("null_type", ParamType.STRING, "str Which null model(s) to run: 'rotation' (omnibus, preserves correlation structure), 'shuffle' (per-gene, breaks correlation), or 'both'.", required=False, default='both'),
+        Parameter("null_mode", ParamType.STRING, "str or None Alias for null_type. When provided, overrides null_type. Accepts 'rotation', 'shuffle', 'both'.", required=False, default=None),
         Parameter("permutation_seed", ParamType.INTEGER, "int Random seed for permutation shuffling. Default: 42.", required=False, default=42),
         ],
         returns="dict",
@@ -1443,6 +1450,22 @@ TOOL_SCHEMAS: dict[str, ToolSchema] = {
         Parameter("validation_data_loader", ParamType.STRING, "DataLoader | None, default: None Validation data loader for early stopping. U...", required=False, default=None),
         ],
         returns="dict",
+    ),
+
+    # --- _core.utils module (manually registered, not auto-generated) ---
+    "_core.utils.compute_archetype_correspondence": ToolSchema(
+        name="_core.utils.compute_archetype_correspondence",
+        description="Compute archetype correspondence (mass + Markov) between two Deep_AA fits via k-NN aggregation.",
+        parameters=[
+        Parameter("source_weights", ParamType.ARRAY, "ndarray [n_src, K_src] Row-stochastic source-model archetype weights.", required=True, default=None),
+        Parameter("source_coords", ParamType.ARRAY, "ndarray [n_src, d] Source cell coordinates in the common (target) coordinate space.", required=True, default=None),
+        Parameter("target_weights", ParamType.ARRAY, "ndarray [n_tgt, K_tgt] Row-stochastic target-model archetype weights.", required=True, default=None),
+        Parameter("target_coords", ParamType.ARRAY, "ndarray [n_tgt, d] Target cell coordinates in the same space as source_coords.", required=True, default=None),
+        Parameter("k", ParamType.INTEGER, "int, default: 10 Number of nearest target neighbors per source cell. Clipped to n_tgt if larger.", required=False, default=10),
+        Parameter("method", ParamType.STRING, "{'hard', 'soft', 'sharp'}, default: 'hard' Aggregation method. 'hard' uses argmax source labels (recommended for real data); 'soft' is the rank-1-prone outer-product fallback; 'sharp' squares+renormalizes source weights before the soft outer product.", required=False, default='hard', enum=['hard', 'soft', 'sharp']),
+        ],
+        returns="dict",
+        returns_description="dict with keys: mass [K_src,K_tgt], markov [K_src,K_tgt], source_mass_per_archetype [K_src], method, source_weight_concentration, target_weight_concentration, source_archetype_occupancy_hard [K_src], sparse_archetypes (list[int]).",
     ),
 }
 
