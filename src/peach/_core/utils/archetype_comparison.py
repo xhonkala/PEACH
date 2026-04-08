@@ -1,5 +1,6 @@
 """Core compute functions for archetype comparison: MMD, feature similarity, Wald contrasts."""
 
+import logging
 import numpy as np
 from itertools import combinations
 from scipy import stats
@@ -386,17 +387,15 @@ def compute_wald_contrasts(
         pair_slices[(j, k)] = slice(offset, offset + n_features)
         offset += n_features
 
-    # Global FDR correction across ALL pairs (not per-pair)
-    # Clamp underflowed zeros, then filter trivial tests (SE=0 → p=1) to avoid diluting FDR
-    all_pvals_flat = np.clip(np.concatenate(all_pvals), np.finfo(float).tiny, 1.0)
-    testable = all_pvals_flat < 1.0
-    all_fdr = np.ones_like(all_pvals_flat)
-    if testable.any():
-        _, fdr_vals, _, _ = multipletests(all_pvals_flat[testable], method="fdr_bh")
-        all_fdr[testable] = fdr_vals
-
+    # Per-pair FDR correction (one family per archetype pair)
     for j, k in pairs:
-        pvalues_fdr[(j, k)] = all_fdr[pair_slices[(j, k)]]
+        pair_pvals = np.clip(pvalues[(j, k)], np.finfo(float).tiny, 1.0)
+        testable = pair_pvals < 1.0
+        pair_fdr = np.ones_like(pair_pvals)
+        if testable.any():
+            _, fdr_vals, _, _ = multipletests(pair_pvals[testable], method="fdr_bh")
+            pair_fdr[testable] = fdr_vals
+        pvalues_fdr[(j, k)] = pair_fdr
 
     return {
         "pairs": pairs,
@@ -408,4 +407,242 @@ def compute_wald_contrasts(
         "feature_names": feat_names,
         "n_features": n_features,
         "n_archetypes": K,
+    }
+
+
+def compute_archetype_correspondence(
+    source_weights: np.ndarray,
+    source_coords: np.ndarray,
+    target_weights: np.ndarray,
+    target_coords: np.ndarray,
+    *,
+    k: int = 10,
+    method: str = "hard",
+) -> dict:
+    """Compute archetype correspondence matrix between two Deep_AA fits.
+
+    Answers the question: "Given a source cell in source archetype i, what
+    fraction of its transported neighborhood mass lands in target archetype
+    j?" The result is a K_src × K_tgt matrix that bridges two fits and
+    supports cross-fit Sankey, per-pair flow_between, and Wald alignment.
+
+    For each source cell, the k nearest neighbors in target coordinate space
+    are found, their target-model archetype weights are averaged. How that
+    per-cell average is then aggregated into a per-source-archetype row
+    depends on `method`:
+
+    - ``"hard"`` (DEFAULT): Hard-assign each source cell to its argmax
+      source archetype, then sum the per-cell k-NN target weight averages
+      within each group. This is robust to diffuse source weights and is
+      the default for real data where mean per-cell max source weight is
+      typically below 0.5.
+    - ``"soft"``: Original soft-soft outer-product construction
+      ``mass[i] += source_w[i] ⊗ mean(target_w[nn[i]])``. **Prone to rank-1
+      collapse** when source weights are diffuse (mean per-cell max < ~0.5)
+      because every row of the mass matrix becomes a scaled copy of the
+      same target marginal vector. Kept as a fallback for synthetic /
+      well-peaked cases (e.g. unit tests with peak ≥ 0.9).
+    - ``"sharp"``: Square the source weights element-wise, renormalize each
+      row to the simplex, then run the soft outer-product construction.
+      Intermediate between ``soft`` and ``hard``: still smooth, but
+      effectively boosts the contribution of each cell's dominant
+      archetype, which mitigates (but does not eliminate) the rank-1
+      collapse.
+
+    Parameters
+    ----------
+    source_weights : ndarray, shape [n_src, K_src]
+        Row-stochastic archetype weights in the source model.
+    source_coords : ndarray, shape [n_src, d]
+        Source cell coordinates in the common (target) coordinate space.
+        For cross-fit use cases this is the post-transport (e.g.
+        flow_matching transported) source coordinates.
+    target_weights : ndarray, shape [n_tgt, K_tgt]
+        Row-stochastic archetype weights in the target model.
+    target_coords : ndarray, shape [n_tgt, d]
+        Target cell coordinates in the same coordinate space as
+        source_coords.
+    k : int, default 10
+        Number of nearest target neighbors to average per source cell.
+        Clipped to ``n_tgt`` if larger.
+    method : {"hard", "soft", "sharp"}, default "hard"
+        Aggregation method (see above). Hard is the recommended default
+        for real data; soft is kept for backward compatibility / synthetic
+        well-peaked cases.
+
+    Returns
+    -------
+    dict with keys:
+        "mass" : ndarray [K_src, K_tgt]
+            Raw correspondence mass. Non-negative, not normalized. Rows for
+            empty / sparse source archetypes are zero.
+        "markov" : ndarray [K_src, K_tgt]
+            Row-normalized ("Markov-like") transition matrix. Each row sums
+            to 1 (empty rows are set to zero, not NaN).
+        "source_mass_per_archetype" : ndarray [K_src]
+            Per-archetype marginal mass (row sums of the mass matrix).
+        "method" : str
+            Which method was used (echoes the input).
+        "source_weight_concentration" : float
+            ``source_weights.max(axis=1).mean()`` — average peakedness of
+            source weights. Values < 0.4 indicate diffuse weights where
+            ``method="soft"`` is unreliable.
+        "target_weight_concentration" : float
+            Same diagnostic for target weights.
+        "source_archetype_occupancy_hard" : ndarray [K_src]
+            Per-archetype cell count under hard argmax of source weights
+            (``np.bincount(src_labels, minlength=K_src)``). Always
+            populated regardless of method choice.
+        "sparse_archetypes" : list[int]
+            Indices of source archetypes whose hard-argmax occupancy is
+            below ``max(2, int(0.02 * n_src))``. In ``method="hard"``
+            their mass rows are zeroed.
+
+    Notes
+    -----
+    The default switched from ``"soft"`` to ``"hard"`` after empirical
+    investigation on real HSC/CMP data showed soft-soft column CV of
+    ~0.084 (rows visually identical) vs hard-argmax column CV of ~0.586
+    (~7× more signal). See tests/test_core/test_archetype_correspondence.py
+    for the synthetic reproduction and tests/test_core/
+    test_correspondence_real_data.py for the real-data integration check.
+    """
+    from scipy.spatial import cKDTree
+
+    if method not in ("hard", "soft", "sharp"):
+        raise ValueError(
+            f"method must be one of {{'hard', 'soft', 'sharp'}}, got {method!r}"
+        )
+
+    source_weights = np.asarray(source_weights, dtype=float)
+    source_coords = np.asarray(source_coords)
+    target_weights = np.asarray(target_weights, dtype=float)
+    target_coords = np.asarray(target_coords)
+
+    K_src = source_weights.shape[1]
+    K_tgt = target_weights.shape[1]
+    n_src = source_weights.shape[0]
+    n_tgt = target_weights.shape[0]
+
+    # Early return for empty inputs — avoid cKDTree on zero rows / IndexErrors
+    # downstream. All diagnostics return zero, sparse list = all archetypes.
+    if n_src == 0 or n_tgt == 0:
+        return {
+            "mass": np.zeros((K_src, K_tgt)),
+            "markov": np.zeros((K_src, K_tgt)),
+            "source_mass_per_archetype": np.zeros(K_src),
+            "method": method,
+            "source_weight_concentration": 0.0,
+            "target_weight_concentration": 0.0,
+            "source_archetype_occupancy_hard": np.zeros(K_src, dtype=int),
+            "sparse_archetypes": list(range(K_src)),
+        }
+
+    k_eff = max(1, min(k, n_tgt))
+    tree = cKDTree(target_coords)
+    _, nn_idx = tree.query(source_coords, k=k_eff)
+    # k=1 returns 1D index array; normalize to 2D
+    if k_eff == 1:
+        nn_idx = nn_idx.reshape(-1, 1)
+
+    # ------------------------------------------------------------------
+    # Diagnostics computed for ALL methods (independent of method choice)
+    # ------------------------------------------------------------------
+    src_concentration = float(source_weights.max(axis=1).mean())
+    tgt_concentration = float(target_weights.max(axis=1).mean())
+
+    src_labels = source_weights.argmax(axis=1)
+    occupancy_hard = np.bincount(src_labels, minlength=K_src)
+
+    sparse_threshold = max(2, int(0.02 * n_src))
+    sparse_archetypes = [
+        int(i) for i in range(K_src) if occupancy_hard[i] < sparse_threshold
+    ]
+
+    # ------------------------------------------------------------------
+    # Mass matrix construction (vectorized)
+    #
+    # Shared precomputation: per-source-cell mean of k-NN target weight
+    # vectors. Shape [n_src, K_tgt]. All three methods reduce this matrix
+    # into a [K_src, K_tgt] mass matrix; only the reduction differs.
+    # ------------------------------------------------------------------
+    nn_tw_mean = target_weights[nn_idx].mean(axis=1)  # [n_src, K_tgt]
+    mass = np.zeros((K_src, K_tgt))
+
+    if method == "hard":
+        # Hard-assign each source cell to its argmax archetype, then sum
+        # its k-NN target-weight average into the assigned row. Use
+        # np.add.at for unbuffered scatter-add since multiple cells share
+        # labels. Sparse archetypes are masked out so their rows stay 0.
+        if sparse_archetypes:
+            sparse_set = set(sparse_archetypes)
+            non_sparse_mask = np.array(
+                [lab not in sparse_set for lab in src_labels], dtype=bool
+            )
+        else:
+            non_sparse_mask = np.ones(n_src, dtype=bool)
+        np.add.at(
+            mass,
+            src_labels[non_sparse_mask],
+            nn_tw_mean[non_sparse_mask],
+        )
+
+    elif method == "soft":
+        # Original soft-soft outer-product construction (rank-1 prone).
+        # Vectorized as a matmul: sum_n source_w[n].T @ nn_tw_mean[n].
+        mass = source_weights.T @ nn_tw_mean
+
+    elif method == "sharp":
+        # Square then renormalize, then soft outer product (matmul).
+        sw_sharp = source_weights ** 2
+        row_norms = sw_sharp.sum(axis=1, keepdims=True)
+        row_norms_safe = np.where(row_norms < 1e-12, 1.0, row_norms)
+        sw_sharp = sw_sharp / row_norms_safe
+        mass = sw_sharp.T @ nn_tw_mean
+
+    # ------------------------------------------------------------------
+    # Row normalization → markov matrix
+    # ------------------------------------------------------------------
+    row_sums = mass.sum(axis=1, keepdims=True)
+    row_sums_safe = np.where(row_sums < 1e-10, 1.0, row_sums)
+    markov = mass / row_sums_safe
+    # Zero out rows that had no source mass (avoid spurious uniform fallback)
+    markov[row_sums.flatten() < 1e-10] = 0.0
+
+    # ------------------------------------------------------------------
+    # Diagnostic warnings (one per call, never raise)
+    # ------------------------------------------------------------------
+    if method == "hard" and sparse_archetypes:
+        sparse_info = ", ".join(
+            f"arch {i}: {int(occupancy_hard[i])} cells"
+            for i in sparse_archetypes
+        )
+        logging.warning(
+            "compute_archetype_correspondence(method='hard'): %d sparse "
+            "source archetype(s) have < %d cells under hard argmax and "
+            "their mass rows are zeroed (%s).",
+            len(sparse_archetypes),
+            sparse_threshold,
+            sparse_info,
+        )
+
+    if method == "soft" and n_src > 0 and src_concentration < 0.4:
+        logging.warning(
+            "compute_archetype_correspondence(method='soft'): source "
+            "weight concentration is %.3f (mean per-cell max < 0.4). "
+            "Soft-soft outer-product construction is prone to rank-1 "
+            "collapse with diffuse source weights — consider "
+            "method='hard'.",
+            src_concentration,
+        )
+
+    return {
+        "mass": mass,
+        "markov": markov,
+        "source_mass_per_archetype": row_sums.flatten(),
+        "method": method,
+        "source_weight_concentration": src_concentration,
+        "target_weight_concentration": tgt_concentration,
+        "source_archetype_occupancy_hard": occupancy_hard,
+        "sparse_archetypes": sparse_archetypes,
     }

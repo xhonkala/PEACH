@@ -88,10 +88,12 @@ def feature_simplex_regression(
     f_pvals_clamped = np.clip(result1["f_pvalues"], np.finfo(float).tiny, 1.0)
     _, f_pvalue_fdr, _, _ = multipletests(f_pvals_clamped, method="fdr_bh")
 
-    # FDR on vertex t-pvalues (across genes x archetypes)
-    flat_vertex_pvals = np.clip(result1["t_pvalues"].ravel(), np.finfo(float).tiny, 1.0)
-    _, flat_vertex_fdr, _, _ = multipletests(flat_vertex_pvals, method="fdr_bh")
-    vertex_pvalues_fdr = flat_vertex_fdr.reshape(result1["t_pvalues"].shape)
+    # FDR on vertex t-pvalues — per-archetype correction (one family per column)
+    vertex_pvalues_fdr = np.ones_like(result1["t_pvalues"])
+    for col in range(result1["t_pvalues"].shape[1]):
+        col_pvals = np.clip(result1["t_pvalues"][:, col], np.finfo(float).tiny, 1.0)
+        _, col_fdr, _, _ = multipletests(col_pvals, method="fdr_bh")
+        vertex_pvalues_fdr[:, col] = col_fdr
 
     # Degree 2 (if requested)
     interaction_coefficients = None
@@ -110,10 +112,12 @@ def feature_simplex_regression(
         interaction_se = result2["standard_errors"][:, K:]
         r_squared_degree2 = result2["r_squared"]
 
-        # FDR on interaction t-pvalues (clamp underflowed zeros)
-        flat_int_pvals = np.clip(result2["t_pvalues"][:, K:].ravel(), np.finfo(float).tiny, 1.0)
-        _, flat_int_fdr, _, _ = multipletests(flat_int_pvals, method="fdr_bh")
-        interaction_pvalues_fdr = flat_int_fdr.reshape(interaction_pvalues.shape)
+        # FDR on interaction t-pvalues — per-pair correction (one family per column)
+        interaction_pvalues_fdr = np.ones_like(interaction_pvalues)
+        for col in range(interaction_pvalues.shape[1]):
+            col_pvals = np.clip(interaction_pvalues[:, col], np.finfo(float).tiny, 1.0)
+            _, col_fdr, _, _ = multipletests(col_pvals, method="fdr_bh")
+            interaction_pvalues_fdr[:, col] = col_fdr
 
     # Permutation test for model significance
     permutation_pvalue = None
@@ -294,8 +298,9 @@ def _bootstrap_regression_cis(weights, Y, degree, n_bootstrap, K, ci_level=0.95,
     return ci_lower, ci_upper
 
 
-def _comprehensive_degree_comparison(weights, Y, K, *, robust_se, r_squared_degree1):
-    """Run degree d=2..K-1 fits with incremental F-tests.
+def _comprehensive_degree_comparison(weights, Y, K, *, robust_se, r_squared_degree1,
+                                      max_comparison_degree=3):
+    """Run degree d=2..min(K-1, max_comparison_degree) fits with incremental F-tests.
 
     For each degree d:
     1. Fit regression at degree d
@@ -304,6 +309,12 @@ def _comprehensive_degree_comparison(weights, Y, K, *, robust_se, r_squared_degr
     4. FDR correct the incremental p-values
 
     Returns dict mapping degree -> results dict.
+
+    The default cap at degree 3 prevents runaway cost for large K: degrees
+    4..K-1 rarely add interpretable signal beyond the cubic term, and at K=9
+    the unbounded version would fit 7 regressions with up to 511 parameters
+    each. Callers that explicitly want a full sweep can pass
+    max_comparison_degree=K-1.
     """
     from math import comb
     import scipy.sparse as sp
@@ -335,16 +346,19 @@ def _comprehensive_degree_comparison(weights, Y, K, *, robust_se, r_squared_degr
     prev_n_params = _n_params(K, 1)
     prev_ss_res = np.where(ss_tot > 0, (1 - prev_r2) * ss_tot, 0.0)
 
-    max_degree = K - 1  # max meaningful incremental degree
+    # Cap at min(K-1, max_comparison_degree) to prevent runaway cost for large K
+    max_degree = min(K - 1, max_comparison_degree)
     if max_degree < 2:
         return {}
 
-    if K > 6:
+    if max_degree > 5:
         import warnings
         from math import comb as _comb
         warnings.warn(
-            f"comprehensive_degree with K={K} will fit {K-2} regressions with up to "
-            f"{sum(_comb(K, d) for d in range(1, K))} parameters each. This may be slow.",
+            f"comprehensive_degree with K={K}, max_comparison_degree={max_degree} "
+            f"will fit {max_degree - 1} regressions with up to "
+            f"{sum(_comb(K, d) for d in range(1, max_degree + 1))} parameters each. "
+            f"This may be slow.",
             RuntimeWarning,
         )
 
@@ -514,13 +528,19 @@ def archetype_driver_regression(
     r_squared = np.zeros(K - 1)
     intercepts = np.zeros(K - 1)
 
+    # Check rank and regularize if near-singular (e.g., collinear pathway scores)
     DtD = design.T @ design
     try:
         DtD_inv = np.linalg.solve(DtD, np.eye(DtD.shape[0]))
     except np.linalg.LinAlgError:
-        raise ValueError(
-            "Feature design matrix is singular. This usually means features "
-            "are perfectly collinear or n_cells < n_parameters."
+        # Add tiny ridge penalty to handle perfect collinearity
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Design matrix near-singular (rank {np.linalg.matrix_rank(design)}/{design.shape[1]}). "
+            "Adding ridge regularization (λ=1e-8)."
+        )
+        DtD_inv = np.linalg.solve(
+            DtD + 1e-8 * np.eye(DtD.shape[0]), np.eye(DtD.shape[0])
         )
 
     for m in range(K - 1):
@@ -590,16 +610,20 @@ def archetype_driver_regression(
             max_degree=1,  # CIs on main effects only
         )
 
-    # Global FDR across all ILR components and features (clamp underflowed zeros)
-    all_main_pvals = np.clip(main_pvalues.ravel(), np.finfo(float).tiny, 1.0)
-    _, main_pvalues_fdr, _, _ = multipletests(all_main_pvals, method="fdr_bh")
-    main_pvalues_fdr = main_pvalues_fdr.reshape(main_pvalues.shape)
+    # Per-ILR-component FDR correction (one family per component column)
+    main_pvalues_fdr = np.ones_like(main_pvalues)
+    for col in range(main_pvalues.shape[0]):  # iterate ILR components
+        col_pvals = np.clip(main_pvalues[col, :], np.finfo(float).tiny, 1.0)
+        _, col_fdr, _, _ = multipletests(col_pvals, method="fdr_bh")
+        main_pvalues_fdr[col, :] = col_fdr
 
     interaction_pvalues_fdr = None
     if interaction_pvalues is not None:
-        all_int_pvals = np.clip(interaction_pvalues.ravel(), np.finfo(float).tiny, 1.0)
-        _, int_fdr, _, _ = multipletests(all_int_pvals, method="fdr_bh")
-        interaction_pvalues_fdr = int_fdr.reshape(interaction_pvalues.shape)
+        interaction_pvalues_fdr = np.ones_like(interaction_pvalues)
+        for col in range(interaction_pvalues.shape[0]):  # iterate ILR components
+            col_pvals = np.clip(interaction_pvalues[col, :], np.finfo(float).tiny, 1.0)
+            _, col_fdr, _, _ = multipletests(col_pvals, method="fdr_bh")
+            interaction_pvalues_fdr[col, :] = col_fdr
 
     result = DriverRegressionResult(
         feature_names=feat_names,

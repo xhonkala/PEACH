@@ -2166,13 +2166,31 @@ def test_archetype_pattern_associations(
         print(f"   Max pattern size: {max_pattern_size}")
 
     # Validate AnnData contains required data
+    if data_obsm_key is None:
+        raise ValueError(
+            "test_archetype_pattern_associations() requires pathway/feature scores in "
+            "adata.obsm and does not accept data_obsm_key=None. "
+            "For per-gene archetype associations, use peach.tl.gene_associations() instead, "
+            "which reads gene expression directly from adata.X / adata.layers."
+        )
     if data_obsm_key not in adata.obsm:
-        raise ValueError(f"Data not found in adata.obsm['{data_obsm_key}']")
+        raise ValueError(
+            f"Data not found in adata.obsm['{data_obsm_key}']. "
+            f"Available obsm keys: {list(adata.obsm.keys())}. "
+            "For per-gene archetype associations, use peach.tl.gene_associations() instead."
+        )
 
     if obs_key not in adata.obs.columns:
         raise ValueError(f"Archetype assignments not found in adata.obs['{obs_key}']")
 
     feature_scores = adata.obsm[data_obsm_key]
+    # Coerce to dense numpy array — adata.obsm entries can legally be pandas
+    # DataFrames or sparse matrices, neither of which support the fancy row
+    # indexing (feature_scores[high_indices, :]) used below.
+    if hasattr(feature_scores, "values"):  # pandas DataFrame
+        feature_scores = feature_scores.values
+    if hasattr(feature_scores, "toarray"):  # sparse matrix
+        feature_scores = feature_scores.toarray()
     archetype_assignments = adata.obs[obs_key]
     n_cells, n_features = feature_scores.shape
 
@@ -3195,7 +3213,7 @@ def identify_archetype_exclusive_patterns(
 
     Args:
         adata: AnnData object with archetype assignments
-        data_obsm_key: Key for data in adata.obsm ('pathway_scores' for pathways, use None for genes)
+        data_obsm_key: Key for data in adata.obsm (e.g., 'pathway_scores').
         obs_key: Key for archetype assignments in adata.obs
         test_method: Statistical test method ('mannwhitneyu')
         fdr_method: Multiple testing correction method
@@ -3348,7 +3366,7 @@ def identify_specialization_patterns(
     adata : AnnData
         AnnData object with archetype assignments.
     data_obsm_key : str, default: 'pathway_scores'
-        Key for data in adata.obsm. Use None for gene expression from adata.X.
+        Key for data in adata.obsm.
     obs_key : str, default: 'archetypes'
         Key for archetype assignments in adata.obs.
     test_method : str, default: 'mannwhitneyu'
@@ -3491,7 +3509,7 @@ def identify_tradeoff_patterns(
     adata : AnnData
         AnnData object with archetype assignments.
     data_obsm_key : str, default: 'pathway_scores'
-        Key for data in adata.obsm. Use None for gene expression.
+        Key for data in adata.obsm.
     obs_key : str, default: 'archetypes'
         Key for archetype assignments in adata.obs.
     tradeoffs : str, default: 'pairs'

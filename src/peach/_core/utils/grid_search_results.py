@@ -375,9 +375,26 @@ class CVSummary:
 
         return pd.DataFrame(rows)
 
+    _METRIC_ALIASES = {
+        "r2": "archetype_r2",
+        "mae": "val_mae",
+        "rmse": "val_rmse",
+    }
+
     @staticmethod
     def _rank_configurations(cv_results: list[CVResults], metric: str = "archetype_r2") -> list[dict]:
         """Rank configurations by specified metric."""
+        # Resolve aliases
+        metric = CVSummary._METRIC_ALIASES.get(metric, metric)
+
+        # Validate metric exists in at least one config
+        if cv_results and not any(metric in cv.mean_metrics for cv in cv_results):
+            available = sorted(set().union(*(cv.mean_metrics.keys() for cv in cv_results)))
+            raise ValueError(
+                f"Metric '{metric}' not found in CV results. "
+                f"Available metrics: {available}"
+            )
+
         rankings = []
 
         for cv_result in cv_results:
@@ -403,7 +420,7 @@ class CVSummary:
             )
 
         # Sort by metric value (descending for most metrics)
-        ascending = metric in ["rmse", "val_rmse", "train_archetypal_loss", "convergence_epoch"]
+        ascending = metric in ["val_rmse", "val_mae", "train_archetypal_loss", "convergence_epoch"]
         rankings.sort(key=lambda x: x["metric_value"], reverse=not ascending)
 
         return rankings
