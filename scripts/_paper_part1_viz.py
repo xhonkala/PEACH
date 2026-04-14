@@ -1686,3 +1686,59 @@ def build_segregation_ratio(obs, weights, response_col: str,
         "n_between_pairs": len(between_vals),
         "pair_distances": pair_dists,
     }
+
+
+def build_archetype_char_table(
+    obs,
+    archetypes_col: str,
+    covariate_cols: Sequence[str],
+    top_genes_by_archetype: dict | None = None,
+    top_k_cohorts: int = 3,
+) -> "pd.DataFrame":
+    """One-row-per-archetype quick-look characterization table.
+
+    Columns (fixed order):
+        archetype, n_cells, pct_cells,
+        dom_{covariate} for each covariate in ``covariate_cols``,
+        top_cohorts (if ``cohort`` or similar patient-like col is present),
+        top_genes (if ``top_genes_by_archetype`` provided).
+    """
+    import pandas as pd
+
+    # Filter rows with a non-NaN archetype assignment
+    obs = obs.loc[obs[archetypes_col].notna()].copy()
+    total_cells = len(obs)
+
+    rows = []
+    archetype_ids = sorted(obs[archetypes_col].unique())
+    cohort_col_candidate = next(
+        (c for c in ("cohort", "patient", "donor") if c in covariate_cols),
+        None,
+    )
+
+    for a in archetype_ids:
+        sub = obs.loc[obs[archetypes_col] == a]
+        n = len(sub)
+        row = {
+            "archetype": int(a),
+            "n_cells": n,
+            "pct_cells": 100.0 * n / total_cells if total_cells else 0.0,
+        }
+        for cov in covariate_cols:
+            if cov == cohort_col_candidate:
+                # emit as top-k string
+                vc = sub[cov].value_counts().head(top_k_cohorts)
+                row["top_cohorts"] = ", ".join(
+                    f"{k} ({v})" for k, v in vc.items()
+                )
+            else:
+                vc = sub[cov].value_counts()
+                dom = vc.index[0] if len(vc) else None
+                dom_frac = vc.iloc[0] / n if n and len(vc) else 0.0
+                row[f"dom_{cov}"] = f"{dom} ({100*dom_frac:.0f}%)" if dom is not None else ""
+        if top_genes_by_archetype is not None:
+            row["top_genes"] = ", ".join(top_genes_by_archetype.get(int(a), []))
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    return df

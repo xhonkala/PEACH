@@ -217,3 +217,55 @@ def test_segregation_ratio_strong_separation():
     out = build_segregation_ratio(obs, W, "response_group", "treatment")
     assert out["ratio"] >= 1.3
     assert out["within"] < out["between"]
+
+
+# ============================================================================
+# Task 5 — build_archetype_char_table
+# ============================================================================
+
+
+def test_archetype_char_table_schema():
+    from _paper_part1_viz import build_archetype_char_table
+    import pandas as pd
+    rng = np.random.default_rng(0)
+    n_cells, K = 300, 4
+    obs = pd.DataFrame({
+        "archetypes": rng.integers(0, K, n_cells),
+        "response_group": rng.choice(["NR", "R1", "R2"], n_cells),
+        "treatment": rng.choice(["Base", "PD1", "RTPD1"], n_cells),
+        "cohort": ["P" + str(i % 5) for i in range(n_cells)],
+        "majority_voting": rng.choice(["tumor", "luminal_2"], n_cells),
+    })
+    df = build_archetype_char_table(
+        obs,
+        archetypes_col="archetypes",
+        covariate_cols=["response_group", "treatment", "cohort", "majority_voting"],
+        top_genes_by_archetype=None,  # omit genes for this unit test
+    )
+    assert list(df.columns) >= [
+        "archetype", "n_cells", "pct_cells",
+        "dom_response_group", "dom_treatment", "dom_majority_voting",
+        "top_cohorts",
+    ]
+    assert len(df) == K
+    assert df["pct_cells"].sum() == pytest.approx(100.0, abs=0.01)
+
+
+def test_archetype_char_table_top_genes_populated():
+    from _paper_part1_viz import build_archetype_char_table
+    import pandas as pd
+    obs = pd.DataFrame({
+        "archetypes": [0, 0, 1, 1],
+        "response_group": ["NR", "NR", "R1", "R2"],
+        "treatment": ["Base", "PD1", "Base", "PD1"],
+        "cohort": ["P1", "P2", "P3", "P4"],
+        "majority_voting": ["tumor", "tumor", "tumor", "tumor"],
+    })
+    top_genes = {0: ["GeneA", "GeneB"], 1: ["GeneC"]}
+    df = build_archetype_char_table(
+        obs, "archetypes",
+        ["response_group", "treatment", "cohort", "majority_voting"],
+        top_genes_by_archetype=top_genes,
+    )
+    assert df.loc[df["archetype"] == 0, "top_genes"].iat[0] == "GeneA, GeneB"
+    assert df.loc[df["archetype"] == 1, "top_genes"].iat[0] == "GeneC"
