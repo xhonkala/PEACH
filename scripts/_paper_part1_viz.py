@@ -1979,3 +1979,156 @@ def build_distance_heatmaps(
         height=520, width=1200,
     )
     return fig, float(rho) if not np.isnan(rho) else rho
+
+
+def build_diversity_block(
+    obs,
+    weights,
+    pca,
+    group_col: str,
+    bootstrap_n: int = 200,
+    subsample: int = 500,
+    random_state: int = 42,
+):
+    """Fig 3C-ii — three-panel diversity block (spec §5.4.3).
+
+    Parameters
+    ----------
+    obs : pd.DataFrame
+        Per-cell metadata; must contain ``group_col``.
+    weights : np.ndarray, shape (n_cells, K)
+        Archetype weight vectors (rows sum to ≈1).
+    pca : np.ndarray, shape (n_cells, D)
+        PCA embedding (or any low-dim embedding) of cells.
+    group_col : str
+        Column in ``obs`` that defines groups (e.g. "response_group").
+    bootstrap_n : int
+        Number of bootstrap resamples used to compute 95 % CI for PCA
+        dispersion (panel 2).
+    subsample : int
+        Max cells to use when computing median pairwise distance inside each
+        bootstrap replicate; keeps runtime manageable for large groups.
+    random_state : int
+        Seed for the internal RNG.
+
+    Returns
+    -------
+    fig : plotly.graph_objects.Figure
+        Three-panel figure:
+          1. Violin — per-cell Shannon entropy of archetype weights.
+          2. Bar + CI — median pairwise Euclidean distance in PCA space per group.
+          3. Bar — Shannon entropy of the group-mean archetype profile.
+    summary : dict
+        Keys:
+          ``per_cell_shannon_kw_stat`` — Kruskal-Wallis H statistic.
+          ``per_cell_shannon_kw_p`` — corresponding p-value.
+          ``per_group_pca_dispersion`` — {group: float} point estimates.
+          ``per_group_pca_dispersion_ci`` — {group: (lo, hi)} bootstrap 95 % CI.
+          ``per_group_archetype_entropy`` — {group: float} entropy of mean weight.
+          ``dunn_posthoc`` — dict (from DataFrame) if scikit-posthocs installed,
+                             else None.
+    """
+    import numpy as np
+    import pandas as pd
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from scipy.stats import kruskal, entropy
+    try:
+        import scikit_posthocs as sp
+        have_dunn = True
+    except ImportError:
+        have_dunn = False
+
+    rng = np.random.default_rng(random_state)
+    obs = obs.reset_index(drop=True)
+    groups = sorted(obs[group_col].unique())
+
+    # Panel 1 — per-cell Shannon H of weights
+    per_cell_H = np.array([entropy(w + 1e-12) for w in weights])
+
+    # Panel 2 — per-group PCA median pairwise dispersion with bootstrap CI
+    def _median_pairwise_dist(X, max_cells):
+        if X.shape[0] > max_cells:
+            idx = rng.choice(X.shape[0], size=max_cells, replace=False)
+            X = X[idx]
+        from scipy.spatial.distance import pdist
+        dists = pdist(X, metric="euclidean")
+        return float(np.median(dists))
+
+    per_group_disp = {}
+    disp_ci = {}
+    for g in groups:
+        mask = obs[group_col].values == g
+        Xg = pca[mask]
+        est = _median_pairwise_dist(Xg, subsample)
+        boot = []
+        for _ in range(bootstrap_n):
+            if Xg.shape[0] < 2:
+                boot.append(float("nan"))
+                continue
+            sample_idx = rng.integers(0, Xg.shape[0], size=Xg.shape[0])
+            boot.append(_median_pairwise_dist(Xg[sample_idx], subsample))
+        boot_arr = np.asarray([b for b in boot if not np.isnan(b)])
+        ci_lo = float(np.percentile(boot_arr, 2.5)) if len(boot_arr) else float("nan")
+        ci_hi = float(np.percentile(boot_arr, 97.5)) if len(boot_arr) else float("nan")
+        per_group_disp[g] = est
+        disp_ci[g] = (ci_lo, ci_hi)
+
+    # Panel 3 — entropy of pooled mean weight vector
+    per_group_arch_H = {}
+    for g in groups:
+        mask = obs[group_col].values == g
+        mu = weights[mask].mean(axis=0)
+        per_group_arch_H[g] = float(entropy(mu + 1e-12))
+
+    # Stats — Kruskal-Wallis on per-cell Shannon
+    kw_stat, kw_p = kruskal(*[per_cell_H[obs[group_col].values == g] for g in groups])
+
+    # Dunn pairwise post-hoc (optional)
+    dunn_df = None
+    if have_dunn:
+        df_long = pd.DataFrame({"entropy": per_cell_H, "group": obs[group_col].values})
+        dunn_df = sp.posthoc_dunn(df_long, val_col="entropy", group_col="group",
+                                   p_adjust="fdr_bh")
+
+    # Build figure — 3 panels
+    fig = make_subplots(rows=1, cols=3, subplot_titles=(
+        "Per-cell Shannon H (weights)",
+        "Per-group PCA dispersion (bootstrap)",
+        "Per-group entropy of mean archetype profile",
+    ))
+    # Panel 1: violin
+    for g in groups:
+        mask = obs[group_col].values == g
+        fig.add_trace(go.Violin(
+            y=per_cell_H[mask], name=str(g), points="outliers",
+            box_visible=True, showlegend=False,
+        ), row=1, col=1)
+    # Panel 2: bar with CI
+    xs = list(groups)
+    ys = [per_group_disp[g] for g in xs]
+    err_lo = [per_group_disp[g] - disp_ci[g][0] for g in xs]
+    err_hi = [disp_ci[g][1] - per_group_disp[g] for g in xs]
+    fig.add_trace(go.Bar(
+        x=xs, y=ys,
+        error_y=dict(type="data", array=err_hi, arrayminus=err_lo, visible=True),
+        showlegend=False,
+    ), row=1, col=2)
+    # Panel 3: bar
+    fig.add_trace(go.Bar(
+        x=xs, y=[per_group_arch_H[g] for g in xs], showlegend=False,
+    ), row=1, col=3)
+    fig.update_layout(
+        title=f"Diversity block — KW H={kw_stat:.2f}, p={kw_p:.2e}",
+        height=480, width=1400,
+    )
+
+    summary = {
+        "per_cell_shannon_kw_stat": float(kw_stat),
+        "per_cell_shannon_kw_p": float(kw_p),
+        "per_group_pca_dispersion": per_group_disp,
+        "per_group_pca_dispersion_ci": disp_ci,
+        "per_group_archetype_entropy": per_group_arch_H,
+        "dunn_posthoc": dunn_df.to_dict() if dunn_df is not None else None,
+    }
+    return fig, summary

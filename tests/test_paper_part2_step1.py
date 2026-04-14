@@ -411,3 +411,39 @@ def test_distance_heatmaps_returns_figure_and_spearman():
     )
     assert fig is not None
     assert -1.0 <= spearman_rho <= 1.0
+
+
+# ============================================================================
+# Task 9 — build_diversity_block
+# ============================================================================
+
+
+def test_diversity_block_returns_figure_and_summary():
+    from _paper_part1_viz import build_diversity_block
+    import pandas as pd
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    n = 600
+    K = 4
+    obs = pd.DataFrame({"response_group": rng.choice(["NR", "R1", "R2"], n)})
+    # Uneven diversity: NR has high entropy Dirichlet, R2 has peaked
+    weights = np.vstack([
+        rng.dirichlet([1.0] * K) if r == "NR"
+        else rng.dirichlet([5.0, 1.0, 1.0, 1.0]) if r == "R1"
+        else rng.dirichlet([10.0, 1.0, 1.0, 1.0])
+        for r in obs["response_group"]
+    ])
+    pca = rng.normal(size=(n, 8))
+
+    fig, summary = build_diversity_block(
+        obs, weights, pca,
+        group_col="response_group",
+        bootstrap_n=50, subsample=100, random_state=0,
+    )
+    assert fig is not None
+    for key in ["per_cell_shannon_kw_stat", "per_cell_shannon_kw_p",
+                "per_group_pca_dispersion", "per_group_archetype_entropy"]:
+        assert key in summary
+    assert set(summary["per_group_pca_dispersion"].keys()) == {"NR", "R1", "R2"}
+    assert set(summary["per_group_archetype_entropy"].keys()) == {"NR", "R1", "R2"}
