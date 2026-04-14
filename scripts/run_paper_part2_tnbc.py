@@ -185,6 +185,103 @@ def _stratified_subsample(adata, frac: float, stratify_col: str, seed: int = 0):
     return adata[keep_idx].copy()
 
 
+def regression_to_long_df(reg_result, *, y_col="gene", exclusive_only=False,
+                            exclusive_threshold=2.5, top_n_per_archetype=10,
+                            fdr_threshold=0.05, degree=1):
+    """Convert simplex regression dict → long-format DataFrame for pc.pl.dotplot.
+
+    Copied verbatim from run_paper_part1_hsc.py to avoid importing that
+    active-iteration module. Keep in sync if the Part 1 helper changes —
+    or promote to _paper_part1_viz.py in a later iteration.
+    """
+    feat_names = list(reg_result.get("feature_names", []))
+    coefs = np.asarray(reg_result.get("vertex_coefficients", []))
+    pvals = np.asarray(reg_result.get("vertex_pvalues", []))
+    fdrs = np.asarray(reg_result.get("vertex_pvalues_fdr", []))
+
+    if degree == 1:
+        r2 = np.asarray(reg_result.get("r_squared_degree1", []))
+        per_arch_sig_fdr = fdrs
+        per_feat_sig_fdr = None
+    elif degree == 2:
+        dc = reg_result.get("degree_comparison", {}) or {}
+        d2 = dc.get("degree_2", {}) or {}
+        r2 = np.asarray(d2.get("delta_r2", []))
+        if r2.size == 0:
+            r2_total = np.asarray(reg_result.get("r_squared_degree2", []))
+            r2_d1 = np.asarray(reg_result.get("r_squared_degree1", []))
+            if r2_total.size > 0 and r2_d1.size > 0:
+                r2 = r2_total - r2_d1
+            else:
+                r2 = np.asarray(d2.get("r_squared", []))
+        per_feat_sig_fdr = np.asarray(d2.get("incremental_p_fdr", []))
+        per_arch_sig_fdr = None
+    else:
+        raise ValueError(f"degree must be 1 or 2 — got {degree}")
+
+    if coefs.size == 0 or len(feat_names) == 0 or r2.size == 0:
+        return pd.DataFrame()
+
+    n_feat, K = coefs.shape
+
+    if exclusive_only:
+        abs_coefs = np.abs(coefs)
+        sorted_abs = np.sort(abs_coefs, axis=1)[:, ::-1]
+        max_c = sorted_abs[:, 0]
+        second_c = sorted_abs[:, 1] if K > 1 else np.zeros(n_feat)
+        second_c_safe = np.where(second_c < 1e-10, 1e-10, second_c)
+        ratio = max_c / second_c_safe
+        keep_feat_mask = ratio >= exclusive_threshold
+    else:
+        keep_feat_mask = np.ones(n_feat, dtype=bool)
+
+    argmax_arch = np.argmax(np.abs(coefs), axis=1)
+
+    rows = []
+    for fi in range(n_feat):
+        if not keep_feat_mask[fi]:
+            continue
+        if per_feat_sig_fdr is not None:
+            if fi >= per_feat_sig_fdr.size:
+                continue
+            feat_fdr = float(per_feat_sig_fdr[fi])
+            if feat_fdr > fdr_threshold:
+                continue
+        for a in range(K):
+            if per_arch_sig_fdr is not None:
+                p = float(pvals[fi, a]) if pvals.size else 1.0
+                f = float(per_arch_sig_fdr[fi, a]) if per_arch_sig_fdr.size else 1.0
+                if f > fdr_threshold:
+                    continue
+            else:
+                f = float(per_feat_sig_fdr[fi])
+                p = f
+            rows.append({
+                y_col: feat_names[fi],
+                "archetype": f"archetype_{a}",
+                "mean_archetype": float(np.abs(coefs[fi, a])),
+                "signed_coef": float(coefs[fi, a]),
+                "pvalue": p,
+                "pvalue_fdr": f,
+                "r_squared": float(r2[fi]),
+                "argmax_archetype": int(argmax_arch[fi]),
+            })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    keep_mask = np.zeros(len(df), dtype=bool)
+    for a in range(K):
+        is_argmax = df["argmax_archetype"] == a
+        if not is_argmax.any():
+            continue
+        sub = df[is_argmax].drop_duplicates(subset=[y_col])
+        top_feats = sub.nlargest(top_n_per_archetype, "r_squared")[y_col].values
+        keep_mask |= df[y_col].isin(top_feats)
+    df = df[keep_mask].reset_index(drop=True)
+    return df
+
+
 def _pick_best_from_cv(cv_summary, r2_threshold: float = 0.9):
     """Return (best_entry, ranked_list) mirroring Part 1 convention.
 
@@ -304,9 +401,12 @@ def phase1_train_model(report: HTMLReport):
     html_parts.append(report.df_to_html(
         pd.DataFrame(cv_rows), "CV search (ranked by archetype_r2)", max_rows=50))
 
-    # Drift / stability
+    # Drift / stability — helper expects Sequence[Tuple[str, dict]]
     try:
-        drift_html = build_drift_qc_panel([res], drift_threshold=0.05, converged_window=10)
+        drift_html = build_drift_qc_panel(
+            [("Global TNBC fit", res)],
+            drift_threshold=0.05, converged_window=10,
+        )
         html_parts.append(drift_html)
     except Exception as e:
         html_parts.append(error_html(f"drift QC failed: {e}"))
@@ -482,29 +582,40 @@ def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
     except Exception as e:
         html_parts.append(error_html(f"Fig 3A holdout projection failed: {e}"))
 
-    # 2.5 — characterization table
+    # 2.5 — characterization table.
+    # Run simplex regression ONCE here; store into adata.uns so Phase 3 can reuse.
     try:
-        # Top genes per archetype: quick peek via simplex regression if available
-        top_genes_by_archetype = {}
-        try:
-            reg = pc.tl.feature_simplex_regression(adata_train, degrees=(1,))
-            # reg is a serialized dict; pull per-archetype top features
-            # The exact structure varies across v0.5.0 — be defensive.
-            top_df = (reg.get("degree_1") or {}).get("feature_results")
-            if top_df is not None:
-                tdf = pd.DataFrame(top_df)
-                for a in sorted(adata_train.obs["archetypes"].dropna().unique()):
-                    sub = tdf[tdf["archetype"] == a].sort_values(
-                        "coef", ascending=False
-                    ).head(5)
-                    top_genes_by_archetype[int(a)] = sub["feature"].tolist()
-        except Exception as e_inner:
-            html_parts.append(error_html(
-                f"simplex regression for top-genes unavailable: {e_inner}. "
-                "Characterization table will omit top_genes column."
-            ))
-            top_genes_by_archetype = None
+        pc.tl.feature_simplex_regression(adata_train, max_degree=1, robust_se=True)
+        reg_result = adata_train.uns.get("peach_simplex_regression_genes") or \
+                      adata_train.uns.get("peach_simplex_regression", {})
+    except Exception as e_reg:
+        html_parts.append(error_html(
+            f"simplex regression failed: {e_reg}. "
+            "Fig 3B dotplots and characterization top_genes will be empty."
+        ))
+        reg_result = {}
 
+    # Build top_genes_by_archetype from regression result
+    top_genes_by_archetype = None
+    try:
+        if reg_result:
+            # regression_to_long_df → pick top 5 per archetype by R² (no exclusive filter)
+            ldf = regression_to_long_df(
+                reg_result, y_col="gene", exclusive_only=False,
+                top_n_per_archetype=5, fdr_threshold=1.0, degree=1,
+            )
+            if len(ldf):
+                # Extract per-archetype top genes where that archetype is argmax
+                top_genes_by_archetype = {}
+                for a_idx in sorted(ldf["argmax_archetype"].unique()):
+                    sub = ldf[ldf["argmax_archetype"] == a_idx]
+                    sub = sub.drop_duplicates(subset=["gene"]).nlargest(5, "r_squared")
+                    top_genes_by_archetype[int(a_idx)] = sub["gene"].tolist()
+    except Exception as e_top:
+        html_parts.append(error_html(f"top_genes extraction failed: {e_top}"))
+        top_genes_by_archetype = None
+
+    try:
         char_df = build_archetype_char_table(
             adata_train.obs,
             archetypes_col="archetypes",
@@ -543,32 +654,35 @@ def phase3_figure3bc(adata_train, res, report: HTMLReport):
     # ------ Fig 3B ---------------------------------------------------------
     fig3b_parts: list = []
 
-    # 3B.1 — degree-1 gene simplex regression
+    # 3B.1 — gene dotplot from the regression result Phase 2 already stored.
     try:
-        reg_genes = pc.tl.feature_simplex_regression(
-            adata_train, degrees=(1,), fdr_threshold=FDR_THRESHOLD,
+        reg_result = adata_train.uns.get("peach_simplex_regression_genes") or \
+                      adata_train.uns.get("peach_simplex_regression", {})
+        if not reg_result:
+            raise ValueError("No simplex regression result in adata.uns — "
+                             "Phase 2 may have failed to run it.")
+        gene_long = regression_to_long_df(
+            reg_result, y_col="gene",
+            exclusive_only=True, exclusive_threshold=EXCLUSIVE_RATIO_THRESHOLD,
+            fdr_threshold=FDR_THRESHOLD, top_n_per_archetype=10, degree=1,
         )
-        # Convert to long dataframe for dotplot. Be defensive about schema.
-        gene_df = None
-        d1 = (reg_genes.get("degree_1") or {})
-        if "feature_results" in d1:
-            gene_df = pd.DataFrame(d1["feature_results"])
-        if gene_df is not None and len(gene_df):
-            # Filter for archetype-exclusive (ratio >= 2.5) and FDR <= 0.05
-            gene_df = gene_df[gene_df.get("q", gene_df.get("fdr", 1.0)) <= FDR_THRESHOLD]
-            if "exclusive_ratio" in gene_df.columns:
-                gene_df = gene_df[gene_df["exclusive_ratio"] >= EXCLUSIVE_RATIO_THRESHOLD]
-            figsize = dotplot_figsize(gene_df, y_col="feature")
+        if len(gene_long):
             fig_b1 = pc.pl.dotplot(
-                adata_train, gene_df, group_col="archetype", feature_col="feature",
-                size_col="coef", color_col="q", figsize=figsize,
+                gene_long, x_col="archetype", y_col="gene",
+                size_col="mean_archetype", color_col="pvalue",
+                top_n_per_group=10,
+                figsize=dotplot_figsize(gene_long, y_col="gene"),
+                title=f"Fig 3B-1 — archetype-exclusive genes (deg-1, excl ≥{EXCLUSIVE_RATIO_THRESHOLD}, FDR≤{FDR_THRESHOLD})",
             )
             fig3b_parts.append(report.fig_to_img(
-                fig_b1, "Fig 3B-1 — archetype-exclusive genes (deg-1 simplex regression)."
+                fig_b1,
+                f"Fig 3B-1 — archetype-exclusive genes. "
+                f"n_unique={gene_long['gene'].nunique()}, rows={len(gene_long)}."
             ))
         else:
             fig3b_parts.append(error_html(
-                "No archetype-exclusive genes survived filters (FDR ≤ 0.05, ratio ≥ 2.5)."
+                f"No archetype-exclusive genes survived filters "
+                f"(exclusive_ratio ≥ {EXCLUSIVE_RATIO_THRESHOLD}, FDR ≤ {FDR_THRESHOLD})."
             ))
     except Exception as e:
         fig3b_parts.append(error_html(f"Fig 3B gene dotplot failed: {e}"))
@@ -576,21 +690,30 @@ def phase3_figure3bc(adata_train, res, report: HTMLReport):
     # 3B.2 — pathway simplex regression (if pathway_scores present)
     if "pathway_scores" in adata_train.obsm:
         try:
-            reg_pw = pc.tl.feature_simplex_regression(
-                adata_train, degrees=(1,),
-                feature_matrix="pathway_scores",
-                fdr_threshold=FDR_THRESHOLD,
+            pc.tl.feature_simplex_regression(
+                adata_train, max_degree=1, feature_matrix="pathway_scores",
+                robust_se=True,
             )
-            pw_df = pd.DataFrame((reg_pw.get("degree_1") or {}).get("feature_results") or [])
-            if len(pw_df):
-                pw_df = pw_df[pw_df.get("q", pw_df.get("fdr", 1.0)) <= FDR_THRESHOLD]
-                figsize = dotplot_figsize(pw_df, y_col="feature")
+            pw_reg = adata_train.uns.get("peach_simplex_regression_pathways") or \
+                      adata_train.uns.get("peach_simplex_regression_pathway_scores", {})
+            pw_long = regression_to_long_df(
+                pw_reg, y_col="pathway", exclusive_only=False,
+                fdr_threshold=FDR_THRESHOLD, top_n_per_archetype=5, degree=1,
+            )
+            if len(pw_long):
                 fig_b2 = pc.pl.dotplot(
-                    adata_train, pw_df, group_col="archetype", feature_col="feature",
-                    size_col="coef", color_col="q", figsize=figsize,
+                    pw_long, x_col="archetype", y_col="pathway",
+                    size_col="mean_archetype", color_col="pvalue",
+                    top_n_per_group=5,
+                    figsize=dotplot_figsize(pw_long, y_col="pathway"),
+                    title=f"Fig 3B-2 — archetype pathway enrichment (top 5/archetype, FDR≤{FDR_THRESHOLD})",
                 )
                 fig3b_parts.append(report.fig_to_img(
                     fig_b2, "Fig 3B-2 — archetype pathway enrichment."
+                ))
+            else:
+                fig3b_parts.append(error_html(
+                    f"No pathways reached FDR ≤ {FDR_THRESHOLD}."
                 ))
         except Exception as e:
             fig3b_parts.append(error_html(f"Fig 3B pathway dotplot failed: {e}"))
@@ -600,32 +723,39 @@ def phase3_figure3bc(adata_train, res, report: HTMLReport):
             "Upstream prep must add this via pp.compute_pathway_scores."
         ))
 
-    # 3B.3 — stress-gene subset
+    # 3B.3 — stress-gene subset (re-run regression restricted to stress genes).
     try:
         stress_in_data = [g for g in STRESS_GENES_FLAT if g in adata_train.var_names]
         if not stress_in_data:
             raise ValueError("No stress genes found in adata.var_names.")
         adata_stress = adata_train[:, stress_in_data].copy()
-        # Re-propagate archetypes col which we need for dotplot grouping
+        # Copy over the archetypes / weights so regression can run on this subset
         adata_stress.obs = adata_train.obs.copy()
         adata_stress.obsm = adata_train.obsm.copy()
         adata_stress.uns = adata_train.uns.copy()
-        reg_stress = pc.tl.feature_simplex_regression(
-            adata_stress, degrees=(1,), fdr_threshold=FDR_THRESHOLD,
+        pc.tl.feature_simplex_regression(adata_stress, max_degree=1, robust_se=True)
+        stress_reg = adata_stress.uns.get("peach_simplex_regression_genes") or \
+                      adata_stress.uns.get("peach_simplex_regression", {})
+        stress_long = regression_to_long_df(
+            stress_reg, y_col="gene", exclusive_only=False,
+            fdr_threshold=FDR_THRESHOLD, top_n_per_archetype=5, degree=1,
         )
-        s_df = pd.DataFrame((reg_stress.get("degree_1") or {}).get("feature_results") or [])
-        if len(s_df):
-            figsize = dotplot_figsize(s_df, y_col="feature")
+        if len(stress_long):
             fig_b3 = pc.pl.dotplot(
-                adata_stress, s_df, group_col="archetype", feature_col="feature",
-                size_col="coef", color_col="q", figsize=figsize,
+                stress_long, x_col="archetype", y_col="gene",
+                size_col="mean_archetype", color_col="pvalue",
+                top_n_per_group=5,
+                figsize=dotplot_figsize(stress_long, y_col="gene"),
+                title=f"Fig 3B-3 — stress genes ({len(stress_in_data)} overlap, FDR≤{FDR_THRESHOLD})",
             )
             fig3b_parts.append(report.fig_to_img(
-                fig_b3, f"Fig 3B-3 — stress genes (n={len(stress_in_data)} overlap)."
+                fig_b3,
+                f"Fig 3B-3 — stress-gene subset. "
+                f"n_overlap={len(stress_in_data)}, n_unique_plotted={stress_long['gene'].nunique()}."
             ))
         else:
             fig3b_parts.append(error_html(
-                "No stress genes reached FDR ≤ 0.05 — negative control confirmed."
+                f"No stress genes reached FDR ≤ {FDR_THRESHOLD} — negative control confirmed."
             ))
     except Exception as e:
         fig3b_parts.append(error_html(f"Fig 3B stress dotplot failed: {e}"))

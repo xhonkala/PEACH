@@ -1716,11 +1716,24 @@ def build_archetype_char_table(
         None,
     )
 
+    def _label_to_int(label):
+        """Return integer index for an archetype label (int, '0', 'archetype_0')."""
+        import re
+        try:
+            return int(label)
+        except (TypeError, ValueError):
+            pass
+        m = re.search(r"\d+$", str(label))
+        return int(m.group()) if m else None
+
     for a in archetype_ids:
         sub = obs.loc[obs[archetypes_col] == a]
         n = len(sub)
+        a_int = _label_to_int(a)
         row = {
-            "archetype": int(a),
+            # Preserve original label (int or string like "archetype_0") so the
+            # column matches adata.obs values for downstream joins.
+            "archetype": a if a_int is None else a_int,
             "n_cells": n,
             "pct_cells": 100.0 * n / total_cells if total_cells else 0.0,
         }
@@ -1737,7 +1750,9 @@ def build_archetype_char_table(
                 dom_frac = vc.iloc[0] / n if n and len(vc) else 0.0
                 row[f"dom_{cov}"] = f"{dom} ({100*dom_frac:.0f}%)" if dom is not None else ""
         if top_genes_by_archetype is not None:
-            row["top_genes"] = ", ".join(top_genes_by_archetype.get(int(a), []))
+            # Accept int-keyed OR str-keyed dicts
+            genes = top_genes_by_archetype.get(a) or top_genes_by_archetype.get(a_int, [])
+            row["top_genes"] = ", ".join(genes) if genes else ""
         rows.append(row)
 
     df = pd.DataFrame(rows)
