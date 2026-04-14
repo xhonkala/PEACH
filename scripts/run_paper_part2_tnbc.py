@@ -347,9 +347,156 @@ def phase1_train_model(report: HTMLReport):
 
 
 def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
-    """Fig 3A — global archetype space. Implemented in Task 12."""
-    report.add_section("Phase 2: Fig 3A (stub)",
-                        "<p><em>Pending Task 12.</em></p>", step_num=2)
+    """Fig 3A — global archetype space + char table + covariate OR tables."""
+    t_phase = time.time()
+    html_parts: list = []
+
+    # 2.1 — 9-color (response × treatment) map applied via a synthetic obs column.
+    # pc.pl.archetypal_space's categorical_colors expects flat {level: color},
+    # so we build a combined 'response_treatment' column and a flat cmap.
+    cmap_tuple = build_response_timepoint_colormap()
+    cmap_flat = {f"{r}|{t}": c for (r, t), c in cmap_tuple.items()}
+    adata_train.obs["response_treatment"] = (
+        adata_train.obs["response_group"].astype(str) + "|" +
+        adata_train.obs["treatment"].astype(str)
+    ).astype("category")
+
+    # 2.2 — main 3D plot
+    try:
+        fig_main = pc.pl.archetypal_space(
+            adata_train,
+            color_by="response_treatment",
+            cell_opacity=0.55,
+            show_archetype_labels=True,
+            title="Fig 3A — Global archetypal space (response × timepoint)",
+            categorical_colors=cmap_flat,
+        )
+        html_parts.append(report.plotly_to_div(
+            fig_main, "Fig 3A — main: 9-combo ramp (hue=response, lightness=timepoint)."
+        ))
+    except Exception as e:
+        html_parts.append(error_html(f"Fig 3A main plot failed: {e}"))
+
+    # 2.3 — per-timepoint facet panel (3 subplots)
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        fig_facet = make_subplots(rows=1, cols=3,
+                                    specs=[[{"type": "scatter3d"}] * 3],
+                                    subplot_titles=("Base", "PD1", "RTPD1"))
+        archetype_pos = np.asarray(res["archetype_coords"])[:, :3]
+        for col, tp in enumerate(("Base", "PD1", "RTPD1"), start=1):
+            mask = (adata_train.obs["treatment"].astype(str) == tp).values
+            pts = adata_train.obsm["X_pca"][mask, :3]
+            resp = adata_train.obs.loc[mask, "response_group"].astype(str).values
+            colors = [cmap_tuple[(r, tp)] for r in resp]
+            fig_facet.add_trace(go.Scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                mode="markers", marker=dict(size=2.0, color=colors, opacity=0.55),
+                showlegend=False,
+            ), row=1, col=col)
+            fig_facet.add_trace(go.Scatter3d(
+                x=archetype_pos[:, 0], y=archetype_pos[:, 1], z=archetype_pos[:, 2],
+                mode="markers+text",
+                marker=dict(size=6, color="black", symbol="diamond"),
+                text=[f"A{i}" for i in range(archetype_pos.shape[0])],
+                showlegend=False,
+            ), row=1, col=col)
+        fig_facet.update_layout(height=500, width=1300,
+                                  title="Fig 3A-ii — Per-timepoint facets")
+        html_parts.append(report.plotly_to_div(
+            fig_facet, "Fig 3A-ii — 3 facets (Base / PD1 / RTPD1)."
+        ))
+    except Exception as e:
+        html_parts.append(error_html(f"Fig 3A facet panel failed: {e}"))
+
+    # 2.4 — holdout projection visualization
+    try:
+        import plotly.graph_objects as go
+        archetype_pos = np.asarray(res["archetype_coords"])[:, :3]
+        fig_ho = go.Figure()
+        fig_ho.add_trace(go.Scatter3d(
+            x=adata_train.obsm["X_pca"][:, 0],
+            y=adata_train.obsm["X_pca"][:, 1],
+            z=adata_train.obsm["X_pca"][:, 2],
+            mode="markers", marker=dict(size=1.5, color="lightgray", opacity=0.4),
+            name="train",
+        ))
+        ho_resp = adata_holdout.obs["response_group"].astype(str).values
+        ho_tx = adata_holdout.obs["treatment"].astype(str).values
+        ho_colors = [cmap_tuple[(r, t)] for r, t in zip(ho_resp, ho_tx)]
+        fig_ho.add_trace(go.Scatter3d(
+            x=adata_holdout.obsm["X_pca"][:, 0],
+            y=adata_holdout.obsm["X_pca"][:, 1],
+            z=adata_holdout.obsm["X_pca"][:, 2],
+            mode="markers", marker=dict(size=2.5, color=ho_colors, opacity=0.85),
+            name="holdout",
+        ))
+        fig_ho.add_trace(go.Scatter3d(
+            x=archetype_pos[:, 0], y=archetype_pos[:, 1], z=archetype_pos[:, 2],
+            mode="markers+text",
+            marker=dict(size=8, color="black", symbol="diamond"),
+            text=[f"A{i}" for i in range(archetype_pos.shape[0])],
+        ))
+        fig_ho.update_layout(title="Fig 3A-iii — Holdout cells projected", height=560)
+        html_parts.append(report.plotly_to_div(
+            fig_ho, "Fig 3A-iii — held-out cells (colored) over train cells (grey)."
+        ))
+    except Exception as e:
+        html_parts.append(error_html(f"Fig 3A holdout projection failed: {e}"))
+
+    # 2.5 — characterization table
+    try:
+        # Top genes per archetype: quick peek via simplex regression if available
+        top_genes_by_archetype = {}
+        try:
+            reg = pc.tl.feature_simplex_regression(adata_train, degrees=(1,))
+            # reg is a serialized dict; pull per-archetype top features
+            # The exact structure varies across v0.5.0 — be defensive.
+            top_df = (reg.get("degree_1") or {}).get("feature_results")
+            if top_df is not None:
+                tdf = pd.DataFrame(top_df)
+                for a in sorted(adata_train.obs["archetypes"].dropna().unique()):
+                    sub = tdf[tdf["archetype"] == a].sort_values(
+                        "coef", ascending=False
+                    ).head(5)
+                    top_genes_by_archetype[int(a)] = sub["feature"].tolist()
+        except Exception as e_inner:
+            html_parts.append(error_html(
+                f"simplex regression for top-genes unavailable: {e_inner}. "
+                "Characterization table will omit top_genes column."
+            ))
+            top_genes_by_archetype = None
+
+        char_df = build_archetype_char_table(
+            adata_train.obs,
+            archetypes_col="archetypes",
+            covariate_cols=["response_group", "treatment", "cohort", "majority_voting"],
+            top_genes_by_archetype=top_genes_by_archetype,
+        )
+        html_parts.append(report.df_to_html(
+            char_df, "Archetype characterization — quick-look table."
+        ))
+    except Exception as e:
+        html_parts.append(error_html(f"characterization table failed: {e}"))
+
+    # 2.6 — hypergeometric OR tables
+    try:
+        or_tables = build_archetype_hypergeometric_tables(
+            adata_train.obs,
+            archetypes_col="archetypes",
+            covariate_cols=["response_group", "treatment", "majority_voting", "cohort"],
+            min_level_cells=50,
+        )
+        for cov, df in or_tables.items():
+            cap = f"Hypergeometric enrichment — {cov} × archetype (BH q-values within covariate)."
+            html_parts.append(report.df_to_html(df, cap, max_rows=60))
+    except Exception as e:
+        html_parts.append(error_html(f"hypergeometric tables failed: {e}"))
+
+    report.add_section("Fig 3A — Global archetype space (response × timepoint)",
+                        "\n".join(html_parts), step_num=2, open_by_default=True)
+    print(f"  phase2: done in {time.time() - t_phase:.1f}s")
 
 
 def phase3_figure3bc(adata_train, res, report: HTMLReport):

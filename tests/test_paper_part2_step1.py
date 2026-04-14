@@ -530,3 +530,17 @@ def test_run_part2_phase1_calls():
     assert "pc.tl.assign_archetypes" in src
     assert "build_drift_qc_panel" in src
     assert "build_holdout_projection_qc" in src
+
+
+# ============================================================================
+# Task 12 — Phase 2 (Fig 3A)
+# ============================================================================
+
+
+def test_run_part2_phase2_calls():
+    src = _read_run_source()
+    assert "build_response_timepoint_colormap" in src
+    assert "build_archetype_char_table" in src
+    assert "build_archetype_hypergeometric_tables" in src
+    assert "Fig 3A" in src or "Figure 3A" in src
+    assert "pc.pl.archetypal_space" in src
