@@ -1558,3 +1558,64 @@ def build_response_timepoint_colormap(
         for i, t in enumerate(treatments):
             out[(r, t)] = ramp[i]
     return out
+
+
+def compute_w2_archetype_distance(weights_a, weights_b):
+    """2-Wasserstein distance between two cell groups' archetype-weight
+    distributions, via the Bures–Wasserstein closed form on Gaussian
+    approximations.
+
+    Parameters
+    ----------
+    weights_a, weights_b : np.ndarray
+        Shape ``(n_cells_*, n_archetypes)``. Each row is a simplex
+        point. Groups may have different cell counts.
+
+    Returns
+    -------
+    float
+        Non-negative W2 distance. Returns 0.0 when both inputs are
+        identical (bit-exact).
+    """
+    import numpy as np
+    from scipy.linalg import sqrtm
+
+    a = np.asarray(weights_a, dtype=np.float64)
+    b = np.asarray(weights_b, dtype=np.float64)
+
+    # Short-circuit: W2(P, P) = 0 by definition; avoids sqrtm roundoff.
+    if a.shape == b.shape and np.array_equal(a, b):
+        return 0.0
+
+    if a.shape[1] != b.shape[1]:
+        raise ValueError(
+            f"Archetype dim mismatch: a={a.shape[1]}, b={b.shape[1]}"
+        )
+    if a.shape[0] < 2 or b.shape[0] < 2:
+        raise ValueError("Each group needs at least 2 cells for a covariance.")
+
+    mu_a = a.mean(axis=0)
+    mu_b = b.mean(axis=0)
+    Sig_a = np.cov(a, rowvar=False)
+    Sig_b = np.cov(b, rowvar=False)
+
+    # Numerical floor on the diagonals (archetype weights can be near-degenerate)
+    eps = 1e-10
+    Sig_a = Sig_a + eps * np.eye(Sig_a.shape[0])
+    Sig_b = Sig_b + eps * np.eye(Sig_b.shape[0])
+
+    # Mean-distance term
+    mean_term = float(np.sum((mu_a - mu_b) ** 2))
+
+    # Bures term: Tr(Σa + Σb - 2 * (Σa^½ Σb Σa^½)^½)
+    sqrt_Sa = sqrtm(Sig_a)
+    # sqrtm may return complex due to floating round-off; drop imaginary
+    sqrt_Sa = np.asarray(sqrt_Sa).real
+    middle = sqrt_Sa @ Sig_b @ sqrt_Sa
+    sqrt_middle = sqrtm(middle)
+    sqrt_middle = np.asarray(sqrt_middle).real
+    bures = float(np.trace(Sig_a) + np.trace(Sig_b) - 2.0 * np.trace(sqrt_middle))
+
+    # Numerical clamp (tiny negatives from sqrtm roundoff)
+    w2_sq = max(0.0, mean_term + bures)
+    return float(np.sqrt(w2_sq))
