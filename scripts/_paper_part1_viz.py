@@ -1522,3 +1522,39 @@ def build_lollipop_chart(
     )
     fig.tight_layout()
     return fig
+
+
+# ============================================================================
+# Part 2 helpers (shared with Part 1 when relevant)
+# ============================================================================
+
+
+def build_response_timepoint_colormap(
+    responses: Sequence[str] = ("NR", "R1", "R2"),
+    treatments: Sequence[str] = ("Base", "PD1", "RTPD1"),
+) -> dict:
+    """Return a ``(response, treatment) -> hex color`` map.
+
+    Hue = response lineage (NR=reds, R1=oranges, R2=blues); lightness =
+    timepoint (lightest at the first treatment, darkest at the last).
+
+    Raises ValueError if an unknown response is passed.
+    """
+    ramps = {
+        "NR": ["#fca5a5", "#ef4444", "#991b1b"],
+        "R1": ["#fed7aa", "#f97316", "#9a3412"],
+        "R2": ["#93c5fd", "#2563eb", "#1e3a8a"],
+    }
+    unknown = set(responses) - set(ramps)
+    if unknown:
+        raise ValueError(f"Unknown response groups: {sorted(unknown)}. "
+                         f"Expected subset of {sorted(ramps)}.")
+    if len(treatments) > 3:
+        raise ValueError("Only up to 3 treatments supported by the ramp width.")
+
+    out: dict = {}
+    for r in responses:
+        ramp = ramps[r]
+        for i, t in enumerate(treatments):
+            out[(r, t)] = ramp[i]
+    return out

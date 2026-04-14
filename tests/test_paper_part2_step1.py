@@ -86,3 +86,32 @@ def test_safe_stratified_split_deterministic():
     t2, h2, _ = safe_stratified_split(primary, fallback, random_state=42)
     assert np.array_equal(t1, t2)
     assert np.array_equal(h1, h2)
+
+
+# ============================================================================
+# Task 2 — build_response_timepoint_colormap
+# ============================================================================
+
+
+def test_response_timepoint_colormap_default_shape():
+    from _paper_part1_viz import build_response_timepoint_colormap
+    cmap = build_response_timepoint_colormap()
+    # Default: 3 responses × 3 treatments
+    assert len(cmap) == 9
+    for key in [("NR", "Base"), ("R1", "PD1"), ("R2", "RTPD1")]:
+        assert key in cmap
+        assert cmap[key].startswith("#") and len(cmap[key]) == 7
+
+
+def test_response_timepoint_colormap_hue_by_response():
+    """Same response, different timepoints → same hue family."""
+    from _paper_part1_viz import build_response_timepoint_colormap
+    cmap = build_response_timepoint_colormap()
+    # Crude check: red hex starts with high R (first 2 hex chars high)
+    assert int(cmap[("NR", "Base")][1:3], 16) > 200  # light red
+    assert int(cmap[("NR", "RTPD1")][1:3], 16) < 200  # darker red
+    # R1 — orange (red + green)
+    assert int(cmap[("R1", "Base")][1:3], 16) > 200  # light orange
+    # R2 — blue (low red, high blue)
+    assert int(cmap[("R2", "Base")][1:3], 16) < 200   # blue has low red
+    assert int(cmap[("R2", "Base")][5:7], 16) > 200   # blue has high blue
