@@ -11,6 +11,11 @@ Exposes:
         cumulative variance ratio reaches the threshold, clamped
         to [min_pcs, max_pcs].
 
+    safe_stratified_split(primary_stratum, fallback_stratum, test_size=0.20,
+                          min_stratum_size=10, random_state=42)
+        Fallback-aware stratified 80/20 split; collapses tiny strata to a
+        coarser fallback key and random-splits truly orphan cells.
+
 Used by: scripts/prep_hsccmp.py, scripts/prep_bigov.py
 """
 
@@ -267,3 +272,120 @@ def apply_mt_rb_mad_filter(adata, n_mads: float = 3.0):
         )
 
     return adata
+
+
+def safe_stratified_split(
+    primary_stratum: "pd.Series",
+    fallback_stratum: "pd.Series",
+    test_size: float = 0.20,
+    min_stratum_size: int = 10,
+    random_state: int = 42,
+):
+    """Fallback-aware stratified 80/20 (or custom test_size) split.
+
+    Strata in ``primary_stratum`` smaller than ``min_stratum_size`` are
+    collapsed into groups defined by ``fallback_stratum`` for the split.
+    If a fallback group itself has <2 cells, those cells are randomly
+    assigned (honouring ``test_size``).
+
+    Parameters
+    ----------
+    primary_stratum, fallback_stratum : pd.Series, same length
+        Primary stratum tag per cell, and a coarser fallback tag.
+        Typical: primary = f"{cohort}|{response}|{treatment}",
+                 fallback = cohort.
+    test_size : float
+        Fraction of cells in the holdout set.
+    min_stratum_size : int
+        Primary strata with fewer than this many cells collapse to
+        their fallback.
+    random_state : int
+        RNG seed.
+
+    Returns
+    -------
+    train_idx, holdout_idx : np.ndarray of int
+        Positional row indices (0..N-1).
+    diag : dict
+        {
+            "n_cells": int,
+            "n_primary_strata": int,
+            "n_collapsed_strata": int,
+            "n_fallback_cells": int,          # cells routed through fallback
+            "n_random_fallback_cells": int,   # cells ultimately random-split
+            "test_size": float,
+        }
+    """
+    import numpy as np
+    import pandas as pd
+    from sklearn.model_selection import StratifiedShuffleSplit
+
+    assert len(primary_stratum) == len(fallback_stratum), "length mismatch"
+    n = len(primary_stratum)
+    primary = pd.Series(primary_stratum).reset_index(drop=True).astype(str)
+    fallback = pd.Series(fallback_stratum).reset_index(drop=True).astype(str)
+
+    # 1. Identify tiny primary strata and collapse to fallback
+    primary_sizes = primary.value_counts()
+    tiny_labels = set(primary_sizes[primary_sizes < min_stratum_size].index)
+
+    effective = primary.copy()
+    effective.loc[primary.isin(tiny_labels)] = (
+        "__FB__" + fallback.loc[primary.isin(tiny_labels)]
+    )
+    n_fallback_cells = int(primary.isin(tiny_labels).sum())
+    n_collapsed_strata = len(tiny_labels)
+
+    # 2. Identify remaining strata that are still too small to stratified-split
+    #    (sklearn needs at least 2 samples per class AND test_size * n >= 1)
+    eff_sizes = effective.value_counts()
+    random_labels = set(eff_sizes[eff_sizes < 2].index)
+    random_mask = effective.isin(random_labels).values
+
+    n_random_fallback_cells = int(random_mask.sum())
+
+    rng = np.random.default_rng(random_state)
+    train_parts: list[np.ndarray] = []
+    holdout_parts: list[np.ndarray] = []
+
+    # 3. Stratified split on the good strata
+    good_idx = np.where(~random_mask)[0]
+    if len(good_idx) > 0:
+        sss = StratifiedShuffleSplit(
+            n_splits=1, test_size=test_size, random_state=random_state
+        )
+        good_effective = effective.iloc[good_idx].values
+        # StratifiedShuffleSplit needs at least 2 classes; if only one class, fall through
+        if len(set(good_effective)) >= 2:
+            for tr, ho in sss.split(np.zeros(len(good_idx)), good_effective):
+                train_parts.append(good_idx[tr])
+                holdout_parts.append(good_idx[ho])
+        else:
+            # Single class — random split
+            shuffled = good_idx.copy()
+            rng.shuffle(shuffled)
+            n_ho = int(round(test_size * len(shuffled)))
+            holdout_parts.append(shuffled[:n_ho])
+            train_parts.append(shuffled[n_ho:])
+
+    # 4. Random fallback for the truly orphan cells
+    if n_random_fallback_cells > 0:
+        rnd_idx = np.where(random_mask)[0]
+        shuffled = rnd_idx.copy()
+        rng.shuffle(shuffled)
+        n_ho = int(round(test_size * len(shuffled)))
+        holdout_parts.append(shuffled[:n_ho])
+        train_parts.append(shuffled[n_ho:])
+
+    train_idx = np.sort(np.concatenate(train_parts)) if train_parts else np.array([], dtype=int)
+    holdout_idx = np.sort(np.concatenate(holdout_parts)) if holdout_parts else np.array([], dtype=int)
+
+    diag = {
+        "n_cells": n,
+        "n_primary_strata": int(primary.nunique()),
+        "n_collapsed_strata": n_collapsed_strata,
+        "n_fallback_cells": n_fallback_cells,
+        "n_random_fallback_cells": n_random_fallback_cells,
+        "test_size": test_size,
+    }
+    return train_idx, holdout_idx, diag

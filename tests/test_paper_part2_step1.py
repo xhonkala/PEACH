@@ -1,0 +1,88 @@
+"""Tests for Part 2 Step 1 pipeline (prep + run + structural regex checks).
+
+Mirrors tests/test_paper_part1_fixes.py structure:
+- Computation tests for new helpers
+- Structural regex tests for the Part 2 scripts
+"""
+from __future__ import annotations
+
+import os
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+# Make scripts/ importable for helper tests
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+
+# ============================================================================
+# Task 1 — safe_stratified_split
+# ============================================================================
+
+
+def test_safe_stratified_split_simple_case():
+    """With uniformly large strata, behaves like normal stratified split."""
+    from _paper_part1_prep import safe_stratified_split
+
+    primary = pd.Series(["A"] * 50 + ["B"] * 50)
+    fallback = pd.Series(["X"] * 100)
+    train_idx, holdout_idx, diag = safe_stratified_split(
+        primary, fallback, test_size=0.20, min_stratum_size=10, random_state=42
+    )
+    assert len(train_idx) + len(holdout_idx) == 100
+    assert len(set(train_idx) & set(holdout_idx)) == 0
+    # Each primary stratum should be ~80/20
+    for label in ("A", "B"):
+        mask = primary == label
+        in_train = mask.values[train_idx].sum()
+        in_holdout = mask.values[holdout_idx].sum()
+        assert 7 <= in_holdout <= 13  # 20% of 50 = 10 ± noise
+        assert in_train + in_holdout == 50
+    assert diag["n_fallback_cells"] == 0
+    assert diag["n_random_fallback_cells"] == 0
+
+
+def test_safe_stratified_split_fallback_triggers_on_tiny_strata():
+    """Strata below min_stratum_size collapse to fallback key."""
+    from _paper_part1_prep import safe_stratified_split
+
+    # 3 big strata (40 each) + 2 tiny strata (3 each) that share a fallback key
+    primary = pd.Series(["A"] * 40 + ["B"] * 40 + ["C"] * 40 + ["D"] * 3 + ["E"] * 3)
+    fallback = pd.Series(["big"] * 120 + ["tiny_group"] * 6)
+    train_idx, holdout_idx, diag = safe_stratified_split(
+        primary, fallback, test_size=0.20, min_stratum_size=10, random_state=42
+    )
+    assert len(train_idx) + len(holdout_idx) == 126
+    # Tiny strata (D, E) count as fallback cells
+    assert diag["n_fallback_cells"] == 6
+
+
+def test_safe_stratified_split_random_fallback_when_fallback_also_tiny():
+    """If both primary and fallback strata are <2, fall back to random per-cell split."""
+    from _paper_part1_prep import safe_stratified_split
+
+    # One stratum of size 1 — can't stratify even after fallback collapse
+    primary = pd.Series(["A"] * 40 + ["B"] * 40 + ["Z"] * 1)
+    fallback = pd.Series(["big"] * 80 + ["orphan"] * 1)
+    train_idx, holdout_idx, diag = safe_stratified_split(
+        primary, fallback, test_size=0.20, min_stratum_size=10, random_state=42
+    )
+    assert len(train_idx) + len(holdout_idx) == 81
+    assert diag["n_random_fallback_cells"] >= 1
+
+
+def test_safe_stratified_split_deterministic():
+    """Same random_state → same split."""
+    from _paper_part1_prep import safe_stratified_split
+
+    primary = pd.Series(["A"] * 50 + ["B"] * 50)
+    fallback = pd.Series(["X"] * 100)
+    t1, h1, _ = safe_stratified_split(primary, fallback, random_state=42)
+    t2, h2, _ = safe_stratified_split(primary, fallback, random_state=42)
+    assert np.array_equal(t1, t2)
+    assert np.array_equal(h1, h2)
