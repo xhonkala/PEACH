@@ -1,4 +1,5 @@
-from typing import Any
+import warnings
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -504,21 +505,34 @@ def bin_cells_by_archetype(
     obs_key: str = "archetypes",
     include_central_archetype: bool = True,
     verbose: bool = True,
+    method: Literal["bin_prop", "argmax"] = "bin_prop",
+    weights_key: str = "cell_archetype_weights",
 ) -> pd.DataFrame:
-    """Assign cells to archetypes based on distance matrix.
+    """Assign cells to archetypes based on distance matrix or barycentric weights.
 
-    For each archetype, selects the closest N% of cells and assigns them
-    to that archetype. Optionally creates a central "archetype_0" for
-    generalist cells closest to the global centroid.
+    Two assignment methods are supported:
+
+    - ``method="bin_prop"`` (default, back-compat): for each archetype, selects
+      the closest N% of cells and assigns them to that archetype. Optionally
+      creates a central "archetype_0" for generalist cells closest to the
+      global centroid. This is the historical PEACH behavior.
+    - ``method="argmax"``: assigns each cell to the archetype with the highest
+      barycentric weight in ``adata.obsm[weights_key]``. Matches the hard
+      source-label convention used by
+      :func:`compute_archetype_correspondence`, so Sankey/dotplot/flow/pattern
+      analyses all read from the same ground truth.
 
     Parameters
     ----------
     adata : AnnData
         AnnData object with distance matrix in ``adata.obsm[obsm_key]``.
         Run :func:`compute_archetype_distances` first.
+        For ``method="argmax"``, ``adata.obsm[weights_key]`` should also be
+        present (see fallback below).
     percentage_per_archetype : float, default: 0.1
         Fraction of cells (0.0-1.0) to assign to each archetype.
         E.g., 0.1 assigns the closest 10% of cells to each archetype.
+        Ignored when ``method="argmax"``.
     obsm_key : str, default: 'archetype_distances'
         Key for distance matrix in ``adata.obsm``.
     obs_key : str, default: 'archetypes'
@@ -527,8 +541,15 @@ def bin_cells_by_archetype(
         Whether to create archetype_0 for generalist cells closest to
         the global centroid (mean position across all archetypes).
         Useful for studying specialization trajectories.
+        Ignored when ``method="argmax"`` (warning is raised if ``True``).
     verbose : bool, default: True
         Whether to print assignment statistics.
+    method : {"bin_prop", "argmax"}, default: "bin_prop"
+        Cell assignment strategy. See description above.
+    weights_key : str, default: "cell_archetype_weights"
+        Key in ``adata.obsm`` for the barycentric weight matrix. Only used
+        when ``method="argmax"``. If missing, falls back to
+        ``argmin(adata.obsm[obsm_key])`` with a ``UserWarning``.
 
     Returns
     -------
@@ -617,10 +638,111 @@ def bin_cells_by_archetype(
             f"Distance matrix not found in adata.obsm['{obsm_key}']. Run compute_archetype_distances() first."
         )
 
+    if method not in ("bin_prop", "argmax"):
+        raise ValueError(
+            f"method must be one of {{'bin_prop', 'argmax'}}, got {method!r}"
+        )
+
     distance_matrix = adata.obsm[obsm_key]  # [n_cells, n_archetypes]
     n_cells, n_archetypes = distance_matrix.shape
     n_cells_per_archetype = int(n_cells * percentage_per_archetype)
 
+    # Validate alignment (shared by both methods)
+    if len(adata.obs) != n_cells:
+        raise ValueError(f"Alignment error: adata.obs has {len(adata.obs)} cells but distance matrix has {n_cells}")
+
+    # ------------------------------------------------------------------
+    # NEW (W-B13): argmax method — assign by argmax of barycentric weights
+    # ------------------------------------------------------------------
+    if method == "argmax":
+        if include_central_archetype:
+            warnings.warn(
+                "bin_cells_by_archetype(method='argmax'): "
+                "include_central_archetype=True is ignored under argmax assignment. "
+                "No central archetype_0 is created; every cell is assigned to its "
+                "argmax archetype.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if weights_key in adata.obsm:
+            weights = np.asarray(adata.obsm[weights_key])
+            if weights.shape[0] != n_cells:
+                raise ValueError(
+                    f"Weight matrix in adata.obsm['{weights_key}'] has "
+                    f"{weights.shape[0]} rows but distance matrix has {n_cells} "
+                    f"rows — alignment mismatch."
+                )
+            argmax_src = "cell_archetype_weights"
+            arch_idx_per_cell = np.argmax(weights, axis=1).astype(int)
+            per_cell_distance = np.take_along_axis(
+                distance_matrix, arch_idx_per_cell[:, None], axis=1
+            ).ravel()
+        else:
+            warnings.warn(
+                f"bin_cells_by_archetype(method='argmax'): "
+                f"adata.obsm['{weights_key}'] not found. Falling back to "
+                f"argmin of adata.obsm['{obsm_key}'] (distance-based). "
+                f"Note that argmin(distance) may DISAGREE with argmax(weights) "
+                f"when archetypes sit outside the data hull — run "
+                f"pc.tl.extract_archetype_weights() first for consistency with "
+                f"compute_archetype_correspondence(method='hard').",
+                UserWarning,
+                stacklevel=2,
+            )
+            argmax_src = "argmin_distance_fallback"
+            arch_idx_per_cell = np.argmin(distance_matrix, axis=1).astype(int)
+            per_cell_distance = np.take_along_axis(
+                distance_matrix, arch_idx_per_cell[:, None], axis=1
+            ).ravel()
+
+        if verbose:
+            print(" AnnData-centric archetype binning (argmax)...")
+            print(f"   Source: {argmax_src}")
+            print(f"   Matrix: {distance_matrix.shape} (from adata.obsm['{obsm_key}'])")
+            print(f"   Canonical cell reference: adata.obs.index ({len(adata.obs)} cells)")
+
+        # Build assignments dataframe in the same format as bin_prop mode.
+        # archetype_idx is 1-indexed extremal (archetype_1..archetype_K);
+        # no central archetype in argmax mode.
+        records = []
+        for cell_position in range(n_cells):
+            arch_0idx = int(arch_idx_per_cell[cell_position])
+            storage_idx = arch_0idx + 1  # 1-indexed to match bin_prop scheme
+            records.append(
+                {
+                    "cell_id": adata.obs.index[cell_position],
+                    "cell_idx": cell_position,
+                    "archetype_label": f"archetype_{storage_idx}",
+                    "archetype_idx": storage_idx,
+                    "distance": float(per_cell_distance[cell_position]),
+                    "rank_in_archetype": -1,  # ranks not meaningful in argmax
+                    "multiple_archetypes": False,  # argmax = single label
+                }
+            )
+        assignments_df = pd.DataFrame(records)
+
+        # Store categorical labels in adata.obs (every cell assigned)
+        archetype_labels = [row["archetype_label"] for row in records]
+        adata.obs[obs_key] = pd.Categorical(archetype_labels)
+
+        if verbose:
+            print("\n[STATS] Assignment Summary (argmax):")
+            print(f"   Total cells: {n_cells}")
+            for arch_idx in range(n_archetypes):
+                storage_idx = arch_idx + 1
+                count = int((arch_idx_per_cell == arch_idx).sum())
+                print(f"   Archetype {storage_idx}: {count} cells ({100 * count / n_cells:.1f}%)")
+            print(f"\n[OK] Stored assignments in adata.obs['{obs_key}']:")
+            print(f"   Categories: {list(adata.obs[obs_key].cat.categories)}")
+            for cat, count in adata.obs[obs_key].value_counts().items():
+                print(f"   {cat}: {count} cells ({100 * count / len(adata.obs):.1f}%)")
+
+        return assignments_df
+
+    # ------------------------------------------------------------------
+    # bin_prop method (original, untouched)
+    # ------------------------------------------------------------------
     if verbose:
         print(" AnnData-centric archetype binning...")
         print(f"   Distance matrix: {distance_matrix.shape} (from adata.obsm['{obsm_key}'])")
@@ -628,10 +750,6 @@ def bin_cells_by_archetype(
         print(f"   Selecting top {n_cells_per_archetype} cells ({percentage_per_archetype:.1%}) per archetype")
         if include_central_archetype:
             print("   INCLUDING central archetype_0 (generalist cells)")
-
-    # Validate alignment
-    if len(adata.obs) != n_cells:
-        raise ValueError(f"Alignment error: adata.obs has {len(adata.obs)} cells but distance matrix has {n_cells}")
 
     # Create assignment tracking
     assignments = []

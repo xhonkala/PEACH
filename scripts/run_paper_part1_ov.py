@@ -38,9 +38,10 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "paper_part1_ov
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "outputs", "paper_part1_ov")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Subsample fraction for fast iteration. Set to 1.0 for the production paper run.
-# 0.3 = ~1K primary + 1.2K metastatic cells, suitable for quick test runs.
-SUBSAMPLE_FRACTION = 0.3
+# W-A3: use full primary + metastatic data. Subsampling degraded the fits
+# per the r9 review. Subsample code paths are preserved below for
+# re-enablement but the default is 1.0 (no-op).
+SUBSAMPLE_FRACTION = 1.0
 SUBSAMPLE_SEED = 42
 
 # Training convergence settings.
@@ -184,16 +185,16 @@ def wasserstein2_distance(X, Y, *, max_n=2000, seed=42):
 
 def regression_to_long_df(reg_result, *, y_col="gene", exclusive_only=False,
                            exclusive_threshold=1.5, top_n_per_archetype=10,
-                           fdr_threshold=0.05):
+                           fdr_threshold=0.05, degree=1):
     """Convert simplex regression dict → long-format DataFrame for pc.pl.dotplot.
 
     Builds a long-format table with one row per (feature, archetype):
       - <y_col>: feature name
       - archetype: archetype label (archetype_0, archetype_1, ...)
       - mean_archetype: |vertex coefficient| (used as effect size for dot size)
-      - pvalue: vertex t-test p-value
-      - pvalue_fdr: FDR-corrected vertex p-value
-      - r_squared: per-feature R² (used for ranking top N per archetype)
+      - pvalue: significance (vertex FDR for deg=1, incremental FDR for deg>=2)
+      - pvalue_fdr: same as pvalue (kept for downstream compat)
+      - r_squared: per-feature R² at the requested degree (used for ranking)
 
     Parameters
     ----------
@@ -210,6 +211,15 @@ def regression_to_long_df(reg_result, *, y_col="gene", exclusive_only=False,
         within their "argmax archetype" group).
     fdr_threshold : float
         Filter out rows with FDR > threshold (set to 1.0 to disable).
+    degree : int
+        Polynomial degree to score features by. 1 = pure vertex model (default,
+        historical behaviour). 2 or 3 = use r_squared_degree2 / degree_comparison
+        to rank features by higher-order R²; significance comes from the
+        degree-d incremental F-test FDR (degree_comparison["degree_d"]
+        ["incremental_p_fdr"]). Per-archetype layout (argmax, dot size) still
+        uses the degree-1 vertex coefficients because the higher-degree Scheffé
+        polynomial mixes interaction terms that have no single archetype
+        "home".
 
     Returns
     -------
@@ -220,9 +230,35 @@ def regression_to_long_df(reg_result, *, y_col="gene", exclusive_only=False,
     coefs = np.asarray(reg_result.get("vertex_coefficients", []))
     pvals = np.asarray(reg_result.get("vertex_pvalues", []))
     fdrs = np.asarray(reg_result.get("vertex_pvalues_fdr", []))
-    r2 = np.asarray(reg_result.get("r_squared_degree1", []))
 
-    if coefs.size == 0 or len(feat_names) == 0:
+    # Resolve per-degree R² and per-feature significance.
+    # Layout is always driven by the degree-1 vertex coefficients (argmax +
+    # |coef| dot size); only the ranking R² and the significance filter
+    # change with degree.
+    if degree == 1:
+        r2 = np.asarray(reg_result.get("r_squared_degree1", []))
+        per_arch_sig_fdr = fdrs
+        per_feat_sig_fdr = None
+    elif degree == 2:
+        r2 = np.asarray(reg_result.get("r_squared_degree2", []))
+        if r2.size == 0:
+            dc = reg_result.get("degree_comparison", {}) or {}
+            d2 = dc.get("degree_2", {}) or {}
+            r2 = np.asarray(d2.get("r_squared", []))
+        dc = reg_result.get("degree_comparison", {}) or {}
+        d2 = dc.get("degree_2", {}) or {}
+        per_feat_sig_fdr = np.asarray(d2.get("incremental_p_fdr", []))
+        per_arch_sig_fdr = None
+    elif degree == 3:
+        dc = reg_result.get("degree_comparison", {}) or {}
+        d3 = dc.get("degree_3", {}) or {}
+        r2 = np.asarray(d3.get("r_squared", []))
+        per_feat_sig_fdr = np.asarray(d3.get("incremental_p_fdr", []))
+        per_arch_sig_fdr = None
+    else:
+        raise ValueError(f"degree must be 1, 2, or 3 — got {degree}")
+
+    if coefs.size == 0 or len(feat_names) == 0 or r2.size == 0:
         return pd.DataFrame()
 
     n_feat, K = coefs.shape
@@ -248,11 +284,24 @@ def regression_to_long_df(reg_result, *, y_col="gene", exclusive_only=False,
     for fi in range(n_feat):
         if not keep_feat_mask[fi]:
             continue
-        for a in range(K):
-            p = float(pvals[fi, a]) if pvals.size else 1.0
-            f = float(fdrs[fi, a]) if fdrs.size else 1.0
-            if f > fdr_threshold:
+        # Degree >=2: filter by per-feature incremental F-test FDR first
+        if per_feat_sig_fdr is not None:
+            if fi >= per_feat_sig_fdr.size:
                 continue
+            feat_fdr = float(per_feat_sig_fdr[fi])
+            if feat_fdr > fdr_threshold:
+                continue
+        for a in range(K):
+            if per_arch_sig_fdr is not None:
+                # Degree 1: per-vertex FDR filter
+                p = float(pvals[fi, a]) if pvals.size else 1.0
+                f = float(per_arch_sig_fdr[fi, a]) if per_arch_sig_fdr.size else 1.0
+                if f > fdr_threshold:
+                    continue
+            else:
+                # Degree >=2: no per-vertex FDR (whole feature passes or not)
+                f = float(per_feat_sig_fdr[fi])
+                p = f
             rows.append({
                 y_col: feat_names[fi],
                 "archetype": f"archetype_{a}",
@@ -374,45 +423,10 @@ summary:hover {{ background: #e2eaf2; }}
 # Diagnostic helpers
 # ============================================================================
 
-def archetype_cell_proximity(adata, k=5):
-    """For each archetype, return median distance to its k nearest cells in PCA space.
-
-    Parameters
-    ----------
-    adata : AnnData
-        Must have ``uns['archetype_coordinates']`` and ``obsm['X_pca']``.
-    k : int
-        Number of nearest cells per archetype to query.
-
-    Returns
-    -------
-    dict with keys:
-        ``median_dist_per_archetype`` — ndarray shape (n_archetypes,)
-        ``median_dist_overall``       — float, median of all queried distances
-        ``max_dist_per_archetype``    — ndarray shape (n_archetypes,)
-    None if required data is missing.
-    """
-    from scipy.spatial import cKDTree
-
-    archetypes = adata.uns.get("archetype_coordinates", None)
-    pca = adata.obsm.get("X_pca", None)
-    if archetypes is None or pca is None:
-        return None
-    archetypes = np.asarray(archetypes)
-    pca = np.asarray(pca)
-    # Restrict to the same number of dimensions used by archetypes
-    n_dims = min(archetypes.shape[1], pca.shape[1])
-    archetypes = archetypes[:, :n_dims]
-    pca = pca[:, :n_dims]
-    tree = cKDTree(pca)
-    dists, _ = tree.query(archetypes, k=min(k, pca.shape[0]))
-    if dists.ndim == 1:
-        dists = dists.reshape(-1, 1)
-    return {
-        "median_dist_per_archetype": np.median(dists, axis=1),
-        "median_dist_overall": float(np.median(dists)),
-        "max_dist_per_archetype": dists.max(axis=1),
-    }
+# W-B11: archetype_cell_proximity removed entirely. The old kNN-vs-kNN
+# ratio was circular (both sides came from the same k-nearest-neighbors
+# computation). Replaced by compute_archetype_to_centroid_distance in
+# scripts/_paper_part1_viz.py (W-B10).
 
 
 # ============================================================================
@@ -439,9 +453,9 @@ def phase1_train_models(report):
     pc.pp.prepare_training(adata_metastatic, batch_size=min(128, adata_metastatic.shape[0] // 4))
     cv_metastatic = pc.tl.hyperparameter_search(
         adata_metastatic,
-        n_archetypes_range=[4, 5, 6, 7, 8, 9],
+        n_archetypes_range=[2, 3, 4, 5, 6, 7, 8, 9],
         hidden_dims_options=[[64, 128], [128, 256]],
-        inflation_factor_range=[1.0],
+        inflation_factor_range=[0.5, 0.75, 1.0, 1.25, 1.5],
         cv_folds=3, max_epochs_cv=15, subsample_fraction=0.8,
     )
     ranked_metastatic = cv_metastatic.rank_by_metric("archetype_r2")
@@ -474,29 +488,36 @@ def phase1_train_models(report):
     log.info(f"Training Metastatic model: K={K_metastatic}, hidden={hd_metastatic}, max_epochs={MAX_EPOCHS_FINAL}...")
     res_metastatic = pc.tl.train_archetypal(
         adata_metastatic, n_archetypes=K_metastatic, n_epochs=MAX_EPOCHS_FINAL, hidden_dims=hd_metastatic,
-        kld_weight=0.09, archetypal_weight=1.0, inflation_factor=1.0,
+        kld_weight=0.15, archetypal_weight=1.0, inflation_factor=1.0,
         model_config={"manifold_weight": 0.001},
         early_stopping=True, early_stopping_patience=EARLY_STOP_PATIENCE,
     )
-    # --- Convergence QC (Metastatic) ---
+    # --- Convergence QC (Metastatic) --- W-A8: delegate to helper that uses
+    # mean(|Δloss|) over the last window as the primary convergence signal,
+    # not just "hit_cap and not early_stop". Fixes the r9 bug where runs with
+    # delta_loss ≈ 0 were flagged NON-CONVERGED.
+    from _paper_part1_viz import convergence_status as _convergence_status
     _metastatic_tc = res_metastatic.get("training_config", {})
     _metastatic_actual = _metastatic_tc.get("actual_epochs", MAX_EPOCHS_FINAL)
     _metastatic_early = _metastatic_tc.get("early_stop_triggered", False)
     _metastatic_history = res_metastatic.get("history", {})
-    _metastatic_losses = _metastatic_history.get("loss", [])
-    if len(_metastatic_losses) >= 10:
-        _last10 = _metastatic_losses[-10:]
-        _metastatic_delta_mean = float(np.mean(np.abs(np.diff(_last10))))
-    else:
-        _metastatic_delta_mean = float("nan")
-    _metastatic_hit_cap = _metastatic_actual >= MAX_EPOCHS_FINAL and not _metastatic_early
+    _metastatic_status, _metastatic_delta_mean = _convergence_status(
+        history=_metastatic_history,
+        max_epochs=MAX_EPOCHS_FINAL,
+        early_stop_triggered=_metastatic_early,
+        actual_epochs=_metastatic_actual,
+        window=10,
+        delta_threshold=0.01,
+    )
+    _metastatic_hit_cap = _metastatic_status == "NON_CONVERGED_HIT_CAP"
     log.info(
-        f"Metastatic convergence QC: actual_epochs={_metastatic_actual}, early_stop={_metastatic_early}, "
-        f"last-10-epoch mean |delta_loss|={_metastatic_delta_mean:.5f}, hit_cap={_metastatic_hit_cap}"
+        f"Metastatic convergence QC: status={_metastatic_status}, "
+        f"actual_epochs={_metastatic_actual}, early_stop={_metastatic_early}, "
+        f"last-10-epoch mean |delta_loss|={_metastatic_delta_mean:.5f}"
     )
     if _metastatic_hit_cap:
         log.warning(
-            f"Metastatic model hit the {MAX_EPOCHS_FINAL}-epoch cap without early stopping — "
+            f"Metastatic model hit the {MAX_EPOCHS_FINAL}-epoch cap with mean |Δloss| > 0.01 — "
             "may not be fully converged. Consider increasing MAX_EPOCHS_FINAL or inspecting the loss curve."
         )
     # Enrich training_config with model-level params for downstream metric display
@@ -506,9 +527,46 @@ def phase1_train_models(report):
         "inflation_factor": 1.0,
         "use_pcha_init": True,
     })
+
+    # W-A6: PCHA-off comparison run (Metastatic). Cloned adata so the downstream
+    # analyses keep using the PCHA-on fit — this is purely for the diagnostic
+    # table in the HTML report.
+    log.info("Metastatic PCHA-off comparison: training with pcha_init=False...")
+    try:
+        adata_metastatic_nopcha = adata_metastatic.copy()
+        pc.pp.prepare_training(adata_metastatic_nopcha, batch_size=min(128, adata_metastatic_nopcha.shape[0] // 4))
+        res_metastatic_nopcha = pc.tl.train_archetypal(
+            adata_metastatic_nopcha, n_archetypes=K_metastatic, n_epochs=MAX_EPOCHS_FINAL, hidden_dims=hd_metastatic,
+            kld_weight=0.15, archetypal_weight=1.0, inflation_factor=1.0,
+            model_config={"manifold_weight": 0.001},
+            early_stopping=True, early_stopping_patience=EARLY_STOP_PATIENCE,
+            pcha_init=False,
+        )
+        _r2_met_on = res_metastatic.get("final_archetype_r2", float("nan"))
+        _r2_met_off = res_metastatic_nopcha.get("final_archetype_r2", float("nan"))
+        _met_pcha_fired = res_metastatic.get("pcha_init_fired", False)
+        log.info(
+            f"Metastatic PCHA init diagnostic: fired={_met_pcha_fired}, "
+            f"R² PCHA-on={_r2_met_on}, R² PCHA-off={_r2_met_off}"
+        )
+        _met_pcha_comparison_rows = [
+            {"pcha_init": "True",  "fired": str(_met_pcha_fired),
+             "final R²": f"{_r2_met_on:.4f}" if isinstance(_r2_met_on, float) else str(_r2_met_on)},
+            {"pcha_init": "False", "fired": str(res_metastatic_nopcha.get("pcha_init_fired", False)),
+             "final R²": f"{_r2_met_off:.4f}" if isinstance(_r2_met_off, float) else str(_r2_met_off)},
+        ]
+    except Exception as _met_pcha_exc:
+        log.warning(f"Metastatic PCHA-off comparison failed: {_met_pcha_exc}")
+        _met_pcha_comparison_rows = [
+            {"pcha_init": "True",  "fired": str(res_metastatic.get("pcha_init_fired", False)),
+             "final R²": f"{res_metastatic.get('final_archetype_r2', float('nan')):.4f}"},
+            {"pcha_init": "False", "fired": "comparison failed",
+             "final R²": f"ERROR: {_met_pcha_exc}"},
+        ]
+
     pc.tl.archetypal_coordinates(adata_metastatic, verbose=False)
-    pc.tl.assign_archetypes(adata_metastatic, verbose=False)
     pc.tl.extract_archetype_weights(adata_metastatic, verbose=False)
+    pc.tl.assign_archetypes(adata_metastatic, verbose=False)
     r2_metastatic = res_metastatic.get("final_archetype_r2", "N/A")
     html_metastatic += metric_grid([
         metric_card(K_metastatic, "Metastatic K"), metric_card(f"{r2_metastatic:.4f}" if isinstance(r2_metastatic, float) else r2_metastatic, "Metastatic R2"),
@@ -537,14 +595,19 @@ def phase1_train_models(report):
         metric_card(_tc_metastatic.get("inflation_factor", "?"), "inflation_factor"),
         metric_card(str(_tc_metastatic.get("use_pcha_init", True)), "use_pcha_init"),
     ])
-    # Convergence QC badge (Metastatic)
+    # Convergence QC badge (Metastatic) — W-A8: status driven by delta_loss.
+    if _metastatic_status == "CONVERGED":
+        _metastatic_conv_tag = " <b style='color:green'>[CONVERGED]</b>"
+    elif _metastatic_status == "NON_CONVERGED_HIT_CAP":
+        _metastatic_conv_tag = " <b style='color:orange'>[NON-CONVERGED: hit epoch cap, Δloss &gt; 0.01]</b>"
+    else:  # NOT_CONVERGED_INSUFFICIENT_HISTORY
+        _metastatic_conv_tag = " <b style='color:orange'>[INSUFFICIENT HISTORY]</b>"
     _metastatic_conv_msg = (
-        f"Early stopped at epoch {_metastatic_actual}/{MAX_EPOCHS_FINAL}. "
-        f"Last-10-epoch mean |Δloss| = {_metastatic_delta_mean:.5f}."
-        if _metastatic_early else
-        f"Ran {_metastatic_actual}/{MAX_EPOCHS_FINAL} epochs. "
-        f"Last-10-epoch mean |Δloss| = {_metastatic_delta_mean:.5f}."
-        + (" <b style='color:orange'>[NON-CONVERGED: hit epoch cap]</b>" if _metastatic_hit_cap else "")
+        (f"Early stopped at epoch {_metastatic_actual}/{MAX_EPOCHS_FINAL}. "
+         if _metastatic_early else
+         f"Ran {_metastatic_actual}/{MAX_EPOCHS_FINAL} epochs. ")
+        + f"Last-10-epoch mean |Δloss| = {_metastatic_delta_mean:.5f}."
+        + _metastatic_conv_tag
     )
     html_metastatic += report.text(f"<b>Convergence QC</b>: {_metastatic_conv_msg}")
 
@@ -555,6 +618,18 @@ def phase1_train_models(report):
             html_metastatic += safe_plotly_html(report, fig_train, "Metastatic training metrics")
     except Exception as e:
         html_metastatic += error_html(f"Metastatic training metrics failed: {e}")
+
+    # W-A6: PCHA init comparison table (Metastatic)
+    html_metastatic += report.text("<b>PCHA init diagnostic (W-A6)</b>")
+    html_metastatic += report.df_to_html(
+        pd.DataFrame(_met_pcha_comparison_rows),
+        caption=(
+            "Comparison of final archetypal R² with PCHA initialization on vs off. "
+            "'fired' column reports whether the diagnostic flag confirms PCHA init "
+            "actually ran (True) or was skipped (False). If the two R² values differ "
+            "substantially, PCHA seeding is materially helping the fit."
+        ),
+    )
 
     # Benchmarking
     html_metastatic += report.text(f"<b>Benchmarking</b>: Metastatic model ({adata_metastatic.shape[0]} cells) — "
@@ -586,9 +661,9 @@ def phase1_train_models(report):
     pc.pp.prepare_training(adata_primary, batch_size=min(128, adata_primary.shape[0] // 4))
     cv_primary = pc.tl.hyperparameter_search(
         adata_primary,
-        n_archetypes_range=[4, 5, 6, 7, 8, 9],
+        n_archetypes_range=[2, 3, 4, 5, 6, 7, 8, 9],
         hidden_dims_options=[[64, 128], [128, 256]],
-        inflation_factor_range=[1.0],
+        inflation_factor_range=[0.5, 0.75, 1.0, 1.25, 1.5],
         cv_folds=3, max_epochs_cv=15, subsample_fraction=0.8,
     )
     ranked_primary = cv_primary.rank_by_metric("archetype_r2")
@@ -620,29 +695,33 @@ def phase1_train_models(report):
     log.info(f"Training Primary model: K={K_primary}, hidden={hd_primary}, max_epochs={MAX_EPOCHS_FINAL}...")
     res_primary = pc.tl.train_archetypal(
         adata_primary, n_archetypes=K_primary, n_epochs=MAX_EPOCHS_FINAL, hidden_dims=hd_primary,
-        kld_weight=0.09, archetypal_weight=1.0, inflation_factor=1.0,
+        kld_weight=0.15, archetypal_weight=1.0, inflation_factor=1.0,
         model_config={"manifold_weight": 0.001},
         early_stopping=True, early_stopping_patience=EARLY_STOP_PATIENCE,
     )
-    # --- Convergence QC (Primary) ---
+    # --- Convergence QC (Primary) --- W-A8: delegate to helper.
+    from _paper_part1_viz import convergence_status as _convergence_status
     _primary_tc = res_primary.get("training_config", {})
     _primary_actual = _primary_tc.get("actual_epochs", MAX_EPOCHS_FINAL)
     _primary_early = _primary_tc.get("early_stop_triggered", False)
     _primary_history = res_primary.get("history", {})
-    _primary_losses = _primary_history.get("loss", [])
-    if len(_primary_losses) >= 10:
-        _last10_hsc = _primary_losses[-10:]
-        _primary_delta_mean = float(np.mean(np.abs(np.diff(_last10_hsc))))
-    else:
-        _primary_delta_mean = float("nan")
-    _primary_hit_cap = _primary_actual >= MAX_EPOCHS_FINAL and not _primary_early
+    _primary_status, _primary_delta_mean = _convergence_status(
+        history=_primary_history,
+        max_epochs=MAX_EPOCHS_FINAL,
+        early_stop_triggered=_primary_early,
+        actual_epochs=_primary_actual,
+        window=10,
+        delta_threshold=0.01,
+    )
+    _primary_hit_cap = _primary_status == "NON_CONVERGED_HIT_CAP"
     log.info(
-        f"Primary convergence QC: actual_epochs={_primary_actual}, early_stop={_primary_early}, "
-        f"last-10-epoch mean |delta_loss|={_primary_delta_mean:.5f}, hit_cap={_primary_hit_cap}"
+        f"Primary convergence QC: status={_primary_status}, "
+        f"actual_epochs={_primary_actual}, early_stop={_primary_early}, "
+        f"last-10-epoch mean |delta_loss|={_primary_delta_mean:.5f}"
     )
     if _primary_hit_cap:
         log.warning(
-            f"Primary model hit the {MAX_EPOCHS_FINAL}-epoch cap without early stopping — "
+            f"Primary model hit the {MAX_EPOCHS_FINAL}-epoch cap with mean |Δloss| > 0.01 — "
             "may not be fully converged. Consider increasing MAX_EPOCHS_FINAL or inspecting the loss curve."
         )
     # Enrich training_config with model-level params for downstream metric display
@@ -652,9 +731,46 @@ def phase1_train_models(report):
         "inflation_factor": 1.0,
         "use_pcha_init": True,
     })
+
+    # W-A6: PCHA-off comparison run (Primary). Cloned adata so the downstream
+    # analyses keep using the PCHA-on fit — this is purely for the diagnostic
+    # table in the HTML report.
+    log.info("Primary PCHA-off comparison: training with pcha_init=False...")
+    try:
+        adata_primary_nopcha = adata_primary.copy()
+        pc.pp.prepare_training(adata_primary_nopcha, batch_size=min(128, adata_primary_nopcha.shape[0] // 4))
+        res_primary_nopcha = pc.tl.train_archetypal(
+            adata_primary_nopcha, n_archetypes=K_primary, n_epochs=MAX_EPOCHS_FINAL, hidden_dims=hd_primary,
+            kld_weight=0.15, archetypal_weight=1.0, inflation_factor=1.0,
+            model_config={"manifold_weight": 0.001},
+            early_stopping=True, early_stopping_patience=EARLY_STOP_PATIENCE,
+            pcha_init=False,
+        )
+        _r2_prim_on = res_primary.get("final_archetype_r2", float("nan"))
+        _r2_prim_off = res_primary_nopcha.get("final_archetype_r2", float("nan"))
+        _prim_pcha_fired = res_primary.get("pcha_init_fired", False)
+        log.info(
+            f"Primary PCHA init diagnostic: fired={_prim_pcha_fired}, "
+            f"R² PCHA-on={_r2_prim_on}, R² PCHA-off={_r2_prim_off}"
+        )
+        _prim_pcha_comparison_rows = [
+            {"pcha_init": "True",  "fired": str(_prim_pcha_fired),
+             "final R²": f"{_r2_prim_on:.4f}" if isinstance(_r2_prim_on, float) else str(_r2_prim_on)},
+            {"pcha_init": "False", "fired": str(res_primary_nopcha.get("pcha_init_fired", False)),
+             "final R²": f"{_r2_prim_off:.4f}" if isinstance(_r2_prim_off, float) else str(_r2_prim_off)},
+        ]
+    except Exception as _prim_pcha_exc:
+        log.warning(f"Primary PCHA-off comparison failed: {_prim_pcha_exc}")
+        _prim_pcha_comparison_rows = [
+            {"pcha_init": "True",  "fired": str(res_primary.get("pcha_init_fired", False)),
+             "final R²": f"{res_primary.get('final_archetype_r2', float('nan')):.4f}"},
+            {"pcha_init": "False", "fired": "comparison failed",
+             "final R²": f"ERROR: {_prim_pcha_exc}"},
+        ]
+
     pc.tl.archetypal_coordinates(adata_primary, verbose=False)
-    pc.tl.assign_archetypes(adata_primary, verbose=False)
     pc.tl.extract_archetype_weights(adata_primary, verbose=False)
+    pc.tl.assign_archetypes(adata_primary, verbose=False)
     r2_primary = res_primary.get("final_archetype_r2", "N/A")
     html_primary += metric_grid([
         metric_card(K_primary, "Primary K"), metric_card(f"{r2_primary:.4f}" if isinstance(r2_primary, float) else r2_primary, "Primary R2"),
@@ -666,14 +782,20 @@ def phase1_train_models(report):
         count_cards_primary = [metric_card(f"{v}", display_arch(k)) for k, v in arch_counts_primary.items()]
         html_primary += report.text("<b>Per-archetype cell counts (Primary)</b>:")
         html_primary += metric_grid(count_cards_primary)
-    # Convergence QC badge (Primary — phase 1 section)
+    # Convergence QC badge (Primary — phase 1 section) — W-A8: status
+    # driven by delta_loss.
+    if _primary_status == "CONVERGED":
+        _primary_conv_tag = " <b style='color:green'>[CONVERGED]</b>"
+    elif _primary_status == "NON_CONVERGED_HIT_CAP":
+        _primary_conv_tag = " <b style='color:orange'>[NON-CONVERGED: hit epoch cap, Δloss &gt; 0.01]</b>"
+    else:  # NOT_CONVERGED_INSUFFICIENT_HISTORY
+        _primary_conv_tag = " <b style='color:orange'>[INSUFFICIENT HISTORY]</b>"
     _primary_conv_msg = (
-        f"Early stopped at epoch {_primary_actual}/{MAX_EPOCHS_FINAL}. "
-        f"Last-10-epoch mean |Δloss| = {_primary_delta_mean:.5f}."
-        if _primary_early else
-        f"Ran {_primary_actual}/{MAX_EPOCHS_FINAL} epochs. "
-        f"Last-10-epoch mean |Δloss| = {_primary_delta_mean:.5f}."
-        + (" <b style='color:orange'>[NON-CONVERGED: hit epoch cap]</b>" if _primary_hit_cap else "")
+        (f"Early stopped at epoch {_primary_actual}/{MAX_EPOCHS_FINAL}. "
+         if _primary_early else
+         f"Ran {_primary_actual}/{MAX_EPOCHS_FINAL} epochs. ")
+        + f"Last-10-epoch mean |Δloss| = {_primary_delta_mean:.5f}."
+        + _primary_conv_tag
     )
     html_primary += report.text(f"<b>Convergence QC</b>: {_primary_conv_msg}")
 
@@ -683,6 +805,18 @@ def phase1_train_models(report):
             html_primary += safe_plotly_html(report, fig_train_primary, "Primary training metrics")
     except Exception as e:
         html_primary += error_html(f"Primary training metrics failed: {e}")
+
+    # W-A6: PCHA init comparison table (Primary)
+    html_primary += report.text("<b>PCHA init diagnostic (W-A6)</b>")
+    html_primary += report.df_to_html(
+        pd.DataFrame(_prim_pcha_comparison_rows),
+        caption=(
+            "Comparison of final archetypal R² with PCHA initialization on vs off. "
+            "'fired' column reports whether the diagnostic flag confirms PCHA init "
+            "actually ran (True) or was skipped (False). If the two R² values differ "
+            "substantially, PCHA seeding is materially helping the fit."
+        ),
+    )
 
     report.add_section("Primary Model (Supplemental)", html_primary, step_num="S1")
 
@@ -724,48 +858,45 @@ def phase2_figure1(adata_primary, adata_metastatic, res_primary, report):
         metric_card(str(_tc_primary.get("use_pcha_init", True)), "use_pcha_init"),
     ])
 
-    # --- Archetype-to-cell proximity diagnostic (Task 12) ---
-    # Addresses the concern that outlier removal causes archetypes to be learned at convex-hull
-    # extremes that are then depopulated, making the simplex an extrapolation of removed cells.
+    # W-B10: non-circular centroid-distance diagnostic.
     try:
-        _K_primary_prox = adata_primary.uns.get("archetype_coordinates", np.array([[]])).shape[0]
-        proximity = archetype_cell_proximity(adata_primary, k=5)
-        if proximity:
-            # Ratio: archetype median dist / overall median dist.  > 2.0 = likely extrapolated.
-            _prox_ratios = proximity["median_dist_per_archetype"] / proximity["median_dist_overall"]
-            html += report.text("<b>Archetype-to-cell proximity diagnostic</b>")
-            prox_df = pd.DataFrame({
-                "Archetype": [f"A{i+1}" for i in range(_K_primary_prox)],
-                "Median dist to 5 nearest cells": [f"{v:.4f}" for v in proximity["median_dist_per_archetype"]],
-                "Max dist to 5 nearest cells": [f"{v:.4f}" for v in proximity["max_dist_per_archetype"]],
-                "Proximity ratio (vs overall)": [f"{r:.3f}" for r in _prox_ratios],
-            })
-            html += report.df_to_html(
-                prox_df,
-                caption=(
-                    f"Overall median cell-to-cell 5-NN distance = {proximity['median_dist_overall']:.4f}. "
-                    "Proximity ratio > 2.0 may indicate archetype is extrapolated / sits in sparse region "
-                    "vacated by outlier removal."
-                ),
+        from _paper_part1_viz import compute_archetype_to_centroid_distance
+        _cd_df = compute_archetype_to_centroid_distance(
+            adata_primary, obs_key="archetypes", pca_key="X_pca",
+        )
+        html += report.text("<b>Archetype-to-cell centroid distance (W-B10)</b>")
+        _display_cd = _cd_df.copy()
+        for _col in [
+            "archetype_position_norm", "centroid_distance",
+            "data_mean_distance", "bin_radius", "extrapolation_ratio",
+        ]:
+            _display_cd[_col] = _display_cd[_col].apply(
+                lambda x: "NaN" if pd.isna(x) else f"{x:.4f}"
             )
-            _sparse_arch = [i for i, r in enumerate(_prox_ratios) if r > 2.0]
-            if _sparse_arch:
-                _sparse_labels = [f"A{i+1}" for i in _sparse_arch]
-                html += report.text(
-                    f"<b style='color:orange'>Warning</b>: Primary archetypes {_sparse_labels} have proximity "
-                    "ratio > 2x global median — may be extrapolated from outlier removal."
-                )
-                log.warning(
-                    f"Primary archetypes {_sparse_arch} have proximity ratio > 2x global median — "
-                    "may be extrapolated from outlier removal."
-                )
-            else:
-                html += report.text("All archetypes within 2x proximity ratio — no extrapolation concern.")
-        else:
-            html += report.text("Proximity diagnostic: archetype_coordinates or X_pca not found, skipped.")
-    except Exception as _prox_exc:
-        log.warning(f"Archetype-to-cell proximity diagnostic failed: {_prox_exc}")
-        html += report.text(f"Proximity diagnostic failed: {_prox_exc}")
+        html += report.df_to_html(
+            _display_cd,
+            caption=(
+                "L2 distance from each archetype position to the centroid "
+                "of cells binned to it, with bin_radius as the cell-cloud "
+                "scale. extrapolation_ratio = centroid_distance / bin_radius; "
+                "values >> 1 indicate the archetype sits outside its own "
+                "cell cloud."
+            ),
+        )
+        _extrap_mask = _cd_df["extrapolation_ratio"] > 2.0
+        _extrap_labels = _cd_df.loc[_extrap_mask, "archetype_label"].tolist()
+        if _extrap_labels:
+            html += report.text(
+                f"<b style='color:orange'>Warning</b>: archetypes "
+                f"{_extrap_labels} have extrapolation_ratio > 2 — they "
+                "sit well outside their own binned cell cloud."
+            )
+            log.warning(
+                f"Primary archetypes {_extrap_labels} have extrapolation_ratio > 2"
+            )
+    except Exception as _cd_exc:
+        log.warning(f"Centroid distance diagnostic failed: {_cd_exc}")
+        html += report.text(f"Centroid distance diagnostic failed: {_cd_exc}")
 
     try:
         # PEACH 3D archetypal space colored by archetype assignment
@@ -792,8 +923,8 @@ def phase2_figure1(adata_primary, adata_metastatic, res_primary, report):
         adata_primary_holdout.uns["trained_model"] = adata_primary.uns["trained_model"]
         adata_primary_holdout.uns["archetype_coordinates"] = adata_primary.uns["archetype_coordinates"]
         pc.tl.archetypal_coordinates(adata_primary_holdout, verbose=False)
-        pc.tl.assign_archetypes(adata_primary_holdout, verbose=False)
         pc.tl.extract_archetype_weights(adata_primary_holdout, verbose=False)
+        pc.tl.assign_archetypes(adata_primary_holdout, verbose=False)
 
         # --- Build concatenated adata for archetypal_space plot ---
         # Both adata_primary and adata_primary_holdout must share archetype coordinates and weights
@@ -909,8 +1040,8 @@ def phase2_figure1(adata_primary, adata_metastatic, res_primary, report):
         adata_metastatic_copy.uns["trained_model"] = adata_primary.uns["trained_model"]
         adata_metastatic_copy.uns["archetype_coordinates"] = adata_primary.uns["archetype_coordinates"]
         pc.tl.archetypal_coordinates(adata_metastatic_copy, verbose=False)
-        pc.tl.assign_archetypes(adata_metastatic_copy, verbose=False)
         pc.tl.extract_archetype_weights(adata_metastatic_copy, verbose=False)
+        pc.tl.assign_archetypes(adata_metastatic_copy, verbose=False)
 
         weights_cmp_via_hsc = adata_metastatic_copy.obsm.get("cell_archetype_weights")
         if weights_cmp_via_hsc is not None and weights_train is not None:
@@ -942,6 +1073,53 @@ def phase2_figure1(adata_primary, adata_metastatic, res_primary, report):
                                  "p-value": fmt_pval(pval), "p-Bonf": fmt_pval(pval_bonf)})
             html += report.df_to_html(pd.DataFrame(deg_rows),
                 caption="Degradation KS (all K): Primary native vs Metastatic projected — expect LARGE differences")
+
+            # W-B12: cross-model R² for the Metastatic-through-Primary
+            # projection. Reports how well the Primary archetypes describe
+            # Metastatic cell structure. Large drop from Primary-native R²
+            # to Metastatic-via-Primary R² is the real degradation signal.
+            try:
+                from _paper_part1_viz import compute_cross_model_r2
+                primary_archetypes = np.asarray(
+                    adata_primary.uns["archetype_coordinates"]
+                )
+                metastatic_coords = np.asarray(
+                    adata_metastatic_copy.obsm["X_pca"]
+                )
+                met_r2_via_primary = compute_cross_model_r2(
+                    weights_cmp_via_hsc,  # legacy variable name, is now Metastatic weights
+                    primary_archetypes,
+                    metastatic_coords,
+                )
+                primary_native_r2 = float(
+                    res_primary.get("final_archetype_r2", float("nan"))
+                )
+                r2_drop = (
+                    primary_native_r2 - met_r2_via_primary
+                    if not (
+                        np.isnan(primary_native_r2)
+                        or np.isnan(met_r2_via_primary)
+                    )
+                    else float("nan")
+                )
+                html += report.text(
+                    f"<b>Cross-model R²</b>: Primary-native "
+                    f"R² = {primary_native_r2:.4f} vs "
+                    f"Metastatic-projected-through-Primary "
+                    f"R² = {met_r2_via_primary:.4f} "
+                    f"(drop = {r2_drop:.4f}). Large drop = Primary "
+                    "archetypes do NOT describe Metastatic structure."
+                )
+                log.info(
+                    f"Degradation R²: Primary native={primary_native_r2:.4f}, "
+                    f"Metastatic via Primary={met_r2_via_primary:.4f}, "
+                    f"drop={r2_drop:.4f}"
+                )
+            except Exception as _r2_exc:
+                log.warning(f"Cross-model R² computation failed: {_r2_exc}")
+                html += report.text(
+                    f"Cross-model R² computation failed: {_r2_exc}"
+                )
     except Exception as e:
         log.exception("Fig 1B / degradation test failed")
         html += error_html(f"Fig 1B / degradation test failed: {e}")
@@ -987,10 +1165,12 @@ def phase2_figure1(adata_primary, adata_metastatic, res_primary, report):
         r2_vals = reg_result.get("r_squared_degree1", reg_result.get("r_squared", []))
         if len(r2_vals) > 0:
             r2_arr = np.asarray(r2_vals)
+            # W-B15: break out high-confidence R² > 0.5 tier.
             html += metric_grid([
                 metric_card(f"{len(r2_arr)}", "Features tested"),
                 metric_card(f"{(r2_arr > 0.05).sum()}", "R² > 0.05"),
                 metric_card(f"{(r2_arr > 0.10).sum()}", "R² > 0.10"),
+                metric_card(f"{(r2_arr > 0.50).sum()}", "R² > 0.50"),
                 metric_card(f"{np.median(r2_arr):.4f}", "Median R²"),
                 metric_card(f"{np.max(r2_arr):.4f}", "Max R²"),
             ])
@@ -1148,8 +1328,8 @@ def phase2_figure1(adata_primary, adata_metastatic, res_primary, report):
         adata_metastatic_hold.uns["trained_model"] = adata_metastatic.uns["trained_model"]
         adata_metastatic_hold.uns["archetype_coordinates"] = adata_metastatic.uns["archetype_coordinates"]
         pc.tl.archetypal_coordinates(adata_metastatic_hold, verbose=False)
-        pc.tl.assign_archetypes(adata_metastatic_hold, verbose=False)
         pc.tl.extract_archetype_weights(adata_metastatic_hold, verbose=False)
+        pc.tl.assign_archetypes(adata_metastatic_hold, verbose=False)
 
         # Concat train+holdout for PEACH archetypal_space plot
         try:
@@ -1279,10 +1459,12 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
     feature_names_reg = reg_result.get("feature_names", adata_primary.uns.get("_hvg5k_names", []))
     if len(r2_vals) > 0:
         r2_arr = np.asarray(r2_vals)
+        # W-B15: break out high-confidence R² > 0.5 tier.
         html_reg += metric_grid([
             metric_card(f"{len(r2_arr)}", "Features tested"),
             metric_card(f"{(r2_arr > 0.05).sum()}", "R² > 0.05"),
             metric_card(f"{(r2_arr > 0.10).sum()}", "R² > 0.10"),
+            metric_card(f"{(r2_arr > 0.50).sum()}", "R² > 0.50"),
             metric_card(f"{np.median(r2_arr):.4f}", "Median R²"),
             metric_card(f"{np.max(r2_arr):.4f}", "Max R²"),
         ])
@@ -1310,107 +1492,270 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
             f"Method: 200 permutations shuffling archetype weights (p resolution 1/201 ≈ 0.005), "
             f"tests whether per-feature R² exceeds shuffled-weight null.")
 
-    # --- Fig 2A: Primary simplex regression dotplot (exclusive, degree 1) ---
+    # --- Fig 2A: Primary simplex regression — three per-degree dotplots + nesting table + UpSet (W-B16) ---
+    # Replaces the old single ΔR² dotplot. Layout:
+    #   1. Degree-1 dotplot: top genes per archetype ranked by r_squared_degree1
+    #      (vertex FDR<0.05 filter, exclusive flag for interpretability).
+    #   2. Degree-2 dotplot: top genes per archetype ranked by r_squared_degree2
+    #      (degree_comparison incremental F-test FDR<0.05 filter).
+    #   3. Degree-3 dotplot: top genes per archetype ranked by r_squared_degree3
+    #      from degree_comparison["degree_3"] (requires K-1 >= 3).
+    #   4. Nesting table: per-feature deg1/deg2/deg3 R² + which degrees it was
+    #      significant in ("appears_in_deg" column, sorted descending 3→2→1).
+    #   5. UpSet plot on per-degree significant-feature sets (top 100 per set).
     try:
-        html_reg += "<h3>Fig 2A: Primary simplex regression</h3>"
-        log.info("Building Primary simplex regression long-format dataframe...")
-        primary_long = regression_to_long_df(
+        html_reg += "<h3>Fig 2A: Primary simplex regression (per-degree panels)</h3>"
+        html_reg += report.text(
+            "<b>Panel interpretation</b>: Degree-1 = pure archetype main effects (archetypes "
+            "act independently). Degree-2 = pairwise archetype interactions (features enriched "
+            "in blending zones). Degree-3 = triple interactions (requires K-1 ≥ 3). Each "
+            "dotplot shows the top 10 genes per archetype ranked by that degree's R² after "
+            "FDR<0.05 filtering. The nesting table then shows which degrees each top feature "
+            "appeared in, and the UpSet plot visualises the overlap across the three degree "
+            "signature sets.")
+
+        # Gather the three degree-specific long-format dataframes.
+        log.info("Fig 2A: building per-degree long-format dataframes...")
+        primary_long_d1 = regression_to_long_df(
             reg_result, y_col="gene", exclusive_only=True,
-            exclusive_threshold=1.5, top_n_per_archetype=10, fdr_threshold=0.05)
-        log.info(f"  Primary long df rows: {len(primary_long)}, unique genes: "
-                 f"{primary_long['gene'].nunique() if len(primary_long) else 0}")
-        if len(primary_long) > 0:
+            exclusive_threshold=1.5, top_n_per_archetype=10, fdr_threshold=0.05,
+            degree=1)
+        primary_long_d2 = regression_to_long_df(
+            reg_result, y_col="gene", exclusive_only=False,
+            top_n_per_archetype=10, fdr_threshold=0.05, degree=2)
+        try:
+            primary_long_d3 = regression_to_long_df(
+                reg_result, y_col="gene", exclusive_only=False,
+                top_n_per_archetype=10, fdr_threshold=0.05, degree=3)
+        except Exception:
+            primary_long_d3 = pd.DataFrame()
+        log.info(f"  deg1 rows={len(primary_long_d1)}, deg2 rows={len(primary_long_d2)}, "
+                 f"deg3 rows={len(primary_long_d3)}")
+
+        # Panel 1: degree-1 dotplot
+        if len(primary_long_d1) > 0:
             fig_d1 = pc.pl.dotplot(
-                primary_long, x_col="archetype", y_col="gene",
+                primary_long_d1, x_col="archetype", y_col="gene",
                 size_col="mean_archetype", color_col="pvalue",
                 top_n_per_group=10,
-                title="Primary SIMPLEX REGRESSION (degree 1, exclusive ≥1.5x, FDR<0.05)")
+                title="Primary SIMPLEX REGRESSION degree 1 (exclusive ≥1.5x, vertex FDR<0.05)")
             html_reg += report.fig_to_img(fig_d1,
-                caption=f"Primary simplex regression: top 10 exclusive genes per archetype "
-                        f"(Scheffé polynomial, HC3 robust SE, {primary_long['gene'].nunique()} unique genes)")
+                caption=f"Degree-1 panel: top 10 genes per archetype ranked by "
+                        f"r_squared_degree1. Dot size = |vertex main-effect coef|; "
+                        f"colour = vertex FDR. {primary_long_d1['gene'].nunique()} unique genes.")
             plt.close("all")
+        else:
+            html_reg += report.text(
+                "Degree-1 panel: no features pass exclusive ≥1.5x + vertex FDR<0.05.")
 
-        # --- Degree-1 / degree-2 / degree-3 side-by-side comparison (Task 15) ---
-        # Degree-1: pure archetype main effects (vertex betas from Scheffé degree-1 design).
-        # Degree-2: adds pairwise interaction terms; features ranked by ΔR²(d2−d1) showing
-        #           which genes gain the most by modelling archetype blending.
-        # Degree-3+: incremental R² gains from higher-order terms; vertex coefs are not
-        #             separately extracted — shown as a gain table from comprehensive_degree.
-        html_reg += "<h4>Fig 2A comparison: degree-1 vs degree-2 vs degree-3 feature sets</h4>"
-        html_reg += report.text(
-            "<b>Panel interpretation</b>: Degree-1 = pure archetype main effects (archetypes act "
-            "independently). Degree-2 = pairwise archetype interactions (enriched in mixed states). "
-            "Degree-3 = triple interactions (incremental R² gain shown; vertex coefs not separately "
-            "fitted here — requires K≥4 for non-trivial gains). Each panel uses the same 5000 HVGs.")
+        # Panel 2: degree-2 dotplot
+        if len(primary_long_d2) > 0:
+            fig_d2 = pc.pl.dotplot(
+                primary_long_d2, x_col="archetype", y_col="gene",
+                size_col="mean_archetype", color_col="pvalue",
+                top_n_per_group=10,
+                title="Primary SIMPLEX REGRESSION degree 2 (incremental FDR<0.05)")
+            html_reg += report.fig_to_img(fig_d2,
+                caption=f"Degree-2 panel: top 10 genes per archetype ranked by "
+                        f"r_squared_degree2. Dot size = |vertex main-effect coef| from the "
+                        f"degree-1 fit (for per-archetype assignment); colour = incremental "
+                        f"F-test FDR for the degree-2 model. "
+                        f"{primary_long_d2['gene'].nunique()} unique genes.")
+            plt.close("all")
+        else:
+            html_reg += report.text(
+                "Degree-2 panel: no features with incremental F-test FDR<0.05.")
 
-        # Degree-2 dotplot: rank features by ΔR² = r2_d2 - r2_d1, show top N per archetype.
+        # Panel 3: degree-3 dotplot
+        if len(primary_long_d3) > 0:
+            fig_d3 = pc.pl.dotplot(
+                primary_long_d3, x_col="archetype", y_col="gene",
+                size_col="mean_archetype", color_col="pvalue",
+                top_n_per_group=10,
+                title="Primary SIMPLEX REGRESSION degree 3 (incremental FDR<0.05)")
+            html_reg += report.fig_to_img(fig_d3,
+                caption=f"Degree-3 panel: top 10 genes per archetype ranked by "
+                        f"r_squared_degree3 (from comprehensive degree comparison). "
+                        f"Dot size = |vertex main-effect coef|; colour = incremental "
+                        f"F-test FDR for the degree-3 model. "
+                        f"{primary_long_d3['gene'].nunique()} unique genes.")
+            plt.close("all")
+        else:
+            html_reg += report.text(
+                "Degree-3 panel: no features with incremental F-test FDR<0.05 (requires "
+                "K-1 ≥ 3 and comprehensive_degree=True).")
+
+        # ---- Nesting table + UpSet: signature sets per degree ----
+        # For each degree, extract the "significant feature set" (by that degree's
+        # significance criterion). Then:
+        #  - nesting table: sorted descending by degree-of-first-appearance
+        #    (3 → 2 → 1), listing deg1/deg2/deg3 R² values and appears_in_deg.
+        #  - UpSet plot: cross-degree overlap.
         try:
-            r2_d1 = np.asarray(reg_result.get("r_squared_degree1", []))
-            r2_d2 = np.asarray(reg_result.get("r_squared_degree2", []))
-            if r2_d2.size > 0 and r2_d1.size == r2_d2.size:
-                delta_r2 = r2_d2 - r2_d1
-                # Build long-df with delta_r2 as sorting key but same vertex coefs for visual
-                # (vertex coefs from degree-1 model remain the main-effect interpretable part)
-                feat_names_reg = list(reg_result.get("feature_names", []))
-                coefs_d1 = np.asarray(reg_result.get("vertex_coefficients", []))
-                fdrs_d1 = np.asarray(reg_result.get("vertex_pvalues_fdr", []))
-                n_feat_d2 = coefs_d1.shape[0] if coefs_d1.ndim == 2 else 0
-                K_d = coefs_d1.shape[1] if coefs_d1.ndim == 2 else 0
-                if n_feat_d2 > 0 and K_d > 0:
-                    # Filter to features with meaningful interaction gain (ΔR² > 0.01)
-                    gain_mask = delta_r2 > 0.01
-                    log.info(f"  Degree-2 gain: {gain_mask.sum()} features with ΔR²>0.01")
-                    rows_d2 = []
-                    for fi in range(n_feat_d2):
-                        if not gain_mask[fi]:
-                            continue
-                        am = int(np.argmax(np.abs(coefs_d1[fi])))
-                        for a in range(K_d):
-                            fdr_v = float(fdrs_d1[fi, a]) if fdrs_d1.size else 1.0
-                            if fdr_v > 0.05:
-                                continue
-                            rows_d2.append({
-                                "gene": feat_names_reg[fi],
-                                "archetype": f"archetype_{a}",
-                                "mean_archetype": float(np.abs(coefs_d1[fi, a])),
-                                "pvalue": fdr_v,
-                                "pvalue_fdr": fdr_v,
-                                "r_squared": float(delta_r2[fi]),   # rank by ΔR²
-                                "argmax_archetype": am,
-                            })
-                    df_d2 = pd.DataFrame(rows_d2) if rows_d2 else pd.DataFrame()
-                    # Trim to top 10 per archetype by ΔR²
-                    if not df_d2.empty:
-                        keep_d2 = np.zeros(len(df_d2), dtype=bool)
-                        for a in range(K_d):
-                            is_am = df_d2["argmax_archetype"] == a
-                            if is_am.any():
-                                top_feats_d2 = (df_d2[is_am]
-                                                .drop_duplicates(subset=["gene"])
-                                                .nlargest(10, "r_squared")["gene"].values)
-                                keep_d2 |= df_d2["gene"].isin(top_feats_d2)
-                        df_d2 = df_d2[keep_d2].reset_index(drop=True)
-                    if len(df_d2) > 0:
-                        fig_d2 = pc.pl.dotplot(
-                            df_d2, x_col="archetype", y_col="gene",
-                            size_col="mean_archetype", color_col="pvalue",
-                            top_n_per_group=10,
-                            title="Primary degree-2 interaction gain (ΔR²>0.01, vertex main effects shown)")
-                        html_reg += report.fig_to_img(fig_d2,
-                            caption="Degree-2 panel: top 10 genes per archetype ranked by ΔR² (degree-2 "
-                                    "minus degree-1 R²). Dot size = |vertex main-effect coef|; colour = "
-                                    "vertex FDR q. These genes are most enriched in archetype blending zones.")
-                        plt.close("all")
-                    else:
-                        html_reg += report.text(
-                            "Degree-2 panel: no features with ΔR²>0.01 and vertex FDR<0.05.")
+            feat_names_nst = list(reg_result.get("feature_names", []))
+            r2_d1_arr = np.asarray(reg_result.get("r_squared_degree1", []))
+            r2_d2_arr = np.asarray(reg_result.get("r_squared_degree2", []))
+            if r2_d2_arr.size == 0:
+                _dc_tmp = reg_result.get("degree_comparison", {}) or {}
+                r2_d2_arr = np.asarray((_dc_tmp.get("degree_2", {}) or {}).get("r_squared", []))
+            _dc_nst = reg_result.get("degree_comparison", {}) or {}
+            _d3_nst = _dc_nst.get("degree_3", {}) or {}
+            r2_d3_arr = np.asarray(_d3_nst.get("r_squared", []))
+            # Significance masks
+            # deg1 significant = any archetype vertex FDR < 0.05
+            _v_fdr = np.asarray(reg_result.get("vertex_pvalues_fdr", []))
+            if _v_fdr.ndim == 2 and _v_fdr.size > 0:
+                sig_d1_mask = np.any(_v_fdr < 0.05, axis=1)
             else:
-                html_reg += report.text("Degree-2 panel skipped: r_squared_degree2 not available.")
-        except Exception as e:
-            log.exception("Degree-2 side-by-side panel failed")
-            html_reg += error_html(f"Degree-2 side-by-side panel failed: {e}")
+                sig_d1_mask = np.zeros(len(feat_names_nst), dtype=bool)
+            # deg2 significant = incremental F-test FDR < 0.05
+            _d2_fdr = np.asarray((_dc_nst.get("degree_2", {}) or {}).get("incremental_p_fdr", []))
+            if _d2_fdr.size > 0:
+                sig_d2_mask = _d2_fdr < 0.05
+            else:
+                sig_d2_mask = np.zeros(len(feat_names_nst), dtype=bool)
+            # deg3 significant = incremental F-test FDR < 0.05
+            _d3_fdr = np.asarray(_d3_nst.get("incremental_p_fdr", []))
+            if _d3_fdr.size > 0:
+                sig_d3_mask = _d3_fdr < 0.05
+            else:
+                sig_d3_mask = np.zeros(len(feat_names_nst), dtype=bool)
+            log.info(
+                f"  Nesting masks: deg1 sig={int(sig_d1_mask.sum())}, "
+                f"deg2 sig={int(sig_d2_mask.sum())}, deg3 sig={int(sig_d3_mask.sum())}"
+            )
 
-        # Degree-3+ incremental gains table (from comprehensive_degree comparison).
+            # Build signature sets per degree, capped at top-100 by that
+            # degree's R² (descending) — W-B18-style cap for UpSet readability.
+            _UPSET_CAP = 100
+            def _top_sig(mask, r2_arr, cap):
+                if mask.sum() == 0 or r2_arr.size == 0:
+                    return []
+                idx = np.where(mask)[0]
+                valid_idx = idx[idx < r2_arr.size]
+                if valid_idx.size == 0:
+                    return []
+                ranked = valid_idx[np.argsort(r2_arr[valid_idx])[::-1]]
+                return [feat_names_nst[i] for i in ranked[:cap] if i < len(feat_names_nst)]
+
+            top_d1 = _top_sig(sig_d1_mask, r2_d1_arr, _UPSET_CAP)
+            top_d2 = _top_sig(sig_d2_mask, r2_d2_arr, _UPSET_CAP)
+            top_d3 = _top_sig(sig_d3_mask, r2_d3_arr, _UPSET_CAP)
+            set_d1 = set(top_d1)
+            set_d2 = set(top_d2)
+            set_d3 = set(top_d3)
+
+            # Nesting table: union of the three top-100 sets, per-feature
+            # deg1/deg2/deg3 R² + appears_in_deg (e.g. "3,2,1"), sorted
+            # descending by the earliest degree it appears in.
+            union = set_d1 | set_d2 | set_d3
+            if union:
+                _name_to_idx = {n: i for i, n in enumerate(feat_names_nst)}
+                nesting_rows = []
+                for fname in union:
+                    fi = _name_to_idx.get(fname)
+                    if fi is None:
+                        continue
+                    in_d1 = fname in set_d1
+                    in_d2 = fname in set_d2
+                    in_d3 = fname in set_d3
+                    degs_in = []
+                    if in_d3:
+                        degs_in.append("3")
+                    if in_d2:
+                        degs_in.append("2")
+                    if in_d1:
+                        degs_in.append("1")
+                    if in_d3:
+                        first_deg_sort = 0
+                    elif in_d2:
+                        first_deg_sort = 1
+                    else:
+                        first_deg_sort = 2
+                    nesting_rows.append({
+                        "feature_name": fname,
+                        "deg1_R²": f"{float(r2_d1_arr[fi]):.4f}"
+                            if fi < r2_d1_arr.size else "-",
+                        "deg2_R²": f"{float(r2_d2_arr[fi]):.4f}"
+                            if fi < r2_d2_arr.size else "-",
+                        "deg3_R²": f"{float(r2_d3_arr[fi]):.4f}"
+                            if fi < r2_d3_arr.size else "-",
+                        "appears_in_deg": ",".join(degs_in) if degs_in else "-",
+                        "notes": (
+                            "nested through all three degrees"
+                            if len(degs_in) == 3
+                            else ("first appears at degree " + degs_in[0]
+                                  if degs_in else "-")
+                        ),
+                        "_first_deg_sort": first_deg_sort,
+                        "_deg3_r2_val": float(r2_d3_arr[fi])
+                            if fi < r2_d3_arr.size else -np.inf,
+                    })
+                nesting_df = pd.DataFrame(nesting_rows)
+                if not nesting_df.empty:
+                    nesting_df = nesting_df.sort_values(
+                        ["_first_deg_sort", "_deg3_r2_val"],
+                        ascending=[True, False],
+                    ).drop(columns=["_first_deg_sort", "_deg3_r2_val"])
+                    _MAX_NESTING_ROWS = 60
+                    nesting_display = nesting_df.head(_MAX_NESTING_ROWS)
+                    html_reg += report.df_to_html(
+                        nesting_display,
+                        caption=(
+                            f"Fig 2A nesting table: per-feature R² at degrees 1/2/3 with "
+                            f"appears_in_deg column showing which polynomial degrees the "
+                            f"feature appeared significant in (top-100 per degree by R²). "
+                            f"Sorted descending by degree-of-first-appearance (3→2→1). "
+                            f"Showing {min(len(nesting_df), _MAX_NESTING_ROWS)} of "
+                            f"{len(nesting_df)} union features."
+                        ),
+                    )
+            else:
+                html_reg += report.text(
+                    "Fig 2A nesting table: no significant features at any degree.")
+
+            # UpSet on the three degree signature sets (top-100 cap already applied).
+            try:
+                from upsetplot import from_contents, UpSet
+                import matplotlib.pyplot as _plt_upset_fig2a
+                _fig2a_sets = {
+                    "deg1_sig_features": set_d1,
+                    "deg2_sig_features": set_d2,
+                    "deg3_sig_features": set_d3,
+                }
+                _n_nonempty = sum(1 for s in _fig2a_sets.values() if len(s) > 0)
+                if _n_nonempty >= 2:
+                    _upset_fig2a_data = from_contents(_fig2a_sets)
+                    _fig_upset_fig2a = _plt_upset_fig2a.figure(figsize=(10, 5))
+                    UpSet(_upset_fig2a_data, show_counts=True,
+                          sort_by="cardinality", min_subset_size=1
+                          ).plot(fig=_fig_upset_fig2a)
+                    _fig_upset_fig2a.suptitle(
+                        "Fig 2A: cross-degree feature overlap (UpSet, top-100 per degree)",
+                        fontsize=12, y=1.01)
+                    html_reg += report.fig_to_img(
+                        _fig_upset_fig2a,
+                        caption=(
+                            f"UpSet plot: overlap between the top-100 significant features at "
+                            f"degrees 1, 2, and 3. Set sizes: "
+                            f"deg1={len(set_d1)}, deg2={len(set_d2)}, deg3={len(set_d3)}. "
+                            f"Each bar = count of features appearing in that exact combination "
+                            f"of degree sets."
+                        ),
+                    )
+                    _plt_upset_fig2a.close("all")
+                else:
+                    html_reg += report.text(
+                        f"Fig 2A UpSet skipped: only {_n_nonempty} of 3 degree sets non-empty."
+                    )
+            except Exception as e:
+                log.exception("Fig 2A UpSet plot failed")
+                html_reg += error_html(f"Fig 2A UpSet plot failed: {e}")
+        except Exception as e:
+            log.exception("Fig 2A nesting table / UpSet failed")
+            html_reg += error_html(f"Fig 2A nesting table / UpSet failed: {e}")
+
+        # Comprehensive degree comparison summary table (kept from prior revision for context).
         try:
             deg_comp = reg_result.get("degree_comparison") or gene_reg.get("degree_comparison", {})
             if deg_comp:
@@ -1420,21 +1765,19 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                     comp_rows.append({
                         "Degree": deg_key,
                         "Mean R²": f"{np.mean(d['r_squared']):.4f}",
-                        "Mean ΔR²": f"{np.mean(d['delta_r2']):.4f}",
-                        "Max ΔR²": f"{np.max(d['delta_r2']):.4f}",
+                        "Mean dR2": f"{np.mean(d['delta_r2']):.4f}",
+                        "Max dR2": f"{np.max(d['delta_r2']):.4f}",
                         "Features with incr. FDR<0.05": str(d.get("significant_features", "?")),
                         "Extra params": str(d.get("n_params", "?")),
                     })
                 if comp_rows:
                     html_reg += report.df_to_html(pd.DataFrame(comp_rows),
                         caption="Comprehensive degree comparison: incremental R² gains from adding "
-                                "higher-order interaction terms. Degree-3 = triple archetype interactions. "
-                                "Each row shows mean/max gain over all 5K tested genes.")
-            else:
-                html_reg += report.text("Degree-3 table: comprehensive_degree comparison not available.")
+                                "higher-order interaction terms. Each row shows mean/max gain over "
+                                "all 5K tested genes.")
         except Exception as e:
-            log.exception("Degree-3 comprehensive comparison table failed")
-            html_reg += error_html(f"Degree-3 comprehensive comparison table failed: {e}")
+            log.exception("Degree comparison summary table failed")
+            html_reg += error_html(f"Degree comparison summary table failed: {e}")
 
         # Interaction heatmap (degree 2)
         try:
@@ -1503,7 +1846,24 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                         "transition": pair_info.get("transition", ""),
                     })
 
-            # Build dotplots for each interaction sub-type that has ≥ 1 entry
+            # Build dotplots for each interaction sub-type that has ≥ 1 entry.
+            #
+            # W-B17 FIX: the previous implementation called
+            #     pc.pl.dotplot(sub_long_filtered, x_col="archetype", ...)
+            # which plotted MAIN-EFFECT vertex coefficients. Because those
+            # coefficients are the same numbers used by the Fig 2A exclusive
+            # dotplot (just filtered to a different gene list), the sub-type
+            # dotplots visually collapsed into "the same dotplot as Fig 2A"
+            # (round-9 review finding).
+            #
+            # The correct visualization for tradeoff / cooperative /
+            # transition-enriched / gradient patterns is to group by the
+            # archetype PAIR (j, k), not a single archetype, because each
+            # row in interaction_detail refers to the interaction between
+            # exactly one pair. We build a per-sub-type DataFrame with one
+            # row per (feature, pair) and pass it to pc.pl.pattern_dotplot,
+            # which reads the `pattern_code` column as its X-axis (pairs)
+            # and `gene` as its Y-axis (features).
             for sub_type in ["tradeoff", "cooperative", "transition-enriched", "gradient"]:
                 entries = interaction_subtypes.get(sub_type, [])
                 html_reg += f"<h5>Pattern sub-type: {sub_type} ({len(entries)} feature-pair instances)</h5>"
@@ -1519,32 +1879,75 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                     caption=f"Top 20 {sub_type} feature-pair instances (sorted by |gamma|). "
                             f"gamma = interaction coefficient; beta_j/beta_k = main effects "
                             f"for the two archetypes in the pair.")
-                # Build dotplot for this sub-type: use the long-df of degree-2 interaction features
-                # limited to features in this sub-type's set
-                sub_feat_names = list(df_sub["feature"].unique())
-                sub_long = regression_to_long_df(
-                    reg_result, y_col="gene", exclusive_only=False,
-                    exclusive_threshold=1.0, top_n_per_archetype=50, fdr_threshold=0.05)
-                if not sub_long.empty and len(sub_feat_names) > 0:
-                    sub_long_filtered = sub_long[sub_long["gene"].isin(sub_feat_names)]
-                    if len(sub_long_filtered) > 0:
-                        try:
-                            fig_sub = pc.pl.dotplot(
-                                sub_long_filtered, x_col="archetype", y_col="gene",
-                                size_col="mean_archetype", color_col="pvalue",
-                                top_n_per_group=10,
-                                title=f"Primary {sub_type} pattern genes (top 10 per archetype)")
-                            html_reg += report.fig_to_img(fig_sub,
-                                caption=f"{sub_type.capitalize()} pattern dotplot: "
-                                        f"{len(sub_long_filtered['gene'].unique())} unique genes. "
-                                        f"Dot size = |vertex main-effect coef|, colour = vertex FDR q.")
-                            plt.close("all")
-                        except Exception as e:
-                            html_reg += error_html(f"{sub_type} dotplot failed: {e}")
-                    else:
-                        html_reg += report.text(
-                            f"  {sub_type}: features found in interaction_detail but none "
-                            f"passed vertex FDR<0.05 filter for dotplot.")
+
+                # ---- Pair-based dotplot ----
+                # pc.pl.pattern_dotplot expects a DataFrame with columns:
+                #   - gene  (or pathway / feature)    → Y-axis
+                #   - pattern_code                    → X-axis (archetype pair)
+                #   - log_fold_change / mean_diff     → dot size  (effect)
+                #   - pvalue                          → dot colour (-log10 p)
+                # We synthesize this from the interaction_detail entries.
+                # `pair` is stored as a stringified tuple "(j, k)" — format
+                # it as "A{j+1}_A{k+1}" to match Fig 2E/F pair notation
+                # (1-indexed archetype labels).
+                def _fmt_pair(pair_str):
+                    """Parse '(j, k)' -> 'A{j+1}_A{k+1}'. Fallback: raw string."""
+                    try:
+                        import ast as _ast
+                        j, k = _ast.literal_eval(pair_str)
+                        return f"A{int(j)+1}_A{int(k)+1}"
+                    except Exception:
+                        return str(pair_str)
+
+                plot_rows = []
+                for row in df_sub.to_dict("records"):
+                    gamma_val = float(row.get("gamma", 0.0))
+                    plot_rows.append({
+                        "gene": row.get("feature", "?"),
+                        "pattern_code": _fmt_pair(row.get("pair", "")),
+                        "log_fold_change": gamma_val,
+                        "mean_diff": gamma_val,
+                        # The interaction_detail entries have already been
+                        # filtered on FDR (significant only) by
+                        # classify_feature_patterns, so p-values are known
+                        # to be < 0.05. Use a nominal low value so
+                        # pattern_dotplot's default max_pvalue=0.05 filter
+                        # does not drop rows.
+                        "pvalue": 0.01,
+                        "fdr_pvalue": 0.01,
+                        "significant": True,
+                    })
+                df_plot = pd.DataFrame(plot_rows)
+                if df_plot.empty:
+                    html_reg += report.text(
+                        f"  {sub_type}: no rows available for pair-based dotplot.")
+                    continue
+                try:
+                    # Use a small min_effect_size so pair-level gamma
+                    # values (which can be modest even when significant)
+                    # are not filtered out. pattern_type controls only
+                    # the title and labelling inside pattern_dotplot.
+                    fig_sub = pc.pl.pattern_dotplot(
+                        df_plot,
+                        pattern_type=sub_type,
+                        top_n=20,
+                        min_effect_size=0.001,
+                        max_pvalue=1.0,
+                        figsize=(8, max(4, 0.25 * len(df_plot))),
+                        title=f"Primary {sub_type} pattern dotplot "
+                              f"(archetype pair on X, top 20 by |gamma|)",
+                    )
+                    html_reg += report.fig_to_img(fig_sub,
+                        caption=f"{sub_type.capitalize()} pattern dotplot: "
+                                f"X = archetype PAIR (Aj_Ak), Y = gene, "
+                                f"dot size = |gamma| (interaction coefficient), "
+                                f"colour = -log10(p-value). "
+                                f"{len(df_plot)} (feature, pair) rows "
+                                f"from the interaction_detail field of "
+                                f"classify_feature_patterns.")
+                    plt.close("all")
+                except Exception as e:
+                    html_reg += error_html(f"{sub_type} pair dotplot failed: {e}")
         except Exception as e:
             log.exception("Full pattern taxonomy (Task 16) failed")
             html_reg += error_html(f"Full pattern taxonomy failed: {e}")
@@ -1705,6 +2108,40 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
         html_wald += report.df_to_html(pd.DataFrame(summary_rows),
             caption="Primary within-fit Wald contrast summary (with top differentiating genes)")
 
+        # W-B18: R² vs -log10(FDR) scatter — primary position-dependence view.
+        try:
+            from _paper_part1_viz import build_r2_vs_fdr_scatter
+            _primary_reg = adata_primary.uns.get("peach_simplex_regression_genes", {})
+            _primary_r2 = _primary_reg.get("r_squared_degree1", _primary_reg.get("r_squared"))
+            _primary_fdr_mat = _primary_reg.get("vertex_pvalues_fdr")
+            _primary_feats = _primary_reg.get("feature_names")
+            if (_primary_r2 is not None and _primary_fdr_mat is not None
+                    and _primary_feats is not None and len(_primary_feats) > 0):
+                _primary_r2_arr = np.asarray(_primary_r2)
+                _primary_fdr_arr = np.asarray(_primary_fdr_mat)
+                if _primary_fdr_arr.ndim == 2:
+                    _primary_min_fdr = _primary_fdr_arr.min(axis=1)
+                else:
+                    _primary_min_fdr = _primary_fdr_arr
+                _fig_r2fdr = build_r2_vs_fdr_scatter(
+                    _primary_r2_arr, _primary_min_fdr, list(_primary_feats),
+                    r2_threshold=0.1, fdr_threshold=0.05, n_labels=20,
+                    title="Primary Fig 2D: Feature R² vs -log10(min vertex FDR)",
+                )
+                html_wald += report.fig_to_img(
+                    _fig_r2fdr,
+                    caption=(
+                        "Per-feature simplex regression R² vs -log10(min "
+                        "vertex FDR). Red = passes both R² > 0.1 and "
+                        "FDR < 0.05. Top-right = position-dependent AND "
+                        "significant. Replaces β-based volcano (W-B18)."
+                    ),
+                )
+                plt.close("all")
+        except Exception as _r2fdr_exc:
+            log.warning(f"R² vs FDR scatter failed: {_r2fdr_exc}")
+            html_wald += error_html(f"R² vs FDR scatter failed: {_r2fdr_exc}")
+
         # Volcano plots: ALL pairs (sorted by N significant genes for prominence)
         if pairs:
             sorted_pair_idx = sorted(range(len(summary_rows)),
@@ -1751,14 +2188,20 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
             _upset_reg = adata_primary.uns.get("peach_simplex_regression_genes", {})
             _upset_feat = list(_upset_reg.get("feature_names", []))
             _upset_fdr = _upset_reg.get("vertex_pvalues_fdr")
+            # W-B18: cap top N features per archetype for UpSet readability.
+            _UPSET_TOP_N_PER_ARCH = 100
             if _upset_fdr is not None and len(_upset_feat) > 0:
                 _upset_fdr = np.asarray(_upset_fdr)  # [n_features, K]
                 if _upset_fdr.ndim == 2 and _upset_fdr.shape[0] == len(_upset_feat):
                     _arch_sig_sets = {}
                     for _ai in range(_upset_fdr.shape[1]):
                         _sig_mask = _upset_fdr[:, _ai] < 0.05
+                        _sig_idx = np.where(_sig_mask)[0]
+                        if len(_sig_idx) > _UPSET_TOP_N_PER_ARCH:
+                            _order = np.argsort(_upset_fdr[_sig_idx, _ai])
+                            _sig_idx = _sig_idx[_order[:_UPSET_TOP_N_PER_ARCH]]
                         _arch_sig_sets[f"A{_ai + 1}"] = set(
-                            _upset_feat[_j] for _j in range(len(_upset_feat)) if _sig_mask[_j]
+                            _upset_feat[_j] for _j in _sig_idx
                         )
                     _n_archs_with_sigs = sum(1 for s in _arch_sig_sets.values() if len(s) > 0)
                     if len(_arch_sig_sets) >= 2 and _n_archs_with_sigs >= 2:
@@ -1837,7 +2280,11 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
         import plotly.graph_objects as go
         from scipy.spatial import cKDTree
         from scipy.stats import norm as scipy_norm, false_discovery_control
-        from peach._core.utils.archetype_comparison import compute_archetype_correspondence
+        from peach._core.utils.archetype_comparison import (
+            compute_archetype_correspondence,
+            compute_correspondence_permutation_null,
+        )
+        from _paper_part1_viz import build_permutation_curve_figure
 
         adata_full = ad.read_h5ad(os.path.join(DATA_DIR, "adata_full_prepped.h5ad"))
         if SUBSAMPLE_FRACTION < 1.0:
@@ -1850,8 +2297,8 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
         adata_full.uns["trained_model"] = adata_primary.uns["trained_model"]
         adata_full.uns["archetype_coordinates"] = adata_primary.uns["archetype_coordinates"]
         pc.tl.archetypal_coordinates(adata_full, verbose=False)
-        pc.tl.assign_archetypes(adata_full, verbose=False)
         pc.tl.extract_archetype_weights(adata_full, verbose=False)
+        pc.tl.assign_archetypes(adata_full, verbose=False)
 
         # Count source and target cells
         source_cell_mask = adata_full.obs["cell_type"] == "primary"
@@ -2009,45 +2456,112 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                 for i in range(K_h):
                     log.info(f"  Primary A{i+1}: {corr[i].tolist()}")
 
-                # Per-pair null model: permute source weights row-wise (breaks source-cell ↔
-                # source-archetype binding) and recompute the full correspondence matrix via
-                # the library function. This isolates the null from the k-NN computation and
-                # tests the entire pipeline rather than just the nn lookup.
-                log.info("Building per-pair null model for correspondence matrix...")
-                rng_corr = np.random.default_rng(42)
-                n_perm_corr = 50
-                null_corrs = np.zeros((n_perm_corr, K_h, K_c))
-                n_src_corr = weights_src_primary.shape[0]
-                for perm_i in range(n_perm_corr):
-                    perm_idx = rng_corr.permutation(n_src_corr)
-                    null_result = compute_archetype_correspondence(
-                        source_weights=weights_src_primary[perm_idx],
-                        source_coords=fr["transported"],
-                        target_weights=weights_tgt_metastatic,
-                        target_coords=target_pca_matched,
-                        k=10,
-                        method="hard",
-                    )
-                    null_corrs[perm_i] = null_result["mass"]
-
-                null_mean_corr = null_corrs.mean(axis=0)
-                null_std_corr = null_corrs.std(axis=0)
-                # Per-pair p-value: (#null >= observed + 1) / (n_perm + 1)
-                pair_pvals = np.zeros((K_h, K_c))
-                for i in range(K_h):
-                    for j in range(K_c):
-                        pair_pvals[i, j] = (np.sum(null_corrs[:, i, j] >= corr[i, j]) + 1) / (n_perm_corr + 1)
-                # Per-pair FDR (BH on the K_h*K_c family)
-                pair_pvals_flat = pair_pvals.flatten()
-                pair_fdr_flat = false_discovery_control(pair_pvals_flat, method="bh")
-                pair_fdr = pair_fdr_flat.reshape(K_h, K_c)
-
-                # Per-pair z-score vs shuffle null
+                # W-B23: Permutation curve null with global cell swap.
+                # Replaces the previous Gaussian-z-score null with an empirical
+                # rank-based p-value derived from a degradation curve over a
+                # swap-fraction grid. See compute_correspondence_permutation_null
+                # in archetype_comparison.py for the design note.
+                log.info(
+                    "Building permutation curve null for correspondence "
+                    "(global swap, n_perms=200, 6 fractions)..."
+                )
+                perm_null = compute_correspondence_permutation_null(
+                    source_weights=weights_src_primary,
+                    source_coords=fr["transported"],
+                    target_weights=weights_tgt_metastatic,
+                    target_coords=target_pca_matched,
+                    k=10,
+                    n_perms=200,
+                    swap_fractions=(0.0, 0.05, 0.10, 0.20, 0.35, 0.50),
+                    seed=42,
+                )
+                # Maintain legacy variable names for downstream consumers.
+                pair_pvals = perm_null["empirical_p"]
+                pair_fdr = perm_null["empirical_fdr"]
+                null_mean_corr = perm_null["null_mean_curve"][-1]
+                null_std_corr = perm_null["null_std_curve"][-1]
                 safe_null_std = np.where(null_std_corr < 1e-10, 1.0, null_std_corr)
                 pair_z = (corr_matrix - null_mean_corr) / safe_null_std
 
                 src_labels = [f"Primary A{i+1}" for i in range(K_h)]
                 tgt_labels = [f"Metastatic A{j+1}" for j in range(K_c)]
+
+                log.info(
+                    f"  Permutation null: empirical_p range "
+                    f"[{pair_pvals.min():.3f}, {pair_pvals.max():.3f}], "
+                    f"FDR<0.10 pairs: {int((pair_fdr < 0.10).sum())}/{K_h*K_c}"
+                )
+
+                # W-B20: Raw pairwise results DataFrame (rendered BEFORE
+                # Sankey + heatmaps so the reader sees every pair, which
+                # ones are significant, and why — not just the top-3).
+                # One row per (i, j) pair, sorted by significance first
+                # then by mass. Significant rows get a background tint
+                # via inline style on the final HTML.
+                html_flow += report.text("<h3>Raw pairwise results (all K_src x K_tgt pairs)</h3>")
+                pair_rows = []
+                for i in range(K_h):
+                    for j in range(K_c):
+                        fdr_ij = float(pair_fdr[i, j])
+                        pair_rows.append({
+                            "source_arch": src_labels[i],
+                            "target_arch": tgt_labels[j],
+                            "mass": float(corr[i, j]),
+                            "markov_p": float(corr_markov[i, j]),
+                            "empirical_p": float(pair_pvals[i, j]),
+                            "empirical_fdr": fdr_ij,
+                            "significant": "Yes" if fdr_ij < 0.10 else "No",
+                        })
+                raw_pair_df = pd.DataFrame(pair_rows)
+                # Sort: significant first, then by mass descending
+                raw_pair_df = raw_pair_df.sort_values(
+                    by=["significant", "mass"],
+                    ascending=[False, False],
+                    kind="mergesort",  # stable
+                ).reset_index(drop=True)
+
+                # Render with inline-style row highlight for significant pairs.
+                # Build the HTML manually so we can inject a background
+                # color on significant rows (df_to_html strips styles).
+                _raw_display_df = raw_pair_df.copy()
+                _raw_display_df["mass"] = _raw_display_df["mass"].map(lambda v: f"{v:.3f}")
+                _raw_display_df["markov_p"] = _raw_display_df["markov_p"].map(lambda v: f"{v:.3f}")
+                _raw_display_df["empirical_p"] = _raw_display_df["empirical_p"].map(lambda v: f"{v:.3f}")
+                _raw_display_df["empirical_fdr"] = _raw_display_df["empirical_fdr"].map(lambda v: f"{v:.3f}")
+                _raw_html = _raw_display_df.to_html(
+                    classes="styled-table", index=False, border=0, escape=False
+                )
+                # Post-process: inject background color on significant rows.
+                # Significant rows have `<td>Yes</td>` in the significant
+                # column; we add a style to the enclosing <tr>.
+                import re as _re_raw
+                def _highlight_row(m):
+                    row_html = m.group(0)
+                    if "<td>Yes</td>" in row_html:
+                        return row_html.replace(
+                            "<tr>", '<tr style="background:#e8f4f8;">'
+                        )
+                    return row_html
+                _raw_html = _re_raw.sub(
+                    r"<tr>.*?</tr>",
+                    _highlight_row,
+                    _raw_html,
+                    flags=_re_raw.DOTALL,
+                )
+                n_sig_raw = int((pair_fdr < 0.10).sum())
+                html_flow += (
+                    "<p class='caption'><strong>Raw pairwise correspondence "
+                    f"({K_h*K_c} pairs, {n_sig_raw} significant at FDR&lt;0.10).</strong> "
+                    "<code>mass</code> = raw transport mass "
+                    "corr[i,j]. <code>markov_p</code> = row-normalized "
+                    "transition probability P(target j | source i). "
+                    "<code>empirical_p</code> + <code>empirical_fdr</code> "
+                    "come from the W-B23 global-swap permutation curve null "
+                    "at the largest swap fraction (hardest test). Rows with "
+                    "<code>significant=Yes</code> (FDR&lt;0.10) are tinted "
+                    "pale blue. Sorted by significance then by mass.</p>"
+                )
+                html_flow += f'<div style="overflow-x: auto; max-width: 100%;">{_raw_html}</div>'
 
                 # --- Raw correspondence matrix (transport mass) ---
                 corr_df = pd.DataFrame(corr, index=src_labels, columns=tgt_labels)
@@ -2062,11 +2576,24 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                 # Rows sum to 1 → can be read as a transition kernel from Primary arch space to Metastatic arch space.
                 # corr_markov already row-normalized by compute_archetype_correspondence.
                 corr_markov_df = pd.DataFrame(corr_markov, index=src_labels, columns=tgt_labels)
+                # W-B19: explicit documentation of the "approximately Markov" gap.
                 html_flow += report.df_to_html(corr_markov_df,
-                    caption="Row-normalized correspondence (≈ Markov transition matrix). "
-                            "Row sums = 1. Each cell = P(Metastatic archetype j | Primary archetype i). "
-                            "Read row-by-row: 'given a Primary cell in archetype i, this is the probability "
-                            "distribution over Metastatic archetypes after transport'.")
+                    caption=(
+                        "Row-normalized correspondence "
+                        "(<b>approximately</b> Markov — see below). "
+                        "Non-sparse rows sum to 1. Each cell = "
+                        "P(Metastatic archetype j | Primary archetype i). "
+                        "<br><br><b>Why not exact Markov</b>: "
+                        "(1) sparse source archetypes (hard-argmax "
+                        "occupancy < 2% of cells) have their rows zeroed, "
+                        "so those rows sum to 0 not 1; "
+                        "(2) this is a one-step cross-fit projection, not "
+                        "a stationary stochastic process — no ergodicity "
+                        "or detailed-balance claims; "
+                        "(3) the kNN truncation at k=10 aggregates a "
+                        "local target-space neighborhood per source cell, "
+                        "not the full target population."
+                    ))
 
                 # Markov transition heatmap (often more readable than the raw mass heatmap)
                 fig_markov = go.Figure(data=go.Heatmap(
@@ -2146,6 +2673,99 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                 )
                 html_flow += safe_plotly_html(report, fig_corr_heat,
                     "Correspondence heatmap with FDR significance markers")
+
+                # W-B20: Per-pair permutation degradation curves for ALL
+                # significant pairs (empirical_fdr < 0.10), capped at 20
+                # to avoid a 100-curve scroll wall. Earlier revisions
+                # hardcoded top-3 (W-B23), which hid significant pairs
+                # beyond the top of the list. When more than 20 pairs
+                # are significant, the top-20 by mass are shown and the
+                # total count is reported. If NO pairs are significant,
+                # a warning banner is shown and the top-3 by mass are
+                # rendered anyway so the reader sees the matrix shape.
+                try:
+                    html_flow += report.text(
+                        "<h3>Significant pairs (FDR &lt; 0.10)</h3>"
+                        "<p class='caption'>For each significant pair, "
+                        "the observed correspondence mass (red dashed) "
+                        "is plotted against the per-fraction permutation "
+                        "null distribution (gray points = mean +/- std, "
+                        "shaded band = full min/max range). A real "
+                        "correspondence pair shows the observed line "
+                        "above the null band at all swap fractions; a "
+                        "noisy pair degrades into the null early.</p>"
+                    )
+
+                    # Build list of significant pairs sorted by mass desc.
+                    MAX_SIG_CURVES = 20
+                    sig_mask = (pair_fdr < 0.10)
+                    n_sig_total = int(sig_mask.sum())
+                    sig_flat_idx = np.argsort(-corr.flatten())
+                    sig_pairs = []
+                    for flat_i in sig_flat_idx:
+                        hi = int(flat_i // K_c)
+                        ci = int(flat_i % K_c)
+                        if pair_fdr[hi, ci] < 0.10:
+                            sig_pairs.append((hi, ci))
+                    # Cap at 20 by mass order
+                    if len(sig_pairs) > MAX_SIG_CURVES:
+                        log.info(
+                            f"Capping per-pair degradation curves: "
+                            f"{len(sig_pairs)} significant pairs -> "
+                            f"top {MAX_SIG_CURVES} by mass."
+                        )
+                        html_flow += report.text(
+                            f"<p><i>Note: {len(sig_pairs)} pairs are "
+                            f"significant at FDR&lt;0.10; showing top "
+                            f"{MAX_SIG_CURVES} by mass to bound the "
+                            f"scroll length.</i></p>"
+                        )
+                        sig_pairs = sig_pairs[:MAX_SIG_CURVES]
+
+                    if n_sig_total == 0:
+                        # W-B20 no-significant fallback: show top-3 by
+                        # mass so the reader sees the matrix shape even
+                        # when the null test finds no signal.
+                        html_flow += error_html(
+                            "WARNING: no significant pairs at FDR&lt;0.10. "
+                            "Showing top-3 pairs by mass below so the "
+                            "matrix shape is visible even without signal. "
+                            "All pairs had empirical_fdr >= 0.10 at the "
+                            "largest swap fraction (f=0.50)."
+                        )
+                        flat_mass_idx = np.argsort(-corr.flatten())
+                        fallback_pairs = []
+                        for flat_i in flat_mass_idx:
+                            hi = int(flat_i // K_c)
+                            ci = int(flat_i % K_c)
+                            fallback_pairs.append((hi, ci))
+                            if len(fallback_pairs) >= 3:
+                                break
+                        sig_pairs = fallback_pairs
+
+                    for hi, ci in sig_pairs:
+                        fig_curve = build_permutation_curve_figure(
+                            perm_null,
+                            pair_i=hi,
+                            pair_j=ci,
+                            src_label=src_labels[hi],
+                            tgt_label=tgt_labels[ci],
+                        )
+                        html_flow += report.fig_to_img(
+                            fig_curve,
+                            caption=(
+                                f"Permutation curve for {src_labels[hi]} -> "
+                                f"{tgt_labels[ci]} "
+                                f"(p={pair_pvals[hi, ci]:.3f}, "
+                                f"FDR={pair_fdr[hi, ci]:.3f}, "
+                                f"mass={corr[hi, ci]:.3f})"
+                            ),
+                        )
+                except Exception as e:
+                    log.exception("Permutation curve figures failed")
+                    html_flow += error_html(
+                        f"Permutation curve figures failed: {e}"
+                    )
             except Exception as e:
                 log.exception("Correspondence matrix failed")
                 html_flow += error_html(f"Correspondence matrix failed: {e}")
@@ -2461,31 +3081,85 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                                     metric_card(f"{mmd_red_p:.1%}", "MMD reduction"),
                                 ])
 
-                                # Zoomed gene alignment (no permutation null — would be too slow)
+                                # W-B20: Zoomed gene alignment with a
+                                # small shuffle null (50 permutations) so
+                                # FDR-pass counts can be reported in the
+                                # caption alongside the per-pair
+                                # correspondence permutation null mean +/- std
+                                # for THAT pair (from perm_null at the
+                                # largest swap fraction).
                                 try:
                                     align_pair = pc.tl.flow_gene_alignment(
                                         adata_full, fr_pair,
                                         n_top=10, per_cell=False,
-                                        n_permutations=0, random_state=42,
+                                        n_permutations=50, null_type="shuffle",
+                                        random_state=42,
                                     )
                                     top_aligned_pair = align_pair.get("top_aligned", [])[:10]
                                     top_opposed_pair = align_pair.get("top_opposed", [])[:10]
                                     a_scores = np.asarray(align_pair.get("alignment_scores", []))
                                     a_genes = list(align_pair.get("gene_names", []))
+                                    a_pvals = align_pair.get("alignment_pvalues")
+                                    a_fdr = align_pair.get("alignment_pvalues_fdr")
+                                    a_null_mean = align_pair.get("null_mean")
+                                    a_null_std = align_pair.get("null_std")
+
+                                    # Per-pair correspondence null context
+                                    # (from the W-B23 permutation curve null,
+                                    # at the largest swap fraction).
+                                    pair_null_mean = float(null_mean_corr[hi, ci])
+                                    pair_null_std = float(null_std_corr[hi, ci])
+                                    pair_obs_mass = float(corr[hi, ci])
+
+                                    # Gene-alignment null FDR-pass count
+                                    n_genes_total = int(len(a_scores)) if len(a_scores) > 0 else 0
+                                    n_genes_p05 = (
+                                        int((np.asarray(a_pvals) < 0.05).sum())
+                                        if a_pvals is not None else 0
+                                    )
+                                    n_genes_fdr05 = (
+                                        int((np.asarray(a_fdr) < 0.05).sum())
+                                        if a_fdr is not None else 0
+                                    )
+
                                     if len(a_scores) > 0:
-                                        # Build top-10 aligned table with scores
+                                        # Build top-10 aligned table with scores + per-gene null context
                                         aligned_rows = []
                                         for g in top_aligned_pair:
                                             try:
                                                 idx_g = a_genes.index(g)
-                                                aligned_rows.append({"Gene": g, "Alignment score": f"{a_scores[idx_g]:+.4f}"})
+                                                row = {
+                                                    "Gene": g,
+                                                    "Alignment score": f"{a_scores[idx_g]:+.4f}",
+                                                }
+                                                if a_null_mean is not None and a_null_std is not None:
+                                                    row["Null mean"] = f"{float(a_null_mean[idx_g]):+.4f}"
+                                                    row["Null std"] = f"{float(a_null_std[idx_g]):.4f}"
+                                                if a_pvals is not None:
+                                                    row["p-value"] = f"{float(a_pvals[idx_g]):.3f}"
+                                                if a_fdr is not None:
+                                                    row["FDR q"] = f"{float(a_fdr[idx_g]):.3f}"
+                                                aligned_rows.append(row)
                                             except ValueError:
                                                 aligned_rows.append({"Gene": g, "Alignment score": "?"})
                                         html_flow += report.df_to_html(
                                             pd.DataFrame(aligned_rows),
-                                            caption=f"Top 10 aligned genes for Primary A{hi+1} → Metastatic A{ci+1} "
-                                                    f"(zoomed flow). Score = cosine similarity between "
-                                                    f"gene's PCA loading and per-pair flow velocity.")
+                                            caption=(
+                                                f"Top 10 aligned genes for Primary A{hi+1} -> "
+                                                f"Metastatic A{ci+1} (zoomed flow). Score = cosine "
+                                                f"similarity between gene's PCA loading and per-pair "
+                                                f"flow velocity. "
+                                                f"<br><b>Per-pair correspondence permutation null</b> "
+                                                f"(from the W-B23 global-swap null, at f=0.50, for THIS "
+                                                f"specific pair): null mean = {pair_null_mean:.4f}, "
+                                                f"null std = {pair_null_std:.4f}, observed mass = "
+                                                f"{pair_obs_mass:.4f}. "
+                                                f"<br><b>Gene-alignment shuffle null</b> "
+                                                f"(50 permutations, null_type='shuffle'): "
+                                                f"{n_genes_fdr05}/{n_genes_total} genes pass shuffle null "
+                                                f"at FDR&lt;0.05 ({n_genes_p05}/{n_genes_total} at p&lt;0.05)."
+                                            ),
+                                        )
                                     else:
                                         html_flow += error_html(
                                             f"Pair {hi+1}->{ci+1}: gene alignment returned no scores"
@@ -2897,84 +3571,56 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                                 f"X-axis is binned mean logcounts within flow_coord bins.")
                     plt.close("all")
 
-                # --- RIDGEPLOT: KDE-filled stacked ridges (Task 18) ---
-                # Each ridge shows the distribution of per-cell Jacobian expansion values
-                # for one gene, stacked vertically with y-offsets. Uses scipy KDE + fill_between.
-                # Falls back to line plot if fewer than 5 values are available per ridge.
-                from scipy.stats import gaussian_kde
-                for panel_start in range(0, n_plot, 10):
-                    panel_genes = gene_order[panel_start:panel_start + 10]
-                    n_ridges = len(panel_genes)
-                    fig_height = max(4, n_ridges * 0.9 + 1.5)
-                    fig_ridge, ax_r = plt.subplots(figsize=(10, fig_height))
-                    ridge_spacing = 1.0   # vertical spacing between ridge baselines
-                    x_kde = np.linspace(0.0, 1.0, 200)  # x axis = flow coord (0→1)
-                    any_kde_drawn = False
-                    for ci, gi in enumerate(panel_genes):
-                        gname = jac_gene_names[gi]
-                        expansion_vals = per_cell[:, gi]
-                        # Use flow_coord bins to get mean expansion per position
-                        by = np.array([expansion_vals[bin_idx == b].mean() if (bin_idx == b).any()
-                                       else np.nan for b in range(n_bins)])
-                        valid_mask = ~np.isnan(by)
-                        valid_vals = by[valid_mask]
-                        valid_x = bin_centers[valid_mask]
-                        color = COLORS[ci % len(COLORS)]
-                        y_offset = (n_ridges - 1 - ci) * ridge_spacing
-                        if valid_vals.size >= 5:
-                            # KDE over the expansion values; evaluate at uniform x_kde grid.
-                            # Bandwidth via Scott's rule (default).
-                            try:
-                                kde = gaussian_kde(valid_vals, bw_method="scott")
-                                # Map KDE density to y-range by evaluating at uniformly spaced
-                                # expansion values; scale to fit within ridge_spacing * 0.8.
-                                exp_grid = np.linspace(valid_vals.min(), valid_vals.max(), 200)
-                                density = kde(exp_grid)
-                                density_norm = density / max(density.max(), 1e-10) * ridge_spacing * 0.8
-                                # x-axis = expansion value range, shifted/scaled to [0,1] flow coord
-                                # for display; we map exp_grid → [0,1] for side-by-side comparison.
-                                exp_min, exp_max = valid_vals.min(), valid_vals.max()
-                                if exp_max - exp_min > 1e-6:
-                                    x_plot = (exp_grid - exp_min) / (exp_max - exp_min)
-                                else:
-                                    x_plot = np.linspace(0, 1, len(exp_grid))
-                                ax_r.fill_between(x_plot, y_offset, y_offset + density_norm,
-                                                  color=color, alpha=0.55)
-                                ax_r.plot(x_plot, y_offset + density_norm, color=color,
-                                          linewidth=1.2, alpha=0.9)
-                                # Mark the mean expansion with a vertical tick
-                                mean_exp = valid_vals.mean()
-                                mean_x = (mean_exp - exp_min) / max(exp_max - exp_min, 1e-6)
-                                ax_r.vlines(mean_x, y_offset, y_offset + ridge_spacing * 0.5,
-                                            color=color, linewidth=1.0, linestyle="--", alpha=0.7)
-                                any_kde_drawn = True
-                            except Exception:
-                                # KDE failed (e.g., constant expansion) → fall back to line
-                                if valid_vals.size >= 2:
-                                    ax_r.plot(valid_x, y_offset + valid_vals - valid_vals.mean(),
-                                              color=color, linewidth=1.5, alpha=0.8)
-                        elif valid_vals.size >= 2:
-                            # Too few points for KDE — fall back to simple line
-                            ax_r.plot(valid_x, y_offset + valid_vals - valid_vals.mean(),
-                                      color=color, linewidth=1.5, alpha=0.8)
-                        # Gene label on the left
-                        ax_r.text(-0.02, y_offset + ridge_spacing * 0.3, gname,
-                                  ha="right", va="center", fontsize=8, color=color,
-                                  transform=ax_r.get_yaxis_transform())
-                    # x-axis is normalised expansion value (0=min, 1=max per gene)
-                    ax_r.set_xlabel("Normalised expansion value (0=min, 1=max per gene)")
-                    ax_r.set_ylabel("")
-                    ax_r.set_yticks([])
-                    ax_r.spines[["top", "right", "left"]].set_visible(False)
-                    ax_r.set_title(f"Filled ridgeplot: Jacobian expansion distribution {sig_note} "
-                                   f"(genes {panel_start+1}-{panel_start+len(panel_genes)})")
-                    fig_ridge.tight_layout()
-                    html_genes += report.fig_to_img(fig_ridge,
-                        caption="Filled ridgeplot: each ridge = KDE of per-cell Jacobian expansion "
-                                "values for one gene. Dashed tick = mean expansion. "
-                                "x-axis is normalised to [0,1] per gene for shape comparison. "
-                                "Falls back to line trace if <5 binned values available.")
-                    plt.close("all")
+                # --- RIDGEPLOT: Seurat-style overlapping KDE ridges (W-B21) ---
+                # Each ridge = KDE of per-cell Jacobian expansion values for
+                # one gene, drawn with build_overlapping_ridgeplot() so adjacent
+                # ridges visibly stack (overlap=0.5) instead of the old
+                # separated-panel style. Groups are capped at max_groups=12
+                # per panel for readability.
+                try:
+                    from _paper_part1_viz import build_overlapping_ridgeplot
+                    for panel_start in range(0, n_plot, 10):
+                        panel_genes = gene_order[panel_start:panel_start + 10]
+                        ridge_data = {}
+                        for gi in panel_genes:
+                            gname = jac_gene_names[gi]
+                            vals = np.asarray(per_cell[:, gi], dtype=float).ravel()
+                            vals = vals[np.isfinite(vals)]
+                            if vals.size >= 2:
+                                ridge_data[gname] = vals
+                        if not ridge_data:
+                            continue
+                        fig_ridge = build_overlapping_ridgeplot(
+                            ridge_data,
+                            overlap=0.5,
+                            max_groups=12,
+                            title=(
+                                f"Seurat-style ridgeplot: Jacobian expansion "
+                                f"{sig_note} "
+                                f"(genes {panel_start+1}-{panel_start+len(panel_genes)})"
+                            ),
+                            xlabel="Per-cell Jacobian expansion factor (1.0 = neutral)",
+                            cmap_name="viridis",
+                        )
+                        html_genes += report.fig_to_img(
+                            fig_ridge,
+                            caption=(
+                                "Seurat-style overlapping ridgeplot "
+                                "(W-B21): each ridge = KDE of per-cell "
+                                "Jacobian expansion values for one gene. "
+                                "Adjacent ridges partially overlap "
+                                "vertically (overlap=0.5) so distributions "
+                                "visually stack instead of sitting on "
+                                "isolated baselines. Dashed tick = mean "
+                                "expansion per ridge; x-axis is shared "
+                                "across all ridges so shapes are directly "
+                                "comparable."
+                            ),
+                        )
+                        plt.close("all")
+                except Exception as e:
+                    log.exception("Overlapping ridgeplot failed")
+                    html_genes += error_html(f"Overlapping ridgeplot failed: {e}")
 
                 # Expansion summary table with regression context
                 exp_rows = []
@@ -2997,65 +3643,141 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                 html_genes += report.df_to_html(pd.DataFrame(exp_rows),
                     caption="Top 20 genes by Jacobian expansion effect (with Primary simplex regression context)")
 
-            # --- PER-PAIR FLOW MODELS: top 5 archetype pairs by mass ---
+            # --- PER-PAIR FLOW MODELS (W-B21): per-pair detail for ALL ---
+            #     significant pairs, capped at MAX_SIG_PAIRS = 20.
+            #
+            # Each significant pair (pair_fdr < 0.10 OR pair_z > 2.0) gets:
+            #   1. Permutation curve (W-B23 build_permutation_curve_figure)
+            #   2. Per-pair gene-alignment table (top by alignment, with
+            #      shuffle-null context if available)
+            #   3. Per-pair PATHWAY simplex regression on the source-bin
+            #      cells (W-B21 — mirrors W-B20 gene null work for genes,
+            #      using pathway scores instead of gene PCA loadings)
+            #   4. Seurat-style overlapping ridgeplot of per-cell gene
+            #      alignment values, one ridge per top-aligned gene
+            #
+            # This replaces the old "summary heatmaps only" block flagged
+            # in the r9 review as the least valuable summary.
             if corr_matrix is not None:
-                html_genes += "<h4>Per-pair archetype flow models</h4>"
+                html_genes += "<h4>Per-pair archetype flow models (W-B21 detail)</h4>"
                 html_genes += report.text(
-                    "<b>Per-pair flow models</b>: For Primary→Metastatic archetype pairs with z > 2 against the "
-                    "per-pair shuffle null, or FDR < 0.10 (up to 5 pairs), train a small flow model "
-                    "between source cells (Primary archetype assigned) and target cells (Metastatic archetype assigned). "
-                    "Per-pair Jacobian gives archetype-level interpretation that the global flow lacks.")
+                    "<b>Per-pair flow models</b>: For each "
+                    "Primary→Metastatic archetype pair flagged as "
+                    "significant by the permutation null (pair_fdr &lt; "
+                    "0.10 or pair_z &gt; 2.0), train a small flow model "
+                    "from Primary cells argmax-assigned to source "
+                    "archetype hi to Metastatic cells argmax-assigned to "
+                    "target archetype ci, then run (a) per-pair gene "
+                    "alignment with shuffle null, (b) per-pair pathway "
+                    "simplex regression on the source-bin subset, and "
+                    "(c) a Seurat-style overlapping ridgeplot of per-cell "
+                    "gene alignment values. Capped at MAX_SIG_PAIRS = 20.")
 
-                # Get top pairs by z-score vs shuffle null (same criterion as cross-fit Wald section),
-                # capped at 5 to limit compute. Falls back to top 5 by mass if pair_z unavailable.
+                from _paper_part1_viz import (
+                    build_permutation_curve_figure,
+                    build_overlapping_ridgeplot,
+                )
+
+                MAX_SIG_PAIRS = 20  # cap on per-pair detail blocks (W-B21)
                 K_h_local, K_c_local = corr_matrix.shape
-                if 'pair_z' in locals() and pair_z is not None and pair_z.shape == (K_h_local, K_c_local):
-                    top_pp_pairs = sorted(
-                        [(hi, ci) for hi in range(K_h_local) for ci in range(K_c_local)
-                         if pair_z[hi, ci] > 2.0 or (pair_fdr is not None and pair_fdr[hi, ci] < 0.10)],
-                        key=lambda p: -pair_z[p[0], p[1]]
-                    )[:5]
-                    log.info(f"Per-pair Jacobian: {len(top_pp_pairs)} pairs selected (z>2 OR FDR<0.10)")
-                else:
-                    flat_idx = np.argsort(corr_matrix.ravel())[::-1]
-                    top_pp_pairs = [(int(hi), int(ci)) for fi in flat_idx[:5]
-                                    for hi, ci in [divmod(fi, K_c_local)]]
-                    log.info(f"Per-pair Jacobian: {len(top_pp_pairs)} pairs selected (top-5 mass fallback)")
+
+                # Build the ranked list of significant pairs by mass
+                sig_pairs_2f = []
+                if pair_fdr is not None:
+                    flat_mass_order = np.argsort(-corr_matrix.flatten())
+                    for fi in flat_mass_order:
+                        hi = int(fi // K_c_local)
+                        ci = int(fi % K_c_local)
+                        is_sig = (pair_fdr[hi, ci] < 0.10) or (
+                            'pair_z' in locals()
+                            and pair_z is not None
+                            and pair_z.shape == (K_h_local, K_c_local)
+                            and pair_z[hi, ci] > 2.0
+                        )
+                        if is_sig:
+                            sig_pairs_2f.append((hi, ci))
+                if not sig_pairs_2f:
+                    log.info(
+                        "Fig 2F per-pair: no significant pairs; "
+                        "falling back to top-3 by mass."
+                    )
+                    html_genes += error_html(
+                        "WARNING: no significant pairs at FDR&lt;0.10 or "
+                        "z&gt;2.0. Showing top-3 pairs by mass below so "
+                        "the matrix shape is visible even without "
+                        "significant signal."
+                    )
+                    flat_mass_order = np.argsort(-corr_matrix.flatten())
+                    for fi in flat_mass_order[:3]:
+                        sig_pairs_2f.append(
+                            (int(fi // K_c_local), int(fi % K_c_local))
+                        )
+
+                if len(sig_pairs_2f) > MAX_SIG_PAIRS:
+                    log.info(
+                        f"Fig 2F per-pair: capping {len(sig_pairs_2f)} "
+                        f"significant pairs to top {MAX_SIG_PAIRS} by mass."
+                    )
+                    html_genes += report.text(
+                        f"<p><i>Note: {len(sig_pairs_2f)} pairs "
+                        f"significant; showing top {MAX_SIG_PAIRS} by "
+                        f"mass to bound report length.</i></p>"
+                    )
+                    sig_pairs_2f = sig_pairs_2f[:MAX_SIG_PAIRS]
+
+                primary_argmax_full_2f = (
+                    np.argmax(weights_full_primary, axis=1)
+                    if weights_full_primary is not None else None
+                )
+                metastatic_argmax_target_2f = (
+                    np.argmax(weights_tgt_metastatic, axis=1)
+                    if weights_tgt_metastatic is not None else None
+                )
+                target_full_idx_2f = (
+                    np.where(target_mask)[0]
+                    if 'target_mask' in locals() and target_mask is not None
+                    else None
+                )
 
                 pp_summary_rows = []
-                for hi, ci in top_pp_pairs:
-                    log.info(f"Per-pair flow model: Primary A{hi+1} -> Metastatic A{ci+1}")
+                for pair_rank_2f, (hi, ci) in enumerate(sig_pairs_2f):
+                    log.info(
+                        f"[Fig 2F per-pair] Primary A{hi+1} -> "
+                        f"Metastatic A{ci+1} "
+                        f"(rank {pair_rank_2f+1}/{len(sig_pairs_2f)})"
+                    )
                     try:
-                        # Build masks: source = Primary cells assigned to archetype hi, target = Metastatic cells in Metastatic archetype ci
-                        adata_pair = adata_full.copy()
-                        # Primary source: uses Primary-model assignment
-                        hsc_arch_label = f"archetype_{hi}"
-                        # We need Metastatic-model archetype assignments for Metastatic cells.
-                        # adata_target_metastatic (built earlier for correspondence matrix) has these.
-                        # Build a lookup: obs_name → Metastatic archetype argmax
-                        cmp_arch_assign_lookup = {}
-                        if 'adata_target_metastatic' in locals() and weights_tgt_metastatic is not None:
-                            for cn, wv in zip(adata_target_metastatic.obs_names, weights_tgt_metastatic):
-                                cmp_arch_assign_lookup[cn] = int(np.argmax(wv))
-                        cmp_assign = []
-                        for cn in adata_pair.obs_names:
-                            if cn in cmp_arch_assign_lookup:
-                                cmp_assign.append(f"cmp_arch_{cmp_arch_assign_lookup[cn]}")
-                            else:
-                                cmp_assign.append("not_in_cmp")
-                        adata_pair.obs["cmp_archetype"] = cmp_assign
-                        adata_pair.obs["pair_role"] = "neither"
-                        src_role_mask = (adata_pair.obs["cell_type"] == "primary") & \
-                                        (adata_pair.obs["archetypes"] == hsc_arch_label)
-                        tgt_role_mask = (adata_pair.obs["cell_type"] == "metastatic") & \
-                                        (adata_pair.obs["cmp_archetype"] == f"cmp_arch_{ci}")
-                        adata_pair.obs.loc[src_role_mask, "pair_role"] = "source"
-                        adata_pair.obs.loc[tgt_role_mask, "pair_role"] = "target"
+                        if (primary_argmax_full_2f is None
+                                or metastatic_argmax_target_2f is None
+                                or target_full_idx_2f is None):
+                            raise RuntimeError(
+                                "Missing prerequisite weights / target_mask"
+                            )
+                        src_pair_mask_2f = source_cell_mask.values.copy() \
+                            if hasattr(source_cell_mask, "values") \
+                            else np.asarray(source_cell_mask).copy()
+                        src_pair_mask_2f &= (primary_argmax_full_2f == hi)
+                        tgt_pair_mask_2f = np.zeros(adata_full.n_obs, dtype=bool)
+                        tgt_subset_keep = (metastatic_argmax_target_2f == ci)
+                        if tgt_subset_keep.any():
+                            tgt_pair_mask_2f[
+                                target_full_idx_2f[tgt_subset_keep]
+                            ] = True
+                        n_src_pp = int(src_pair_mask_2f.sum())
+                        n_tgt_pp = int(tgt_pair_mask_2f.sum())
 
-                        n_src_pp = int(src_role_mask.sum())
-                        n_tgt_pp = int(tgt_role_mask.sum())
-                        log.info(f"  N source: {n_src_pp}, N target: {n_tgt_pp}")
+                        html_genes += report.text(
+                            f"<h5>Primary A{hi+1} → Metastatic A{ci+1} "
+                            f"(rank {pair_rank_2f+1}, mass="
+                            f"{corr_matrix[hi, ci]:.3f})</h5>"
+                        )
+
                         if n_src_pp < 30 or n_tgt_pp < 30:
+                            html_genes += error_html(
+                                f"Skipped: too few cells "
+                                f"(N source={n_src_pp}, N target={n_tgt_pp}; "
+                                f"need ≥30 each)."
+                            )
                             pp_summary_rows.append({
                                 "Pair": f"P A{hi+1} → M A{ci+1}",
                                 "N src": n_src_pp,
@@ -3064,72 +3786,337 @@ def phase3_figure2(adata_primary, adata_metastatic, report):
                             })
                             continue
 
-                        fr_pp = pc.tl.flow_within(
-                            adata_pair,
-                            source={"pair_role": "source"},
-                            target={"pair_role": "target"},
-                            n_epochs=150, hidden_dims=(64, 64),
-                            batch_size=64, return_model=True,
-                            name=f"P{hi+1}_to_M{ci+1}", random_state=42,
-                        )
-                        # Per-pair Jacobian (smaller, fewer perms)
-                        jac_pp = pc.tl.flow_jacobian(
-                            adata_pair, fr_pp, fr_pp.get("model"),
-                            per_cell_features=True, n_top_features=200,
-                            n_permutations=100, null_type="both", permutation_seed=42)
-                        per_cell_pp = jac_pp.get("per_cell_expansion")
-                        gnames_pp = jac_pp.get("per_cell_expansion_gene_names", [])
-                        exp_p_pp = jac_pp.get("expansion_pvalues_fdr")
-                        n_sig_exp_pp = 0
-                        top_genes_pp_str = ""
-                        if per_cell_pp is not None and len(gnames_pp) > 0:
-                            mean_exp_pp = per_cell_pp.mean(axis=0)
-                            order_pp = np.argsort(np.abs(mean_exp_pp - 1))[::-1][:5]
-                            top_genes_pp_str = ", ".join(gnames_pp[idx] for idx in order_pp)
-                            if exp_p_pp is not None:
-                                gene_idx_pp = jac_pp.get("per_cell_expansion_gene_indices")
-                                if gene_idx_pp is not None:
-                                    sub_pp = np.asarray(exp_p_pp)[gene_idx_pp]
-                                    n_sig_exp_pp = int((sub_pp < 0.05).sum())
-                        # Per-pair W2 distance
-                        try:
-                            src_pca_pp = adata_pair.obsm[fr_pp.get("pca_key", "X_pca")][fr_pp["source_mask"]]
-                            tgt_pca_pp = adata_pair.obsm[fr_pp.get("pca_key", "X_pca")][fr_pp["target_mask"]]
-                            w2_b_pp = wasserstein2_distance(src_pca_pp, tgt_pca_pp, max_n=1000)
-                            w2_a_pp = wasserstein2_distance(fr_pp["transported"], tgt_pca_pp, max_n=1000)
-                        except Exception:
-                            w2_b_pp = w2_a_pp = float("nan")
-                        pp_summary_rows.append({
-                            "Pair": f"P A{hi+1} → M A{ci+1}",
-                            "N src": n_src_pp,
-                            "N tgt": n_tgt_pp,
-                            "W2 before (PC)": f"{w2_b_pp:.3f}",
-                            "W2 after (PC)": f"{w2_a_pp:.3f}",
-                            "W2 reduction": f"{(w2_b_pp - w2_a_pp):.3f}",
-                            "MMD before": f"{fr_pp['mmd_before']:.4f}",
-                            "MMD after": f"{fr_pp['mmd_after']:.4f}",
-                            "MMD reduction": f"{(1 - fr_pp['mmd_after']/max(fr_pp['mmd_before'], 1e-10)):.1%}",
-                            "Exp FDR<0.05": n_sig_exp_pp,
-                            "Top expanding/contracting": top_genes_pp_str,
-                        })
+                        if 'perm_null' in locals() and perm_null is not None:
+                            try:
+                                fig_curve_2f = build_permutation_curve_figure(
+                                    perm_null,
+                                    pair_i=hi,
+                                    pair_j=ci,
+                                    src_label=src_labels[hi],
+                                    tgt_label=tgt_labels[ci],
+                                )
+                                html_genes += report.fig_to_img(
+                                    fig_curve_2f,
+                                    caption=(
+                                        f"Permutation degradation curve for "
+                                        f"{src_labels[hi]} -> {tgt_labels[ci]} "
+                                        f"(W-B23 null). Replaces the old "
+                                        f"'summary heatmap only' output."
+                                    ),
+                                )
+                                plt.close("all")
+                            except Exception as e_curve:
+                                log.warning(
+                                    f"Permutation curve failed for ({hi},{ci}): "
+                                    f"{e_curve}"
+                                )
 
-                        # Per-pair Jacobian heatmap
+                        adata_full.obs["_pp2f_label"] = pd.Categorical(
+                            np.where(
+                                src_pair_mask_2f, "source",
+                                np.where(tgt_pair_mask_2f, "target", "other"),
+                            )
+                        )
                         try:
-                            fig_jac_pp = pc.pl.jacobian_heatmap(adata_pair, jac_pp, show=False)
-                            html_genes += safe_plotly_html(report, fig_jac_pp,
-                                f"Per-pair Jacobian heatmap: Primary A{hi+1} → Metastatic A{ci+1}")
-                        except Exception as e:
-                            log.exception(f"Per-pair jacobian heatmap failed for {hi},{ci}")
+                            fr_pp = pc.tl.flow_within(
+                                adata_full,
+                                source={"_pp2f_label": "source"},
+                                target={"_pp2f_label": "target"},
+                                n_epochs=150, hidden_dims=(64, 64),
+                                batch_size=64, return_model=True,
+                                name=f"P{hi+1}_to_M{ci+1}_2f",
+                                random_state=42 + pair_rank_2f,
+                            )
+                            align_pp = pc.tl.flow_gene_alignment(
+                                adata_full, fr_pp,
+                                n_top=20, per_cell=True,
+                                n_top_features=20,
+                                n_permutations=50, null_type="shuffle",
+                                random_state=42,
+                            )
+                            scores_pp = np.asarray(
+                                align_pp.get("alignment_scores", [])
+                            )
+                            gene_names_pp = list(
+                                align_pp.get("gene_names", [])
+                            )
+                            pvals_pp = align_pp.get("alignment_pvalues")
+                            fdr_pp = align_pp.get("alignment_pvalues_fdr")
+                            null_mean_pp = align_pp.get("null_mean")
+                            null_std_pp = align_pp.get("null_std")
+                            per_cell_align_pp = align_pp.get(
+                                "per_cell_alignment"
+                            )
+                            per_cell_gnames_pp = align_pp.get(
+                                "per_cell_gene_names", []
+                            )
+
+                            if scores_pp.size > 0:
+                                top20_idx = np.argsort(np.abs(scores_pp))[::-1][:20]
+                                gene_rows = []
+                                for gi in top20_idx:
+                                    g = gene_names_pp[gi]
+                                    row = {
+                                        "Gene": g,
+                                        "Alignment": f"{scores_pp[gi]:+.4f}",
+                                        "Direction": (
+                                            "aligned" if scores_pp[gi] > 0
+                                            else "opposed"
+                                        ),
+                                    }
+                                    if (null_mean_pp is not None
+                                            and null_std_pp is not None):
+                                        nm = float(null_mean_pp[gi])
+                                        ns = float(null_std_pp[gi])
+                                        z = (scores_pp[gi] - nm) / max(ns, 1e-10)
+                                        row["Null mean"] = f"{nm:+.4f}"
+                                        row["Null std"] = f"{ns:.4f}"
+                                        row["Z-score"] = f"{z:+.2f}"
+                                    if pvals_pp is not None:
+                                        row["p-value"] = fmt_pval(
+                                            float(pvals_pp[gi])
+                                        )
+                                    if fdr_pp is not None:
+                                        q = float(fdr_pp[gi])
+                                        row["FDR q"] = fmt_pval(q)
+                                        row["FDR<0.05"] = (
+                                            "*" if q < 0.05 else ""
+                                        )
+                                    gene_rows.append(row)
+                                html_genes += report.df_to_html(
+                                    pd.DataFrame(gene_rows),
+                                    caption=(
+                                        f"Per-pair gene alignment for "
+                                        f"Primary A{hi+1} → Metastatic "
+                                        f"A{ci+1}: top 20 genes by "
+                                        f"|alignment| with shuffle null "
+                                        f"context (50 permutations). "
+                                        f"Column 'FDR<0.05' marks genes "
+                                        f"passing the per-gene shuffle "
+                                        f"null after BH correction."
+                                    ),
+                                )
+
+                            # 2b. Per-pair PATHWAY simplex regression
+                            #     (W-B21 new). Restricted to source-bin
+                            #     cells. Mirrors W-B20 per-pair gene
+                            #     nulls but for pathway scores. Uses
+                            #     store_to_adata=False so nothing
+                            #     overwrites the global pathway key.
+                            if ("pathway_scores" in adata_full.obsm
+                                    or "pathway_scores" in adata_primary.obsm):
+                                try:
+                                    if "pathway_scores" in adata_full.obsm:
+                                        sub_2f = adata_full[src_pair_mask_2f].copy()
+                                    else:
+                                        primary_weights = adata_primary.obsm.get(
+                                            "cell_archetype_weights"
+                                        )
+                                        if primary_weights is not None:
+                                            primary_argmax = np.argmax(
+                                                primary_weights, axis=1
+                                            )
+                                            sub_mask = (primary_argmax == hi)
+                                            sub_2f = adata_primary[sub_mask].copy()
+                                        else:
+                                            sub_2f = None
+
+                                    if sub_2f is not None and sub_2f.n_obs >= 30:
+                                        pw_pair_res = pc.tl.pathway_simplex_regression(
+                                            sub_2f,
+                                            max_degree=1,
+                                            robust_se=False,
+                                            n_bootstrap=0,
+                                            store_to_adata=False,
+                                            permutation_test=False,
+                                        )
+                                        pw_feats = list(
+                                            pw_pair_res.get("feature_names", [])
+                                        )
+                                        pw_r2 = np.asarray(
+                                            pw_pair_res.get("r_squared_degree1", [])
+                                        )
+                                        pw_fpfdr = np.asarray(
+                                            pw_pair_res.get("f_pvalue_fdr", [])
+                                        )
+                                        pw_fpval = np.asarray(
+                                            pw_pair_res.get("f_pvalue", [])
+                                        )
+                                        if pw_r2.size > 0:
+                                            top_pw_idx = np.argsort(pw_r2)[::-1][:20]
+                                            pw_rows = []
+                                            for ip in top_pw_idx:
+                                                fpval = (
+                                                    float(pw_fpval[ip])
+                                                    if pw_fpval.size else float("nan")
+                                                )
+                                                fdr = (
+                                                    float(pw_fpfdr[ip])
+                                                    if pw_fpfdr.size else float("nan")
+                                                )
+                                                pw_rows.append({
+                                                    "Pathway": pw_feats[ip][:80]
+                                                    if ip < len(pw_feats) else f"pw_{ip}",
+                                                    "R²": f"{float(pw_r2[ip]):.4f}",
+                                                    "F p-value": fmt_pval(fpval),
+                                                    "F FDR q": fmt_pval(fdr),
+                                                    "FDR<0.05": (
+                                                        "*"
+                                                        if (not np.isnan(fdr)
+                                                            and fdr < 0.05)
+                                                        else ""
+                                                    ),
+                                                })
+                                            html_genes += report.df_to_html(
+                                                pd.DataFrame(pw_rows),
+                                                caption=(
+                                                    f"Per-pair pathway simplex "
+                                                    f"regression (W-B21 new) "
+                                                    f"for Primary A{hi+1} → "
+                                                    f"Metastatic A{ci+1}: top "
+                                                    f"20 pathways by R² on "
+                                                    f"the source-bin subset "
+                                                    f"(N={sub_2f.n_obs} cells). "
+                                                    f"Mirrors per-pair gene "
+                                                    f"alignment but on "
+                                                    f"adata.obsm['pathway_"
+                                                    f"scores']. Marker '*' = "
+                                                    f"BH-FDR < 0.05 over the "
+                                                    f"pathway family."
+                                                ),
+                                            )
+                                        else:
+                                            html_genes += error_html(
+                                                f"Per-pair pathway: empty "
+                                                f"R² array for ({hi},{ci})"
+                                            )
+                                    else:
+                                        html_genes += error_html(
+                                            f"Per-pair pathway skipped: "
+                                            f"source-bin too small "
+                                            f"(N={(sub_2f.n_obs if sub_2f else 0)})"
+                                        )
+                                except Exception as e_pw_pair:
+                                    log.exception(
+                                        f"Per-pair pathway regression failed "
+                                        f"for ({hi},{ci})"
+                                    )
+                                    html_genes += error_html(
+                                        f"Per-pair pathway regression failed: "
+                                        f"{e_pw_pair}"
+                                    )
+                            else:
+                                html_genes += error_html(
+                                    "Per-pair pathway skipped: "
+                                    "adata_full / adata_primary has no "
+                                    "obsm['pathway_scores']."
+                                )
+
+                            # 2c. Seurat-style overlapping ridgeplot
+                            if (per_cell_align_pp is not None
+                                    and len(per_cell_gnames_pp) > 0):
+                                pca_arr = np.asarray(per_cell_align_pp)
+                                ridge_data_pair = {}
+                                for col, g in enumerate(per_cell_gnames_pp[:12]):
+                                    vals = pca_arr[:, col].astype(float)
+                                    vals = vals[np.isfinite(vals)]
+                                    if vals.size >= 2:
+                                        ridge_data_pair[g] = vals
+                                if ridge_data_pair:
+                                    fig_ridge_pair = build_overlapping_ridgeplot(
+                                        ridge_data_pair,
+                                        overlap=0.5,
+                                        max_groups=12,
+                                        title=(
+                                            f"Per-pair gene alignment "
+                                            f"distribution: Primary A{hi+1} "
+                                            f"→ Metastatic A{ci+1}"
+                                        ),
+                                        xlabel=(
+                                            "Per-cell gene alignment "
+                                            "(cosine similarity to flow)"
+                                        ),
+                                        cmap_name="viridis",
+                                    )
+                                    html_genes += report.fig_to_img(
+                                        fig_ridge_pair,
+                                        caption=(
+                                            f"Seurat-style overlapping "
+                                            f"ridgeplot of per-cell gene "
+                                            f"alignment for the top "
+                                            f"{len(ridge_data_pair)} genes "
+                                            f"in the Primary A{hi+1} → "
+                                            f"Metastatic A{ci+1} flow. "
+                                            f"Each ridge = distribution of "
+                                            f"cosine similarity across the "
+                                            f"{int(src_pair_mask_2f.sum())} "
+                                            f"source cells. Capped at 12 "
+                                            f"ridges for readability."
+                                        ),
+                                    )
+                                    plt.close("all")
+
+                            try:
+                                src_pca_pp = adata_full.obsm[
+                                    fr_pp.get("pca_key", "X_pca")
+                                ][fr_pp["source_mask"]]
+                                tgt_pca_pp = adata_full.obsm[
+                                    fr_pp.get("pca_key", "X_pca")
+                                ][fr_pp["target_mask"]]
+                                w2_b_pp = wasserstein2_distance(
+                                    src_pca_pp, tgt_pca_pp, max_n=1000
+                                )
+                                w2_a_pp = wasserstein2_distance(
+                                    fr_pp["transported"], tgt_pca_pp, max_n=1000
+                                )
+                            except Exception:
+                                w2_b_pp = w2_a_pp = float("nan")
+                            n_genes_fdr05_pp = (
+                                int((np.asarray(fdr_pp) < 0.05).sum())
+                                if fdr_pp is not None else 0
+                            )
+                            pp_summary_rows.append({
+                                "Pair": f"P A{hi+1} → M A{ci+1}",
+                                "N src": n_src_pp,
+                                "N tgt": n_tgt_pp,
+                                "Mass": f"{corr_matrix[hi, ci]:.3f}",
+                                "Pair FDR": (
+                                    f"{pair_fdr[hi, ci]:.3f}"
+                                    if pair_fdr is not None else "?"
+                                ),
+                                "W2 before": f"{w2_b_pp:.3f}",
+                                "W2 after": f"{w2_a_pp:.3f}",
+                                "MMD red": (
+                                    f"{(1 - fr_pp['mmd_after']/max(fr_pp['mmd_before'], 1e-10)):.1%}"
+                                ),
+                                "Genes FDR<0.05": n_genes_fdr05_pp,
+                            })
+                        finally:
+                            if "_pp2f_label" in adata_full.obs.columns:
+                                del adata_full.obs["_pp2f_label"]
+
                     except Exception as e:
-                        log.exception(f"Per-pair flow model failed: H A{hi+1} -> C A{ci+1}")
+                        log.exception(
+                            f"Fig 2F per-pair detail failed for ({hi},{ci})"
+                        )
+                        html_genes += error_html(
+                            f"Per-pair detail failed for Primary A{hi+1} → "
+                            f"Metastatic A{ci+1}: {e}"
+                        )
                         pp_summary_rows.append({
                             "Pair": f"P A{hi+1} → M A{ci+1}",
                             "Status": f"failed: {e}",
                         })
 
                 if pp_summary_rows:
-                    html_genes += report.df_to_html(pd.DataFrame(pp_summary_rows),
-                        caption="Per-pair archetype flow model summary (top 5 by transport mass)")
+                    html_genes += report.df_to_html(
+                        pd.DataFrame(pp_summary_rows),
+                        caption=(
+                            f"Fig 2F per-pair detail summary "
+                            f"({len(pp_summary_rows)} pairs, "
+                            f"MAX_SIG_PAIRS = {MAX_SIG_PAIRS})."
+                        ),
+                    )
 
     except Exception as e:
         log.exception("Fig 2F failed")
@@ -3154,6 +4141,29 @@ def main():
     log.info("=== PHASE 1: Train models ===")
     adata_primary, adata_metastatic, res_primary, res_metastatic = phase1_train_models(report)
     log.info(f"Phase 1 done in {time.time() - t0:.0f}s")
+
+    # Phase 1b: Drift / stability QC panel (W-A7). Surfaces archetype
+    # position drift across epochs to diagnose whether training dynamics
+    # drag archetypes away from their PCHA init.
+    try:
+        from _paper_part1_viz import build_drift_qc_panel
+        drift_panel_html = build_drift_qc_panel(
+            [("Primary", res_primary), ("Metastatic", res_metastatic)],
+            drift_threshold=0.01,
+            converged_window=10,
+        )
+        report.add_section(
+            "Drift & Stability QC (W-A7)",
+            drift_panel_html,
+            step_num="1b",
+        )
+    except Exception as e:
+        log.exception("Drift QC panel failed")
+        report.add_section(
+            "Drift & Stability QC (W-A7)",
+            error_html(f"Drift QC panel failed: {e}"),
+            step_num="1b",
+        )
 
     # Phase 2: Figure 1
     t1 = time.time()

@@ -429,25 +429,121 @@ def compute_archetype_correspondence(
     For each source cell, the k nearest neighbors in target coordinate space
     are found, their target-model archetype weights are averaged. How that
     per-cell average is then aggregated into a per-source-archetype row
-    depends on `method`:
+    depends on ``method``.
 
-    - ``"hard"`` (DEFAULT): Hard-assign each source cell to its argmax
-      source archetype, then sum the per-cell k-NN target weight averages
-      within each group. This is robust to diffuse source weights and is
-      the default for real data where mean per-cell max source weight is
-      typically below 0.5.
-    - ``"soft"``: Original soft-soft outer-product construction
-      ``mass[i] += source_w[i] ⊗ mean(target_w[nn[i]])``. **Prone to rank-1
-      collapse** when source weights are diffuse (mean per-cell max < ~0.5)
-      because every row of the mass matrix becomes a scaled copy of the
-      same target marginal vector. Kept as a fallback for synthetic /
-      well-peaked cases (e.g. unit tests with peak ≥ 0.9).
-    - ``"sharp"``: Square the source weights element-wise, renormalize each
-      row to the simplex, then run the soft outer-product construction.
-      Intermediate between ``soft`` and ``hard``: still smooth, but
-      effectively boosts the contribution of each cell's dominant
-      archetype, which mitigates (but does not eliminate) the rank-1
-      collapse.
+    Decision guide: which method to use
+    -----------------------------------
+    Quick rule: **always start with "hard" on real data**. Only switch to
+    "sharp" or "soft" if you have a specific reason (synthetic validation,
+    backward compatibility, or mathematical smoothness requirement).
+
+    +-------------+---------------------------+---------------------------+
+    | Method      | Use when                  | Fails when                |
+    +=============+===========================+===========================+
+    | ``"hard"``  | Real scRNA-seq data where | Every source archetype is |
+    | (default)   | source_weight_concentra-  | extrapolated (0-2 cells   |
+    |             | tion < ~0.5 (diffuse      | hard-argmaxed to it) —    |
+    |             | weights). Recommended for | then sparse_archetypes is |
+    |             | almost all production     | non-empty and those rows  |
+    |             | analyses.                 | are zeroed. Bad fit not   |
+    |             |                           | a bad method — retrain.   |
+    +-------------+---------------------------+---------------------------+
+    | ``"sharp"`` | Moderately peaked source  | Still degrades to rank-1  |
+    |             | (concentration 0.5-0.7)   | under severely diffuse    |
+    |             | where you want a          | weights (worse than hard  |
+    |             | smoothed / differentiable | on real HSC/CMP: column   |
+    |             | signal. Empirically mid-  | CV ~0.12 vs hard's ~0.59  |
+    |             | way between soft and hard.| in the r9 investigation). |
+    +-------------+---------------------------+---------------------------+
+    | ``"soft"``  | Synthetic tests with well-| Real data where source    |
+    |             | peaked cells (max weight  | weights are diffuse.      |
+    |             | >= 0.9). Original outer-  | Produces near-identical   |
+    |             | product formulation —     | rows (rank-1 collapse),   |
+    |             | smooth, differentiable,   | column CV < 0.1 = the     |
+    |             | backward-compatible.      | correspondence carries    |
+    |             |                           | essentially no signal.    |
+    +-------------+---------------------------+---------------------------+
+
+    Rank-1 collapse failure mode
+    ----------------------------
+    For ``method="soft"`` the mass computation reduces to
+
+        mass[i, j] = Σ_cells source_w[c, i] * mean_target_w[c, j]
+
+    which factorizes as ``source_weights.T @ nn_tw_mean``. When source
+    weights are diffuse, every row of ``nn_tw_mean`` is similar (the k-NN
+    averaging smooths out per-cell variation), so the matrix product
+    degenerates to a rank-1 outer product of the source marginal and the
+    target marginal. All rows become scaled copies of the same vector —
+    the Markov matrix looks uniform and the correspondence carries no
+    signal. On real HSC/CMP data this manifested as column CV ≈ 0.084 and
+    visually identical Sankey rows (see the r9 investigation).
+
+    The hard method avoids this by hard-assigning each source cell to ONE
+    archetype (argmax) before aggregation. A diffuse weight vector still
+    picks exactly one label, so the per-archetype-group aggregation
+    preserves the true variation between source cells. Column CV jumped
+    from ~0.084 to ~0.586 on the same HSC/CMP data.
+
+    Sparse source archetype handling (hard method only)
+    ---------------------------------------------------
+    After hard argmax, some source archetypes may have very few or zero
+    cells assigned to them (they sit outside the data cloud). These are
+    "extrapolated" archetypes — see W-B10's ``compute_archetype_to_centroid
+    _distance`` for a complementary diagnostic.
+
+    Any source archetype with hard-argmax occupancy below
+    ``max(2, int(0.02 * n_src))`` has its mass row zeroed and its index
+    added to the returned ``sparse_archetypes`` list. A ``logging.warning``
+    is emitted naming the zeroed archetypes. This prevents a handful of
+    outlier cells from producing a noisy correspondence row, but it is a
+    symptom-not-cure intervention: the real fix is to retrain with
+    parameters that keep archetypes inside the data cloud (see W-A5
+    inflation_factor range and W-A6 PCHA init diagnostic).
+
+    Consistency with the rest of the analysis stack
+    -----------------------------------------------
+    The hard method uses ``source_weights.argmax(axis=1)`` for labeling.
+    This matches the assignment produced by
+    ``bin_cells_by_archetype(..., method="argmax")`` (W-B13) when the
+    ``cell_archetype_weights`` obsm is used as the weight source. When both
+    are used together, the correspondence matrix, dotplots, Sankey
+    diagrams, flow models, and pattern analyses all read from the SAME
+    source-cell-to-archetype label vector.
+
+    If you use ``bin_cells_by_archetype(method="bin_prop")`` (the library
+    default) AND ``compute_archetype_correspondence(method="hard")``, the
+    two label vectors can disagree for individual cells. Prefer either:
+
+    1. ``bin_cells_by_archetype(method="argmax")`` + hard correspondence
+       (recommended for cross-analysis consistency), or
+    2. ``bin_cells_by_archetype(method="bin_prop")`` + soft correspondence
+       (if you need the backward-compatible proportional binning AND
+       accept the rank-1 collapse risk on diffuse weights).
+
+    Interpreting source_weight_concentration
+    ----------------------------------------
+    The returned ``source_weight_concentration`` is
+    ``source_weights.max(axis=1).mean()`` — the average of each cell's
+    peak archetype weight. Use it as follows:
+
+    - ``>= 0.7``: well-peaked weights; any method works. Synthetic fixtures
+      typically fall here.
+    - ``0.4 - 0.7``: moderately diffuse; hard is safe, sharp is acceptable,
+      soft may still give signal.
+    - ``< 0.4``: diffuse. Soft WILL produce rank-1 collapse. Use hard.
+      Also consider that the fit itself may be underpowered (W-A3 full
+      data, W-A5 wider inflation grid).
+
+    Sanity check: call the function twice with different methods
+    ------------------------------------------------------------
+    If you are unsure whether the correspondence you see is signal or
+    rank-1 collapse, call this function twice on the same inputs —
+    once with ``method="hard"`` and once with ``method="soft"``. Compare
+    the column CVs of the Markov matrices. If soft's column CV is
+    dramatically lower (e.g. < 0.2) while hard's is higher (e.g. > 0.4),
+    the soft result is unreliable and hard is the truth. If both agree,
+    either method is fine.
 
     Parameters
     ----------
@@ -645,4 +741,231 @@ def compute_archetype_correspondence(
         "target_weight_concentration": tgt_concentration,
         "source_archetype_occupancy_hard": occupancy_hard,
         "sparse_archetypes": sparse_archetypes,
+    }
+
+
+def compute_correspondence_permutation_null(
+    source_weights: np.ndarray,
+    source_coords: np.ndarray,
+    target_weights: np.ndarray,
+    target_coords: np.ndarray,
+    *,
+    k: int = 10,
+    n_perms: int = 200,
+    swap_fractions: tuple = (0.0, 0.05, 0.10, 0.20, 0.35, 0.50),
+    seed: int = 42,
+) -> dict:
+    """Empirical permutation curve null for cross-fit archetype correspondence.
+
+    Replaces the previous Gaussian-z-score null with an empirical, rank-based
+    p-value derived from a degradation curve over a swap-fraction grid. For
+    each ``f`` in ``swap_fractions``, ``n_perms`` permutations swap a fraction
+    ``f`` of cells between the source and target *spatial pools*, recompute
+    ``compute_archetype_correspondence(method="hard")`` on the scrambled pair,
+    and accumulate the resulting [K_src, K_tgt] correspondence matrices into
+    a per-fraction null distribution. The empirical p-value for each
+    source-target pair is computed via rank against the null at the largest
+    swap fraction, then BH-corrected across all K_src * K_tgt pairs.
+
+    DESIGN NOTE — Swap interpretation
+    ---------------------------------
+    Source and target have *different* archetype weight column counts in
+    general (K_src != K_tgt), so we cannot swap weight rows directly between
+    the two populations. We also do not have access to either model to
+    re-project coordinates after a swap. The cleanest valid interpretation is
+    a **coordinate-only swap**:
+
+    1. Pick ``m = int(f * min(n_src, n_tgt))`` source-row indices uniformly
+       at random and a matching ``m`` target-row indices.
+    2. Exchange ``source_coords[src_idx]`` with ``target_coords[tgt_idx]``
+       row-by-row.
+    3. Leave ``source_weights`` and ``target_weights`` UNTOUCHED — each
+       weight row stays bound to its original index in its own model.
+    4. Recompute ``compute_archetype_correspondence`` on the scrambled
+       coordinate arrays.
+
+    Effect on the null:
+        At ``f=0`` no rows are exchanged, so the result equals the
+        observed correspondence exactly. As ``f`` grows, source cells
+        increasingly query the target k-NN tree from positions that did not
+        come from the source population, and target cells sitting at
+        "source-typical" locations contaminate the k-NN neighborhoods of
+        the remaining unswapped source cells. This tests the null:
+        "does the spatial correspondence break down when we scramble cell
+        identity by geography?". A genuine source archetype that maps to a
+        specific target archetype will show degradation (its mass entry
+        regresses toward the matrix mean) only as ``f`` becomes large; a
+        spurious link degrades immediately.
+
+    Why coordinate-only and not row-exchange:
+        Row exchange would require K_src == K_tgt and would make the swap
+        also reshuffle the source archetype assignment vector, which
+        conflates two distinct nulls. Coordinate-only is the minimal
+        intervention that breaks the spatial linkage between source-cell
+        identity and target-cell neighborhood.
+
+    Parameters
+    ----------
+    source_weights : ndarray, shape [n_src, K_src]
+        Source archetype weight matrix.
+    source_coords : ndarray, shape [n_src, d]
+        Source cell coordinates in the common (target) coordinate space.
+    target_weights : ndarray, shape [n_tgt, K_tgt]
+        Target archetype weight matrix.
+    target_coords : ndarray, shape [n_tgt, d]
+        Target cell coordinates.
+    k : int, default 10
+        k-NN parameter forwarded to ``compute_archetype_correspondence``.
+    n_perms : int, default 200
+        Number of permutations PER swap fraction. Total compute is
+        ``n_perms * len(swap_fractions)`` correspondence calls plus one
+        baseline call.
+    swap_fractions : tuple of float, default (0.0, 0.05, 0.10, 0.20, 0.35, 0.50)
+        Fractions of cells to swap. Must include 0.0 as the no-shuffle
+        baseline (the implementation enforces this implicitly: f=0 returns
+        the observed matrix repeated n_perms times in the null
+        distribution).
+    seed : int, default 42
+        RNG seed (``np.random.default_rng(seed)``) for full reproducibility.
+
+    Returns
+    -------
+    dict with keys:
+        observed_mass : ndarray [K_src, K_tgt]
+            Observed correspondence mass matrix at f=0 (no swap baseline).
+        null_distributions : dict[float, ndarray]
+            Maps each swap fraction to a stacked array of shape
+            [n_perms, K_src, K_tgt]. Entries at f=0 are all identical
+            copies of observed_mass (no shuffling occurs).
+        empirical_p : ndarray [K_src, K_tgt]
+            Per-pair empirical p-value computed at the LARGEST swap
+            fraction. ``p[i, j] = (1 + #perms where null_mass[i, j] >=
+            observed_mass[i, j]) / (n_perms + 1)``. Values lie in
+            ``[1/(n_perms+1), 1.0]``.
+        empirical_fdr : ndarray [K_src, K_tgt]
+            BH-corrected p-values across the full K_src * K_tgt family.
+        swap_fractions : tuple of float
+            Echo of the input swap fractions.
+        n_perms : int
+            Echo of n_perms.
+        null_mean_curve : ndarray [n_f, K_src, K_tgt]
+            Per-fraction mean of the null distribution.
+        null_std_curve : ndarray [n_f, K_src, K_tgt]
+            Per-fraction std of the null distribution.
+
+    Notes
+    -----
+    Wall-clock expectations (single core, observed on macOS arm64):
+        - Synthetic test sizes (100 cells, K=3-4, 200 perms x 6 fractions):
+          under 1 second.
+        - Mid scale (2000 cells, K=9-11, 50 perms x 6 fractions): ~12 seconds;
+          extrapolates to ~50 seconds at 200 perms.
+        - Real HSC/CMP scale (~20k cells per population, K=9-11, 200 perms
+          x 6 fractions): approximately 5-10 minutes per fit. The dominant
+          cost is the cKDTree query inside
+          ``compute_archetype_correspondence`` — each permutation rebuilds
+          the tree on the (lightly) scrambled target coordinates.
+          If this is too slow for an iterative workflow, reduce n_perms to
+          50 (resolution drops from 1/201 to 1/51).
+
+    The function deliberately reuses ``compute_archetype_correspondence``
+    rather than inlining a faster path so that any future fix or change to
+    the correspondence logic propagates to the null automatically.
+    """
+    from scipy.stats import false_discovery_control
+
+    source_weights = np.asarray(source_weights, dtype=float)
+    source_coords = np.asarray(source_coords, dtype=float)
+    target_weights = np.asarray(target_weights, dtype=float)
+    target_coords = np.asarray(target_coords, dtype=float)
+
+    n_src = source_weights.shape[0]
+    n_tgt = target_weights.shape[0]
+    K_src = source_weights.shape[1]
+    K_tgt = target_weights.shape[1]
+
+    rng = np.random.default_rng(seed)
+
+    # Baseline (f=0) — call once and reuse for f=0 entries
+    baseline_result = compute_archetype_correspondence(
+        source_weights=source_weights,
+        source_coords=source_coords,
+        target_weights=target_weights,
+        target_coords=target_coords,
+        k=k,
+        method="hard",
+    )
+    observed_mass = baseline_result["mass"].copy()
+
+    # Storage
+    null_distributions: dict = {}
+    null_mean_curve = np.zeros((len(swap_fractions), K_src, K_tgt))
+    null_std_curve = np.zeros((len(swap_fractions), K_src, K_tgt))
+
+    n_swap_max = min(n_src, n_tgt)
+
+    for fi, f in enumerate(swap_fractions):
+        f_val = float(f)
+        m = int(round(f_val * n_swap_max))
+
+        # f=0 (or m == 0): no shuffle — null distribution is the constant
+        # observed matrix. We still populate n_perms slices for shape
+        # consistency with downstream consumers.
+        if m == 0:
+            null_arr = np.broadcast_to(
+                observed_mass, (n_perms, K_src, K_tgt)
+            ).copy()
+            null_distributions[f_val] = null_arr
+            null_mean_curve[fi] = observed_mass
+            null_std_curve[fi] = np.zeros((K_src, K_tgt))
+            continue
+
+        null_arr = np.empty((n_perms, K_src, K_tgt))
+        for p_i in range(n_perms):
+            # Coordinate-only swap (DESIGN NOTE above): pick m source-row
+            # indices and m target-row indices, swap their coordinate rows.
+            src_idx = rng.choice(n_src, size=m, replace=False)
+            tgt_idx = rng.choice(n_tgt, size=m, replace=False)
+
+            sc_perm = source_coords.copy()
+            tc_perm = target_coords.copy()
+            tmp = sc_perm[src_idx].copy()
+            sc_perm[src_idx] = tc_perm[tgt_idx]
+            tc_perm[tgt_idx] = tmp
+
+            perm_result = compute_archetype_correspondence(
+                source_weights=source_weights,
+                source_coords=sc_perm,
+                target_weights=target_weights,
+                target_coords=tc_perm,
+                k=k,
+                method="hard",
+            )
+            null_arr[p_i] = perm_result["mass"]
+
+        null_distributions[f_val] = null_arr
+        null_mean_curve[fi] = null_arr.mean(axis=0)
+        null_std_curve[fi] = null_arr.std(axis=0)
+
+    # Empirical p-values at the LARGEST swap fraction (hardest test).
+    largest_f = max(swap_fractions)
+    null_at_largest = null_distributions[float(largest_f)]
+    # p[i, j] = (1 + #perms with null >= observed) / (n_perms + 1)
+    ge_count = (null_at_largest >= observed_mass[None, :, :]).sum(axis=0)
+    empirical_p = (1.0 + ge_count) / (n_perms + 1.0)
+
+    # BH FDR correction across all K_src * K_tgt pairs.
+    flat_p = np.clip(empirical_p.ravel(), 0.0, 1.0)
+    flat_fdr = false_discovery_control(flat_p, method="bh")
+    empirical_fdr = flat_fdr.reshape(empirical_p.shape)
+
+    return {
+        "observed_mass": observed_mass,
+        "null_distributions": null_distributions,
+        "empirical_p": empirical_p,
+        "empirical_fdr": empirical_fdr,
+        "swap_fractions": tuple(float(f) for f in swap_fractions),
+        "n_perms": int(n_perms),
+        "null_mean_curve": null_mean_curve,
+        "null_std_curve": null_std_curve,
     }

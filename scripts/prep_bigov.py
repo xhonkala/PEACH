@@ -11,22 +11,25 @@ Metastatic sites: BOWEL, INFRACOLIC, PELVIC, ASCITES, LARGE, BLADDER, ANTERIOR,
                   HEPATIC, CECUM, INFRARENAL, LUQ, PELVIS
 
 Steps:
-  1. Load bigOV_10k.h5ad (logcounts already present, X_pca has only 11 comps)
+  1. Load bigOV_10k.h5ad (logcounts)
   2. Parse tissue from barcode, assign primary/metastatic label
   3. Drop cells with unknown tissue (barcode doesn't split cleanly)
-  4. Filter ribosomal protein genes (RPS, RPL, MRPS, MRPL)
-  5. Recompute PCA with 30 components (existing X_pca is only 11)
-  6. Trim outlier cells (|z|>5 on any of first 30 new PCs)
+  4. MT/RB 3-MAD cell filter + MT/RB/MRPL/MRPS/MALAT1 gene filter
+  5. PCA on all genes, unscaled, n_comps = 11 (validated scree elbow)
+  6. Compute HVGs for downstream gene analysis (NOT used for PCA)
   7. 80/20 stratified holdout split per group (stratified by patient within each group)
   8. Save to data/paper_part1_ov/
 """
 
 import os
-import re
+import sys
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import anndata as ad
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _paper_part1_prep import apply_mt_rb_mad_filter
 
 # ---------------------------------------------------------------------------
 # Paths + config
@@ -38,10 +41,11 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 SEED = 42
 HOLDOUT_FRACTION = 0.20
-PC_OUTLIER_SD = 5.0
-N_PCS = 30
 N_HVG = 3000
-RP_PATTERNS = [r"^RPS", r"^RPL", r"^MRPS", r"^MRPL"]
+MT_RB_N_MADS = 3.0
+# PCA dimensions: validated by visual scree elbow on OV data. The automated
+# kneedle detector recovers 11 PCs, matching the user's prior selection.
+N_PCS = 11
 
 PRIMARY_TISSUES = {"RIGHT", "LEFT"}
 METASTATIC_TISSUES = {
@@ -87,68 +91,39 @@ adata = adata[adata.obs["group"].isin(["primary", "metastatic"])].copy()
 print(f"  Dropped {n_before - adata.shape[0]} unknown-tissue cells → {adata.shape[0]} remain")
 
 # ---------------------------------------------------------------------------
-# 4. Filter ribosomal protein genes (match HSC prep)
+# 4. MT/RB 3-MAD cell filter + MT/RB/MALAT1 gene filter (shared helper)
 # ---------------------------------------------------------------------------
-rp_regex = re.compile("|".join(RP_PATTERNS))
-rp_mask = adata.var_names.str.match(rp_regex)
-n_rp = int(rp_mask.sum())
-if n_rp > 0:
-    adata = adata[:, ~rp_mask].copy()
-print(f"\n  RP gene filter: removed {n_rp} RP genes → {adata.shape[1]} genes")
+adata = apply_mt_rb_mad_filter(adata, n_mads=MT_RB_N_MADS)
 
 # ---------------------------------------------------------------------------
-# 5. Recompute PCA with 30 components
+# 5. PCA: all genes, unscaled, n_comps = validated scree elbow
 # ---------------------------------------------------------------------------
-# bigOV's original X_pca has only 11 components, insufficient for paper_part1
-# which needs 30. Recompute from scratch.
-print(f"\n  Computing HVGs (top {N_HVG})...")
-sc.pp.highly_variable_genes(adata, n_top_genes=N_HVG, flavor="seurat", inplace=True)
-print(f"    HVGs: {adata.var['highly_variable'].sum()}")
+# Cell QC is done (MT/RB MAD + tissue classification). PCA just selects
+# dimensions. No scaling (destroys convex-hull extremes), no HVG subsetting
+# (misses full variance structure). All genes, unscaled logcounts.
+print(f"\n  Computing PCA on ALL {adata.shape[1]} genes, unscaled, n_comps={N_PCS}...")
+sc.tl.pca(adata, n_comps=N_PCS, svd_solver="arpack")
 
-print(f"  Computing PCA ({N_PCS} components)...")
-# Scale subset on HVGs only, compute PCA
-adata_hvg = adata[:, adata.var["highly_variable"]].copy()
-sc.pp.scale(adata_hvg, max_value=10)
-sc.tl.pca(adata_hvg, n_comps=N_PCS, svd_solver="arpack")
-
-# Copy PCA back to main adata + pad loadings to full gene space
-adata.obsm["X_pca"] = adata_hvg.obsm["X_pca"]
-adata.uns["pca"] = adata_hvg.uns["pca"]
-
-# Full-gene loadings: HVG rows filled, non-HVG rows zero
-hvg_indices = np.where(adata.var["highly_variable"].values)[0]
-full_loadings = np.zeros((adata.shape[1], N_PCS), dtype=np.float32)
-full_loadings[hvg_indices] = adata_hvg.varm["PCs"].astype(np.float32)
-adata.varm["PCs"] = full_loadings
-
-variances = np.var(adata.obsm["X_pca"], axis=0)
-total_var = variances.sum()
-vr = variances / total_var
-cumvar = np.cumsum(vr)
-print(f"    PCA variance: PC1={vr[0]:.4f}, cumvar@{N_PCS}={cumvar[-1]:.4f}")
+vr_scanpy = np.asarray(adata.uns["pca"]["variance_ratio"])
+cumvar = np.cumsum(vr_scanpy)
+print(
+    f"    PCA variance (scanpy): PC1={vr_scanpy[0]:.4f}, "
+    f"cumvar@{N_PCS}={cumvar[-1]:.4f}"
+)
 adata.uns["n_pcs_selected"] = N_PCS
 adata.uns["cumvar_at_selection"] = float(cumvar[-1])
+print(f"  {adata.shape[0]} cells x {N_PCS} PCs")
 
-# ---------------------------------------------------------------------------
-# 6. Trim PC outliers
-# ---------------------------------------------------------------------------
-pca_mat = adata.obsm["X_pca"]
-pca_mean = pca_mat.mean(axis=0, keepdims=True)
-pca_std = pca_mat.std(axis=0, keepdims=True)
-pca_std[pca_std < 1e-10] = 1.0
-pca_z = (pca_mat - pca_mean) / pca_std
-outlier_mask = (np.abs(pca_z) > PC_OUTLIER_SD).any(axis=1)
-n_outlier = int(outlier_mask.sum())
-if n_outlier > 0:
-    adata = adata[~outlier_mask].copy()
-print(f"\n  PC outlier trim (|z|>{PC_OUTLIER_SD}): removed {n_outlier} → {adata.shape[0]} cells")
-print(f"  Post-trim groups: {dict(adata.obs['group'].value_counts())}")
+# HVGs still useful downstream (gene alignment, simplex regression) but NOT for PCA.
+print(f"\n  Computing HVGs (top {N_HVG}) for downstream gene analysis...")
+sc.pp.highly_variable_genes(adata, n_top_genes=N_HVG, flavor="seurat", inplace=True)
+print(f"    HVGs: {adata.var['highly_variable'].sum()}")
 
 # Also retain cell_type for compat with paper_part1 script (uses cell_type for stratification)
 adata.obs["cell_type"] = adata.obs["group"].astype("category")
 
 # ---------------------------------------------------------------------------
-# 7. 80/20 stratified holdout within each group (stratified by patient too)
+# 7. 80/20 stratified holdout (stratified by patient within each group)
 # ---------------------------------------------------------------------------
 rng = np.random.default_rng(SEED)
 holdout_mask = np.zeros(adata.shape[0], dtype=bool)

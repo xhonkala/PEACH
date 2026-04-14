@@ -446,9 +446,12 @@ class Deep_AA(VAE_Base):
         """Encourage diversity among archetypes.
 
         Vectorized implementation using broadcasting for GPU efficiency.
-        Penalizes archetypes that are too close together.
+        Penalizes archetypes that are too close together. Uses effective
+        (post-transform) archetype positions so the penalty constrains
+        where archetypes actually act for reconstruction, not just the
+        raw learnable parameters.
         """
-        archetypes = self.archetypes
+        archetypes = self.get_effective_archetypes()
         n_archetypes = archetypes.shape[0]
 
         # Vectorized pairwise distances using broadcasting
@@ -476,9 +479,12 @@ class Deep_AA(VAE_Base):
     def manifold_regularization_loss(self, input: torch.Tensor) -> torch.Tensor:
         """Keep archetypes on data manifold.
 
-        Vectorized implementation for GPU efficiency.
+        Vectorized implementation for GPU efficiency. Uses effective
+        (post-transform) archetype positions so the penalty constrains
+        where archetypes actually act for reconstruction, not just the
+        raw learnable parameters.
         """
-        archetypes = self.archetypes
+        archetypes = self.get_effective_archetypes()
         data_sample = input[: min(200, input.shape[0])]
         batch_size = data_sample.shape[0]
 
@@ -668,9 +674,12 @@ class Deep_AA(VAE_Base):
             active_archetypes_per_sample = (z > 0.01).sum(dim=1).float().mean()
 
             # Manifold quality metrics (VECTORIZED - no numpy, stays on GPU)
+            # Use effective archetypes so reported distances match the positions
+            # that reconstruction actually uses (when use_hidden_transform=True).
             data_sample = input[: min(100, input.shape[0])]
+            effective_archetypes = self.get_effective_archetypes()
             # Compute all pairwise distances: (n, k)
-            diff = data_sample.unsqueeze(1) - self.archetypes.unsqueeze(0)
+            diff = data_sample.unsqueeze(1) - effective_archetypes.unsqueeze(0)
             all_distances = torch.norm(diff, dim=2)
             # Min distance from each archetype to data
             min_dists_per_archetype = all_distances.min(dim=0)[0]  # (k,)

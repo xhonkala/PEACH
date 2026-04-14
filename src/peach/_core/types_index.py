@@ -213,4 +213,3 @@ PITFALLS = {
     "distance_vs_weight": "Distance-based and weight-based archetype assignment disagree for ~60% of cells - this is expected.",
     "FRGeom_returns": "torch.Tensor, NOT numpy arrays.",
 }
-

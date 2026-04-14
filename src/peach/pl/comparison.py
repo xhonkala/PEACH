@@ -313,16 +313,18 @@ def feature_similarity_heatmap(
         )
 
     spearman = np.asarray(sim_data["spearman_matrix"])
-    K = spearman.shape[0]
-    labels = [f"A{i+1}" for i in range(K)]
+    K_rows = spearman.shape[0]
+    K_cols = spearman.shape[1] if spearman.ndim > 1 else K_rows
+    y_labels = [f"A{i+1}" for i in range(K_rows)]
+    x_labels = [f"A{j+1}" for j in range(K_cols)]
 
     # Format rho values as text annotations on each cell
-    text_matrix = [[f"{spearman[i, j]:.2f}" for j in range(K)] for i in range(K)]
+    text_matrix = [[f"{spearman[i, j]:.2f}" for j in range(K_cols)] for i in range(K_rows)]
 
     fig = go.Figure(data=go.Heatmap(
         z=spearman,
-        x=labels,
-        y=labels,
+        x=x_labels,
+        y=y_labels,
         text=text_matrix,
         texttemplate="%{text}",
         textfont=dict(size=10),

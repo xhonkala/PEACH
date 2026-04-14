@@ -20,7 +20,13 @@ def _classify_interaction_detail(vertex_betas, interaction_betas, interaction_pa
 
     betas = np.asarray(vertex_betas)
     int_betas = np.asarray(interaction_betas)
-    median_abs_beta = np.median(np.abs(betas))
+
+    # R2-based classification: use beta^2 as a proxy for per-archetype
+    # variance explained. More interpretable than raw beta for pattern
+    # classification because it reflects position dependence strength
+    # rather than theoretical expression magnitude.
+    r2_proxy = betas ** 2
+    median_r2 = float(np.median(r2_proxy))
 
     detail = []
     for pair_idx, (j, k) in enumerate(interaction_pairs):
@@ -29,13 +35,19 @@ def _classify_interaction_detail(vertex_betas, interaction_betas, interaction_pa
             if pair_idx < len(interaction_pvalues_fdr) and interaction_pvalues_fdr[pair_idx] >= fdr_threshold:
                 continue
 
-        gamma = float(int_betas[pair_idx]) if pair_idx < len(int_betas) else 0.0
+        int_gamma_raw = float(int_betas[pair_idx]) if pair_idx < len(int_betas) else 0.0
         beta_j = float(betas[j])
         beta_k = float(betas[k])
 
-        # Classify the vertex relationship
-        j_high = abs(beta_j) > median_abs_beta
-        k_high = abs(beta_k) > median_abs_beta
+        # R2-based gamma: fraction of pair variance from archetype j.
+        # Range [0, 1]: >0.5 = j-dominant, <0.5 = k-dominant, ~0.5 = balanced.
+        r2_j = beta_j ** 2
+        r2_k = beta_k ** 2
+        gamma = r2_j / (r2_j + r2_k + 1e-10)
+
+        # Classify using R2 proxy thresholds
+        j_high = r2_j > median_r2
+        k_high = r2_k > median_r2
         same_sign = (np.sign(beta_j) == np.sign(beta_k)
                      and beta_j != 0 and beta_k != 0)
 
@@ -43,12 +55,12 @@ def _classify_interaction_detail(vertex_betas, interaction_betas, interaction_pa
             pair_type = "cooperative"
         elif (j_high and not k_high) or (not j_high and k_high):
             pair_type = "tradeoff"
-        elif not j_high and not k_high and abs(gamma) > median_abs_beta:
+        elif not j_high and not k_high and abs(int_gamma_raw) > np.sqrt(median_r2):
             pair_type = "transition-enriched"
         else:
             pair_type = "gradient"
 
-        transition = "rising" if gamma > 0 else "falling"
+        transition = "rising" if int_gamma_raw > 0 else "falling"
 
         detail.append({
             "pair": (int(j), int(k)),

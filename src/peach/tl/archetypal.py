@@ -14,7 +14,7 @@ The module integrates PCHA initialization, inflation factors, and comprehensive
 training diagnostics for production-ready archetypal analysis workflows.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -38,6 +38,7 @@ def train_archetypal(
     # Model architecture parameters
     hidden_dims: list[int] | None = None,
     inflation_factor: float = 1.5,
+    pcha_init: bool = True,
     # Config dicts (for advanced users)
     model_config: dict[str, Any] | None = None,
     optimizer_config: dict[str, Any] | None = None,
@@ -104,6 +105,12 @@ def train_archetypal(
         PCHA inflation factor for archetype initialization. Values > 1.0 push
         initial archetypes further from the data centroid, improving separation.
         Recommended range: 1.2-2.0. Higher values for more distinct archetypes.
+    pcha_init : bool, default: True
+        Whether to use PCHA initialization for archetype positions. When True,
+        archetypes are seeded via Principal Convex Hull Analysis on a (sub)sample
+        of the data, then optionally inflated. When False, the model falls back
+        to its built-in furthest-sum random init. Comparison runs with
+        ``pcha_init=False`` are useful to verify whether PCHA seeding is helping.
     model_config : dict | None, default: None
         Additional model configuration parameters (for advanced users):
 
@@ -388,33 +395,73 @@ def train_archetypal(
     model = Deep_AA(**default_model_config)
     optimizer = torch.optim.Adam(model.parameters(), **default_optimizer_config)
 
-    # CRITICAL: Initialize with PCHA + inflation (user's successful setup!)
-    print(f" Initializing with PCHA + inflation_factor={default_model_config['inflation_factor']}...")
+    # W-A6: track whether PCHA init actually fired so the user can verify
+    # downstream. This is a diagnostic only — does NOT change runtime behavior.
+    _pcha_init_fired = False
 
-    # Get sample data for PCHA initialization
+    # Get sample data for archetype initialization
     # Ensure contiguous array (fixes negative stride issue)
     pca_sample = np.ascontiguousarray(adata.obsm[pca_key][:, :input_dim])
     sample_data = torch.FloatTensor(pca_sample)
 
-    try:
-        if hasattr(model, "initialize_archetypes"):
-            success = model.initialize_archetypes(
-                sample_data,
-                use_pcha=True,
-                use_inflation=True,
-                inflation_factor=default_model_config["inflation_factor"],
-            )
-        else:
-            # Fallback to deprecated method
-            success = model.initialize_with_pcha_and_inflation(
-                sample_data, inflation_factor=default_model_config["inflation_factor"], n_subsample=1000
-            )
-        if success:
-            print("[OK] PCHA + inflation initialization successful!")
-        else:
-            print("[WARNING] PCHA initialization failed, using default initialization")
-    except Exception as e:
-        print(f"[WARNING] PCHA initialization error: {e}, using default initialization")
+    if pcha_init:
+        # CRITICAL: Initialize with PCHA + inflation (user's successful setup!)
+        print(f" Initializing with PCHA + inflation_factor={default_model_config['inflation_factor']}...")
+
+        try:
+            if hasattr(model, "initialize_archetypes"):
+                success = model.initialize_archetypes(
+                    sample_data,
+                    use_pcha=True,
+                    use_inflation=True,
+                    inflation_factor=default_model_config["inflation_factor"],
+                )
+            else:
+                # Fallback to deprecated method
+                success = model.initialize_with_pcha_and_inflation(
+                    sample_data, inflation_factor=default_model_config["inflation_factor"], n_subsample=1000
+                )
+            if success:
+                print("[OK] PCHA + inflation initialization successful!")
+                # W-A6 diagnostic: log explicit confirmation + L2 norm so the
+                # user can see in stdout that PCHA actually placed archetypes
+                # at sane values (vs random max-distance bounding box).
+                try:
+                    arch_tensor = model.archetypes.detach().cpu().numpy()
+                    arch_l2_norm = float(np.linalg.norm(arch_tensor))
+                    arch_per_row = np.linalg.norm(arch_tensor, axis=1)
+                    print(
+                        f"[PCHA INIT] firing: n_archetypes={n_archetypes}, "
+                        f"n_features={input_dim}, init_method=PCHA+inflation"
+                        f"({default_model_config['inflation_factor']}), "
+                        f"positions_L2_norm={arch_l2_norm:.4f}, "
+                        f"per_archetype_L2 min/median/max="
+                        f"{arch_per_row.min():.4f}/"
+                        f"{float(np.median(arch_per_row)):.4f}/"
+                        f"{arch_per_row.max():.4f}"
+                    )
+                    _pcha_init_fired = True
+                except Exception as _diag_exc:  # pragma: no cover - diagnostics
+                    print(f"[PCHA INIT] firing diagnostic computation failed: {_diag_exc}")
+                    _pcha_init_fired = True  # init still ran successfully
+            else:
+                print("[WARNING] PCHA initialization failed, using default initialization")
+        except Exception as e:
+            print(f"[WARNING] PCHA initialization error: {e}, using default initialization")
+    else:
+        # W-A6: explicit comparison path — skip PCHA, use furthest-sum fallback.
+        print(" pcha_init=False — skipping PCHA, using furthest-sum fallback init")
+        try:
+            if hasattr(model, "initialize_archetypes"):
+                model.initialize_archetypes(
+                    sample_data,
+                    use_pcha=False,
+                    use_inflation=False,
+                )
+            else:
+                model.initialize_archetypes_furthest_sum(sample_data)
+        except Exception as e:
+            print(f"[WARNING] Furthest-sum init error: {e}")
 
     # Train model (delegate to existing battle-tested function)
     results = _train_vae(
@@ -474,6 +521,17 @@ def train_archetypal(
     training_config = results_dict.get("training_config", {})
     if "actual_epochs" in training_config:
         results_dict["convergence_epoch"] = training_config["actual_epochs"]
+
+    # W-A6: surface PCHA init diagnostic so downstream code/QC can verify it
+    # actually fired. Also store the requested flag for paper trail.
+    results_dict["pcha_init_fired"] = bool(_pcha_init_fired)
+    results_dict["pcha_init_requested"] = bool(pcha_init)
+    # Mirror onto training_config for HTML reports that read from there.
+    results_dict.setdefault("training_config", {})
+    results_dict["training_config"]["pcha_init_requested"] = bool(pcha_init)
+    results_dict["training_config"]["pcha_init_fired"] = bool(_pcha_init_fired)
+    # Also stash on adata.uns so notebooks/reports can grep for it after-the-fact.
+    adata.uns["pcha_init_fired"] = bool(_pcha_init_fired)
 
     # Optional: validate internally (catches bugs early)
     # validate_training_results(results_dict)
@@ -551,24 +609,40 @@ def assign_archetypes(
     obs_key: str = "archetypes",
     include_central_archetype: bool = True,
     verbose: bool = True,
+    method: Literal["bin_prop", "argmax"] = "bin_prop",
+    weights_key: str = "cell_archetype_weights",
     **kwargs,
 ) -> None:
-    """Assign cells to archetypes based on distances.
+    """Assign cells to archetypes based on distances or barycentric weights.
 
     Parameters
     ----------
     adata : AnnData
         Annotated data object with archetype distances
     percentage_per_archetype : float, default: 0.1
-        Percentage of cells to assign to each archetype
+        Percentage of cells to assign to each archetype. Ignored when
+        ``method="argmax"``.
     obsm_key : str, default: "archetype_distances"
         Key in adata.obsm containing distance matrix
     obs_key : str, default: "archetypes"
         Key to store assignments in adata.obs
     include_central_archetype : bool, default: True
-        Whether to include a central archetype (cells far from all extreme archetypes)
+        Whether to include a central archetype (cells far from all extreme
+        archetypes). Ignored when ``method="argmax"`` (a warning is issued
+        if ``True``).
     verbose : bool, default: True
         Whether to print progress messages
+    method : {"bin_prop", "argmax"}, default: "bin_prop"
+        Assignment strategy. ``"bin_prop"`` preserves the historical
+        behavior (top N% closest cells per archetype). ``"argmax"`` assigns
+        each cell to the archetype with the highest barycentric weight in
+        ``adata.obsm[weights_key]``, matching the hard source-label
+        convention used by
+        :func:`peach._core.utils.archetype_comparison.compute_archetype_correspondence`.
+    weights_key : str, default: "cell_archetype_weights"
+        Key in ``adata.obsm`` for the barycentric weight matrix. Only used
+        when ``method="argmax"``. If missing, falls back to
+        ``argmin(adata.obsm[obsm_key])`` with a ``UserWarning``.
     **kwargs
         Additional arguments passed to bin_cells_by_archetype
     """
@@ -587,6 +661,8 @@ def assign_archetypes(
         obs_key=obs_key,
         include_central_archetype=include_central_archetype,
         verbose=verbose,
+        method=method,
+        weights_key=weights_key,
         **kwargs,
     )
 
