@@ -1827,3 +1827,54 @@ def build_archetype_hypergeometric_tables(
         out[cov] = df
 
     return out
+
+
+def build_holdout_projection_qc(
+    cells_train,
+    reconstruction_train,
+    cells_holdout,
+    reconstruction_holdout,
+    archetype_positions,
+) -> dict:
+    """Archetypal R² on train + holdout, plus per-cell NN distance to the
+    nearest archetype position for the holdout set.
+
+    Parameters
+    ----------
+    cells_train, cells_holdout : np.ndarray
+        Shape ``(n_cells, n_dims)`` in the same coord space as
+        ``archetype_positions`` (typically PCA or a learned latent).
+    reconstruction_train, reconstruction_holdout : np.ndarray
+        Same shape — the archetype-weighted reconstructions
+        (``weights @ archetype_positions``).
+    archetype_positions : np.ndarray
+        Shape ``(K, n_dims)``.
+
+    Returns
+    -------
+    dict : ``train_r2``, ``holdout_r2``, ``holdout_mean_nn_dist``,
+           ``holdout_median_nn_dist``.
+    """
+    import numpy as np
+
+    def _arch_r2(original, recon):
+        # Mirrors peach.calculate_archetype_r2 semantics — per-feature mean
+        # centering, scalar ss_tot if >1D.
+        ss_res = float(np.sum((original - recon) ** 2))
+        ss_tot = float(np.sum((original - original.mean(axis=0)) ** 2))
+        return 1.0 - ss_res / max(ss_tot, 1e-12)
+
+    train_r2 = _arch_r2(cells_train, reconstruction_train)
+    holdout_r2 = _arch_r2(cells_holdout, reconstruction_holdout)
+
+    # NN distance from each holdout cell to nearest archetype
+    diff = cells_holdout[:, None, :] - archetype_positions[None, :, :]
+    dists = np.linalg.norm(diff, axis=2)  # (n_holdout, K)
+    nn = dists.min(axis=1)
+
+    return {
+        "train_r2": train_r2,
+        "holdout_r2": holdout_r2,
+        "holdout_mean_nn_dist": float(nn.mean()),
+        "holdout_median_nn_dist": float(np.median(nn)),
+    }

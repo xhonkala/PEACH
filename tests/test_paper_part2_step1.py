@@ -327,3 +327,58 @@ def test_hypergeometric_enriched_archetype_has_low_q():
     df = tables["response_group"]
     q_NR = df.loc[df["archetype"] == 0, "q_NR"].iat[0]
     assert q_NR < 0.05
+
+
+# ============================================================================
+# Task 7 — build_holdout_projection_qc
+# ============================================================================
+
+
+def test_holdout_projection_qc_identical_inputs_match():
+    """When train == holdout, R²s should match and NN distance mean should be low."""
+    from _paper_part1_viz import build_holdout_projection_qc
+
+    rng = np.random.default_rng(0)
+    K, D = 4, 12
+    archetypes = rng.normal(size=(K, D))
+    cells = rng.normal(size=(300, D))
+    # archetypal R² uses: original vs reconstruction = weights @ archetypes
+    weights = rng.dirichlet(alpha=[1.0] * K, size=300)
+    reconstruction = weights @ archetypes
+
+    qc = build_holdout_projection_qc(
+        cells_train=cells,
+        reconstruction_train=reconstruction,
+        cells_holdout=cells,
+        reconstruction_holdout=reconstruction,
+        archetype_positions=archetypes,
+    )
+    assert "train_r2" in qc and "holdout_r2" in qc
+    assert abs(qc["train_r2"] - qc["holdout_r2"]) < 1e-6
+    assert qc["holdout_mean_nn_dist"] >= 0.0
+
+
+def test_holdout_projection_qc_worse_when_holdout_is_noise():
+    """Train R² >> holdout R² when train cells are near their reconstruction but
+    holdout cells are unrelated noise — the archetypes explain train well, not holdout."""
+    from _paper_part1_viz import build_holdout_projection_qc
+
+    rng = np.random.default_rng(0)
+    K, D = 4, 10
+    archetypes = rng.normal(size=(K, D))
+
+    # Train: cells ≈ reconstruction + tiny noise → R² close to 1
+    weights_train = rng.dirichlet([1.0] * K, size=200)
+    recon_train = weights_train @ archetypes
+    cells_train = recon_train + rng.normal(size=(200, D)) * 0.05
+
+    # Holdout: pure noise cells, archetype reconstruction is unrelated → R² << 0
+    cells_holdout = rng.normal(size=(200, D)) * 3.0
+    weights_holdout = rng.dirichlet([1.0] * K, size=200)
+    recon_holdout = weights_holdout @ archetypes
+
+    qc = build_holdout_projection_qc(
+        cells_train, recon_train, cells_holdout, recon_holdout, archetypes
+    )
+    # Holdout R² should be much worse than train
+    assert qc["holdout_r2"] < qc["train_r2"]
