@@ -1742,3 +1742,88 @@ def build_archetype_char_table(
 
     df = pd.DataFrame(rows)
     return df
+
+
+def build_archetype_hypergeometric_tables(
+    obs,
+    archetypes_col: str,
+    covariate_cols: Sequence[str],
+    min_level_cells: int = 50,
+) -> dict:
+    """Per-covariate archetype enrichment tables.
+
+    For each covariate (e.g., ``response_group``), build a K × L table
+    where L = number of levels with ≥ ``min_level_cells``. Each cell
+    reports ``OR (p, q)`` for the 2x2 Fisher test of
+    "cells in archetype ∩ cells in level" vs margins.
+
+    Parameters
+    ----------
+    obs : pd.DataFrame
+        Cell-level metadata with at least ``archetypes_col`` and each column
+        in ``covariate_cols``.
+    archetypes_col : str
+        Column name holding archetype assignments (integer or string labels).
+    covariate_cols : Sequence[str]
+        Categorical covariate columns to test (e.g. ``["response_group",
+        "treatment"]``).
+    min_level_cells : int, optional
+        Levels with fewer than this many cells are dropped. Default 50.
+
+    Returns
+    -------
+    dict[str, pd.DataFrame]
+        Keyed by covariate name. Each DataFrame has columns:
+        ``archetype``, ``OR_{level}``, ``p_{level}``, ``q_{level}``
+        for each surviving level. ``q`` values are BH-corrected across all
+        archetype × level tests within that covariate.
+    """
+    import numpy as np
+    import pandas as pd
+    from scipy.stats import fisher_exact
+    try:
+        from statsmodels.stats.multitest import multipletests
+    except ImportError as e:
+        raise ImportError("statsmodels required for BH correction") from e
+
+    obs = obs.loc[obs[archetypes_col].notna()].copy()
+    archetype_ids = sorted(obs[archetypes_col].unique())
+    K = len(archetype_ids)
+    out: dict = {}
+
+    for cov in covariate_cols:
+        vc = obs[cov].value_counts()
+        keep_levels = vc[vc >= min_level_cells].index.tolist()
+        if not keep_levels:
+            out[cov] = pd.DataFrame({"archetype": archetype_ids})
+            continue
+
+        # Compute OR + p per (archetype × level)
+        ors = np.full((K, len(keep_levels)), np.nan)
+        ps = np.full((K, len(keep_levels)), np.nan)
+        for ai, a in enumerate(archetype_ids):
+            in_arch = obs[archetypes_col] == a
+            for li, lv in enumerate(keep_levels):
+                in_lv = obs[cov] == lv
+                a11 = int((in_arch & in_lv).sum())
+                a12 = int((in_arch & ~in_lv).sum())
+                a21 = int((~in_arch & in_lv).sum())
+                a22 = int((~in_arch & ~in_lv).sum())
+                table = [[a11, a12], [a21, a22]]
+                or_val, pval = fisher_exact(table, alternative="two-sided")
+                ors[ai, li] = or_val
+                ps[ai, li] = pval
+
+        # BH correction across all (archetype × level) tests in this covariate
+        flat_p = ps.flatten()
+        _, qs, _, _ = multipletests(flat_p, method="fdr_bh")
+        qs = qs.reshape(ps.shape)
+
+        df = pd.DataFrame({"archetype": archetype_ids})
+        for li, lv in enumerate(keep_levels):
+            df[f"OR_{lv}"] = ors[:, li]
+            df[f"p_{lv}"] = ps[:, li]
+            df[f"q_{lv}"] = qs[:, li]
+        out[cov] = df
+
+    return out

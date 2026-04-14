@@ -269,3 +269,61 @@ def test_archetype_char_table_top_genes_populated():
     )
     assert df.loc[df["archetype"] == 0, "top_genes"].iat[0] == "GeneA, GeneB"
     assert df.loc[df["archetype"] == 1, "top_genes"].iat[0] == "GeneC"
+
+
+# ============================================================================
+# Task 6 — build_archetype_hypergeometric_tables
+# ============================================================================
+
+
+def test_hypergeometric_tables_schema_and_bh_monotonic():
+    from _paper_part1_viz import build_archetype_hypergeometric_tables
+    import pandas as pd
+
+    rng = np.random.default_rng(7)
+    n = 600
+    K = 4
+    # Strong enrichment: archetype 0 is 80% NR
+    arch = rng.integers(0, K, n)
+    resp = np.array([
+        "NR" if (a == 0 and rng.random() < 0.8) else rng.choice(["R1", "R2", "NR"])
+        for a in arch
+    ])
+    obs = pd.DataFrame({
+        "archetypes": arch,
+        "response_group": resp,
+        "treatment": rng.choice(["Base", "PD1"], n),
+    })
+    tables = build_archetype_hypergeometric_tables(
+        obs, archetypes_col="archetypes",
+        covariate_cols=["response_group", "treatment"],
+    )
+    assert "response_group" in tables and "treatment" in tables
+    for name, df in tables.items():
+        # columns: archetype + for each level: OR, p, q
+        # Check monotonicity: sorted-by-p q-values are ≥ sorted p-values
+        # (simple BH check: every q-value is ≥ corresponding p-value)
+        p_cols = [c for c in df.columns if c.startswith("p_")]
+        q_cols = [c.replace("p_", "q_") for c in p_cols]
+        for pc, qc in zip(p_cols, q_cols):
+            assert (df[qc].values >= df[pc].values - 1e-12).all(), \
+                f"BH q<p violation in {name}.{qc}"
+
+
+def test_hypergeometric_enriched_archetype_has_low_q():
+    """Archetype 0 enriched for NR should have q < 0.05 on NR column."""
+    from _paper_part1_viz import build_archetype_hypergeometric_tables
+    import pandas as pd
+
+    rng = np.random.default_rng(3)
+    n = 1200
+    arch = rng.integers(0, 4, n)
+    resp = np.where((arch == 0) & (rng.random(n) < 0.9), "NR",
+                     rng.choice(["R1", "R2", "NR"], n))
+    obs = pd.DataFrame({"archetypes": arch, "response_group": resp})
+    tables = build_archetype_hypergeometric_tables(
+        obs, "archetypes", ["response_group"]
+    )
+    df = tables["response_group"]
+    q_NR = df.loc[df["archetype"] == 0, "q_NR"].iat[0]
+    assert q_NR < 0.05
