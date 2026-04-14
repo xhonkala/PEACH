@@ -241,29 +241,40 @@ def phase1_train_model(report: HTMLReport):
     print(f"  phase1: CV picked K={K_pick} hidden={hd_pick} "
           f"inflation={inf_pick} (R²={best_entry['metric_value']:.3f})")
 
-    # 1b — final fit
+    # 1b — final fit (Part 1 conventions: explicit kwargs, hidden_dims + kld
+    # + archetypal + inflation at top level, only manifold_weight inside model_config)
     res = pc.tl.train_archetypal(
         adata_train,
         n_archetypes=K_pick,
         pca_key="X_pca",
         n_epochs=MAX_EPOCHS_FINAL,
-        early_stop_patience=EARLY_STOP_PATIENCE,
+        hidden_dims=hd_pick,
+        inflation_factor=inf_pick,
+        kld_weight=MODEL_CONFIG["kld_weight"],
+        archetypal_weight=MODEL_CONFIG["archetypal_weight"],
         pcha_init=True,
-        model_config={
-            **MODEL_CONFIG,
-            "hidden_dims": hd_pick,
-            "inflation_factor": inf_pick,
-        },
+        early_stopping=True,
+        early_stopping_patience=EARLY_STOP_PATIENCE,
+        model_config={"manifold_weight": MODEL_CONFIG["manifold_weight"]},
     )
 
-    # 1c — extract coords + assignments on train
-    pc.tl.archetypal_coordinates(adata_train, training_results=res)
-    pc.tl.assign_archetypes(adata_train, percentage_per_archetype=0.15)
+    # 1c — extract coords + weights + assignments on train.
+    # `train_archetypal` has already stored the model at adata.uns['trained_model']
+    # and archetype_coordinates is read from adata.uns['archetype_coordinates'].
+    pc.tl.archetypal_coordinates(adata_train, verbose=False)
+    pc.tl.extract_archetype_weights(adata_train, verbose=False)
+    pc.tl.assign_archetypes(adata_train, percentage_per_archetype=0.15, verbose=False)
 
-    # 1d — project holdout through trained model
+    # 1d — project holdout through trained model. Transfer the trained_model +
+    # archetype_coordinates entries so the same helpers work on the holdout adata.
     model = res.get("model") or res.get("final_model")
-    pc.tl.extract_archetype_weights(adata_holdout, model=model, pca_key="X_pca")
-    pc.tl.archetypal_coordinates(adata_holdout, training_results=res)
+    for key in ("trained_model", "archetype_coordinates"):
+        if key in adata_train.uns:
+            adata_holdout.uns[key] = adata_train.uns[key]
+    pc.tl.extract_archetype_weights(adata_holdout, model=model,
+                                      pca_key="X_pca", verbose=False)
+    pc.tl.archetypal_coordinates(adata_holdout, verbose=False)
+    pc.tl.assign_archetypes(adata_holdout, percentage_per_archetype=0.15, verbose=False)
 
     # 1e — Phase 1 section
     html_parts: list = []
@@ -300,23 +311,27 @@ def phase1_train_model(report: HTMLReport):
     except Exception as e:
         html_parts.append(error_html(f"drift QC failed: {e}"))
 
-    # Convergence flag
+    # Convergence flag — convergence_status returns (status_str, delta_mean_float)
     try:
-        status = convergence_status(
-            res["history"], max_epochs=MAX_EPOCHS_FINAL,
-            early_stop_triggered=res.get("early_stopped", False),
-            actual_epochs=len(res["history"].get("loss", [])),
+        tc = res.get("training_config", {})
+        hist = res.get("history", {})
+        actual_epochs = tc.get("actual_epochs", len(hist.get("loss", [])))
+        early_stop = tc.get("early_stop_triggered", res.get("early_stopped", False))
+        status_str, delta_mean = convergence_status(
+            history=hist, max_epochs=MAX_EPOCHS_FINAL,
+            early_stop_triggered=bool(early_stop),
+            actual_epochs=int(actual_epochs),
         )
         html_parts.append(
-            f"<p><strong>Convergence status:</strong> {status['status']} "
-            f"(Δloss={status.get('delta_mean', float('nan')):.4g})</p>"
+            f"<p><strong>Convergence status:</strong> {status_str} "
+            f"(Δloss={delta_mean:.4g}, actual_epochs={actual_epochs})</p>"
         )
     except Exception as e:
         html_parts.append(error_html(f"convergence_status failed: {e}"))
 
     # Holdout projection QC
     try:
-        archetype_positions = np.asarray(res["archetype_coords"])
+        archetype_positions = np.asarray(adata_train.uns["archetype_coordinates"])
         weights_train = adata_train.obsm["cell_archetype_weights"]
         weights_holdout = adata_holdout.obsm["cell_archetype_weights"]
         recon_train = weights_train @ archetype_positions
@@ -406,7 +421,7 @@ def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
         fig_facet = make_subplots(rows=1, cols=3,
                                     specs=[[{"type": "scatter3d"}] * 3],
                                     subplot_titles=("Base", "PD1", "RTPD1"))
-        archetype_pos = np.asarray(res["archetype_coords"])[:, :3]
+        archetype_pos = np.asarray(adata_train.uns["archetype_coordinates"])[:, :3]
         for col, tp in enumerate(("Base", "PD1", "RTPD1"), start=1):
             mask = (adata_train.obs["treatment"].astype(str) == tp).values
             pts = adata_train.obsm["X_pca"][mask, :3]
@@ -435,7 +450,7 @@ def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
     # 2.4 — holdout projection visualization
     try:
         import plotly.graph_objects as go
-        archetype_pos = np.asarray(res["archetype_coords"])[:, :3]
+        archetype_pos = np.asarray(adata_train.uns["archetype_coordinates"])[:, :3]
         fig_ho = go.Figure()
         fig_ho.add_trace(go.Scatter3d(
             x=adata_train.obsm["X_pca"][:, 0],
