@@ -185,15 +185,21 @@ def _stratified_subsample(adata, frac: float, stratify_col: str, seed: int = 0):
     return adata[keep_idx].copy()
 
 
-def _smallest_k_above_threshold(cv_summary, threshold: float) -> int:
-    """Return smallest K in CV summary with mean_archetype_r2 >= threshold,
-    else the K with best R². Mirrors Part 1 convention."""
-    rows = cv_summary.summary_df.copy()
-    rows = rows.sort_values("n_archetypes")
-    above = rows[rows["mean_archetype_r2"] >= threshold]
-    if len(above):
-        return int(above.iloc[0]["n_archetypes"])
-    return int(rows.sort_values("mean_archetype_r2", ascending=False).iloc[0]["n_archetypes"])
+def _pick_best_from_cv(cv_summary, r2_threshold: float = 0.9):
+    """Return (best_entry, ranked_list) mirroring Part 1 convention.
+
+    best_entry is the smallest-K entry with metric_value >= r2_threshold;
+    otherwise the top ranked entry. Each entry is a dict with keys
+    'hyperparameters' and 'metric_value'.
+    """
+    ranked = cv_summary.rank_by_metric("archetype_r2")
+    ranked = [r for r in ranked if r.get("metric_value", float("-inf")) > -1e6]
+    above = [r for r in ranked if r["metric_value"] >= r2_threshold]
+    if above:
+        above.sort(key=lambda r: (r["hyperparameters"]["n_archetypes"],
+                                    -r["metric_value"]))
+        return above[0], ranked
+    return ranked[0], ranked
 
 
 # ============================================================================
@@ -214,7 +220,9 @@ def phase1_train_model(report: HTMLReport):
         )
         print(f"  phase1: subsampled train -> {adata_train.shape}")
 
-    # 1a — CV search
+    # 1a — CV search (matches Part 1 conventions: prepare_training first,
+    # cv_folds + max_epochs_cv, pick via rank_by_metric)
+    pc.pp.prepare_training(adata_train, batch_size=min(128, adata_train.shape[0] // 4))
     cv = pc.tl.hyperparameter_search(
         adata_train,
         pca_key="X_pca",
@@ -222,13 +230,16 @@ def phase1_train_model(report: HTMLReport):
         hidden_dims_options=HIDDEN_DIMS_OPTIONS,
         inflation_factor_range=INFLATION_FACTOR_RANGE,
         use_pcha_init=False,
-        max_epochs=20,
-        n_folds=5,
+        cv_folds=3,
+        max_epochs_cv=20,
+        subsample_fraction=0.8,
     )
-    K_pick = _smallest_k_above_threshold(cv, threshold=0.9)
-    best_df = cv.summary_df.sort_values("mean_archetype_r2", ascending=False)
-    best_row = best_df[best_df["n_archetypes"] == K_pick].iloc[0]
-    print(f"  phase1: CV picked K={K_pick} from {K_RANGE}")
+    best_entry, ranked = _pick_best_from_cv(cv, r2_threshold=0.9)
+    K_pick = int(best_entry["hyperparameters"]["n_archetypes"])
+    hd_pick = list(best_entry["hyperparameters"].get("hidden_dims", [128, 256]))
+    inf_pick = float(best_entry["hyperparameters"].get("inflation_factor", 1.0))
+    print(f"  phase1: CV picked K={K_pick} hidden={hd_pick} "
+          f"inflation={inf_pick} (R²={best_entry['metric_value']:.3f})")
 
     # 1b — final fit
     res = pc.tl.train_archetypal(
@@ -240,8 +251,8 @@ def phase1_train_model(report: HTMLReport):
         pcha_init=True,
         model_config={
             **MODEL_CONFIG,
-            "hidden_dims": list(best_row["hidden_dims"]),
-            "inflation_factor": float(best_row["inflation_factor"]),
+            "hidden_dims": hd_pick,
+            "inflation_factor": inf_pick,
         },
     )
 
@@ -269,8 +280,18 @@ def phase1_train_model(report: HTMLReport):
     ]
     html_parts.append(metric_grid(cards))
 
-    # CV summary
-    html_parts.append(report.df_to_html(cv.summary_df, "CV search summary", max_rows=50))
+    # CV summary — build from ranked list (CVSummary has no .summary_df attr)
+    cv_rows = []
+    for r in ranked[:50]:
+        hp = r["hyperparameters"]
+        cv_rows.append({
+            "K": hp["n_archetypes"],
+            "hidden_dims": str(hp.get("hidden_dims", "?")),
+            "inflation": hp.get("inflation_factor", "?"),
+            "R²": r.get("metric_value", float("nan")),
+        })
+    html_parts.append(report.df_to_html(
+        pd.DataFrame(cv_rows), "CV search (ranked by archetype_r2)", max_rows=50))
 
     # Drift / stability
     try:
