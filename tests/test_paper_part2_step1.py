@@ -447,3 +447,42 @@ def test_diversity_block_returns_figure_and_summary():
         assert key in summary
     assert set(summary["per_group_pca_dispersion"].keys()) == {"NR", "R1", "R2"}
     assert set(summary["per_group_archetype_entropy"].keys()) == {"NR", "R1", "R2"}
+
+
+# ============================================================================
+# Task 10 — prep_tnbcrad.py structural tests
+# ============================================================================
+
+
+def _read_prep_source() -> str:
+    path = REPO_ROOT / "scripts" / "prep_tnbcrad.py"
+    return path.read_text() if path.exists() else ""
+
+
+def test_prep_tnbcrad_no_forbidden_calls():
+    src = _read_prep_source()
+    assert src, "prep_tnbcrad.py missing"
+    assert "sc.pp.normalize_total" not in src
+    assert "sc.pp.scale" not in src
+    assert "highly_variable_genes" not in src
+
+
+def test_prep_tnbcrad_required_call_sites():
+    src = _read_prep_source()
+    assert "apply_mt_rb_mad_filter" in src
+    assert "n_mads=3.0" in src
+    assert "sc.pp.pca" in src
+    assert "n_comps=50" in src
+    assert "zero_center=False" in src
+    assert "safe_stratified_split" in src
+    assert 'adata.layers["logcounts"]' in src
+    assert "N_PCS = 12" in src
+
+
+def test_prep_tnbcrad_writes_three_outputs():
+    src = _read_prep_source()
+    # full_prepped + train + holdout
+    for name in ("adata_tnbc_full_prepped.h5ad",
+                 "adata_tnbc_train.h5ad",
+                 "adata_tnbc_holdout.h5ad"):
+        assert name in src, f"prep must write {name}"
