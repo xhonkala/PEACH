@@ -164,3 +164,56 @@ def test_w2_ordering_makes_sense():
     # anchor and near share the Dirichlet — distance small
     assert d_near < d_mid
     assert d_near < d_far
+
+
+# ============================================================================
+# Task 4 — build_segregation_ratio
+# ============================================================================
+
+
+def _make_synthetic_groups(adata_like_dict: dict, weights_by_group: dict,
+                            n_per_group: int = 100, seed: int = 0):
+    """Build a small fake adata.obs + weights for group-pair testing."""
+    import pandas as pd
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    weights = []
+    for (resp, tx), alpha in weights_by_group.items():
+        rows.extend([(resp, tx)] * n_per_group)
+        weights.append(rng.dirichlet(alpha=alpha, size=n_per_group))
+    obs = pd.DataFrame(rows, columns=["response_group", "treatment"])
+    W = np.vstack(weights)
+    return obs, W
+
+
+def test_segregation_ratio_identity_case_is_one():
+    """If every group has the same distribution, within == between → ratio ≈ 1."""
+    from _paper_part1_viz import build_segregation_ratio
+
+    # All 9 groups share the same Dirichlet → same distribution
+    alpha = [1.0, 1.0, 1.0]
+    groups = {(r, t): alpha for r in ("NR", "R1", "R2")
+              for t in ("Base", "PD1", "RTPD1")}
+    obs, W = _make_synthetic_groups(None, groups, n_per_group=120, seed=42)
+    out = build_segregation_ratio(obs, W,
+                                   response_col="response_group",
+                                   treatment_col="treatment")
+    assert 0.7 <= out["ratio"] <= 1.3
+    assert out["n_within_pairs"] == 9   # 3 responses × C(3,2)
+    assert out["n_between_pairs"] == 27 # 3 resp_pairs × 3 × 3 tx combos
+
+
+def test_segregation_ratio_strong_separation():
+    """R2 lives on archetype 3 only; NR on archetype 1 — expect ratio > 1.3."""
+    from _paper_part1_viz import build_segregation_ratio
+    groups = {
+        ("NR", "Base"): [10.0, 1.0, 1.0],  ("NR", "PD1"): [10.0, 1.0, 1.0],  ("NR", "RTPD1"): [10.0, 1.0, 1.0],
+        ("R1", "Base"): [1.0, 10.0, 1.0],  ("R1", "PD1"): [1.0, 10.0, 1.0],  ("R1", "RTPD1"): [1.0, 10.0, 1.0],
+        ("R2", "Base"): [1.0, 1.0, 10.0],  ("R2", "PD1"): [1.0, 1.0, 10.0],  ("R2", "RTPD1"): [1.0, 1.0, 10.0],
+    }
+    obs, W = _make_synthetic_groups(None, groups, n_per_group=150, seed=7)
+    out = build_segregation_ratio(obs, W, "response_group", "treatment")
+    assert out["ratio"] >= 1.3
+    assert out["within"] < out["between"]

@@ -1619,3 +1619,70 @@ def compute_w2_archetype_distance(weights_a, weights_b):
     # Numerical clamp (tiny negatives from sqrtm roundoff)
     w2_sq = max(0.0, mean_term + bures)
     return float(np.sqrt(w2_sq))
+
+
+def build_segregation_ratio(obs, weights, response_col: str,
+                              treatment_col: str) -> dict:
+    """Within- vs between-response 2-Wasserstein ratio for Fig 3C gating.
+
+    Parameters
+    ----------
+    obs : pd.DataFrame
+        One row per cell; must contain ``response_col`` and ``treatment_col``.
+    weights : np.ndarray
+        Shape ``(n_cells, n_archetypes)``. Same row order as ``obs``.
+    response_col, treatment_col : str
+        Column names in ``obs``.
+
+    Returns
+    -------
+    dict with keys: ``within`` (mean W2, same-response different-treatment),
+                    ``between`` (mean W2, different-response any-treatment),
+                    ``ratio`` = between/within,
+                    ``n_within_pairs``, ``n_between_pairs``,
+                    ``pair_distances`` (list of {group_a, group_b, kind, w2}).
+    """
+    import numpy as np
+
+    obs = obs.reset_index(drop=True)
+    groups = (
+        obs[[response_col, treatment_col]]
+        .apply(tuple, axis=1)
+        .tolist()
+    )
+    # Collect per-group cell indices
+    unique = sorted(set(groups))
+    idx_of = {g: [] for g in unique}
+    for i, g in enumerate(groups):
+        idx_of[g].append(i)
+    idx_of = {g: np.array(v) for g, v in idx_of.items() if len(v) >= 2}
+
+    unique_ok = sorted(idx_of.keys())
+    pair_dists = []
+    within_vals = []
+    between_vals = []
+
+    for i, g1 in enumerate(unique_ok):
+        for g2 in unique_ok[i + 1:]:
+            w1 = weights[idx_of[g1]]
+            w2 = weights[idx_of[g2]]
+            d = compute_w2_archetype_distance(w1, w2)
+            kind = "within" if g1[0] == g2[0] else "between"
+            pair_dists.append({"group_a": g1, "group_b": g2, "kind": kind, "w2": d})
+            if kind == "within":
+                within_vals.append(d)
+            else:
+                between_vals.append(d)
+
+    within_mean = float(np.mean(within_vals)) if within_vals else float("nan")
+    between_mean = float(np.mean(between_vals)) if between_vals else float("nan")
+    ratio = (between_mean / within_mean) if within_mean > 0 else float("nan")
+
+    return {
+        "within": within_mean,
+        "between": between_mean,
+        "ratio": ratio,
+        "n_within_pairs": len(within_vals),
+        "n_between_pairs": len(between_vals),
+        "pair_distances": pair_dists,
+    }
