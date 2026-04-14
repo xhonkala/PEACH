@@ -382,3 +382,32 @@ def test_holdout_projection_qc_worse_when_holdout_is_noise():
     )
     # Holdout R² should be much worse than train
     assert qc["holdout_r2"] < qc["train_r2"]
+
+
+# ============================================================================
+# Task 8 — build_distance_heatmaps
+# ============================================================================
+
+
+def test_distance_heatmaps_returns_figure_and_spearman():
+    from _paper_part1_viz import build_distance_heatmaps
+    import pandas as pd
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    n = 900
+    K = 3
+    obs = pd.DataFrame({
+        "response_group": rng.choice(["NR", "R1", "R2"], n),
+        "archetypes": rng.integers(0, K, n),
+    })
+    weights = rng.dirichlet([1.0] * K, n)
+    pca = rng.normal(size=(n, 8))
+
+    fig, spearman_rho = build_distance_heatmaps(
+        obs, weights, pca,
+        response_col="response_group",
+        archetypes_col="archetypes",
+    )
+    assert fig is not None
+    assert -1.0 <= spearman_rho <= 1.0

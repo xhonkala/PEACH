@@ -1878,3 +1878,104 @@ def build_holdout_projection_qc(
         "holdout_mean_nn_dist": float(nn.mean()),
         "holdout_median_nn_dist": float(np.median(nn)),
     }
+
+
+def build_distance_heatmaps(
+    obs,
+    weights,
+    pca,
+    response_col: str,
+    archetypes_col: str,
+):
+    """Return (plotly.go.Figure, spearman_rho) for Fig 3C-i.
+
+    Two side-by-side heatmaps of size (3K × 3K), rows/cols =
+    (response_group, archetype) pairs:
+      - Left: W2 in archetype-weight simplex
+      - Right: Euclidean centroid distance in PCA space
+
+    Parameters
+    ----------
+    obs : pd.DataFrame
+        Cell-level metadata containing ``response_col`` and ``archetypes_col``.
+    weights : np.ndarray, shape (n_cells, K)
+        Per-cell archetype weights (rows sum to 1).
+    pca : np.ndarray, shape (n_cells, n_dims)
+        Per-cell coordinates in PCA (or other embedding) space.
+    response_col : str
+        Column in ``obs`` identifying response group (e.g. "NR", "R1", "R2").
+    archetypes_col : str
+        Column in ``obs`` with integer archetype assignments (0-indexed).
+
+    Returns
+    -------
+    fig : plotly.graph_objects.Figure
+        Side-by-side heatmaps.
+    spearman_rho : float
+        Spearman correlation between W2 and Euclidean upper-triangle entries.
+        NaN when fewer than 3 unique group pairs exist.
+    """
+    import numpy as np
+    import pandas as pd
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from scipy.stats import spearmanr
+
+    obs = obs.reset_index(drop=True)
+    # Build group index: (response, archetype)
+    resp_vals = obs[response_col].values
+    arch_vals = obs[archetypes_col].values
+    groups_raw = sorted(
+        set(zip(resp_vals, arch_vals)),
+        key=lambda t: (str(t[0]), int(t[1])),
+    )
+    # Build index arrays per group using column equality (avoids tuple broadcasting)
+    idx_of = {
+        g: np.where((resp_vals == g[0]) & (arch_vals == g[1]))[0]
+        for g in groups_raw
+    }
+    # Drop groups with <2 cells (can't compute W2)
+    groups = [g for g in groups_raw if len(idx_of[g]) >= 2]
+    G = len(groups)
+
+    w2_mat = np.zeros((G, G))
+    eu_mat = np.zeros((G, G))
+    for i, gi in enumerate(groups):
+        for j, gj in enumerate(groups):
+            if j <= i:
+                continue
+            wi = weights[idx_of[gi]]
+            wj = weights[idx_of[gj]]
+            w2 = compute_w2_archetype_distance(wi, wj)
+            w2_mat[i, j] = w2_mat[j, i] = w2
+            pi = pca[idx_of[gi]].mean(axis=0)
+            pj = pca[idx_of[gj]].mean(axis=0)
+            d_eu = float(np.linalg.norm(pi - pj))
+            eu_mat[i, j] = eu_mat[j, i] = d_eu
+
+    # Spearman on the upper triangle
+    iu = np.triu_indices(G, k=1)
+    if len(iu[0]) >= 3:
+        rho, _ = spearmanr(w2_mat[iu], eu_mat[iu])
+    else:
+        rho = float("nan")
+
+    labels = [f"{r}/A{int(a)}" for r, a in groups]
+    fig = make_subplots(rows=1, cols=2,
+                        subplot_titles=("W2 (archetype weights)",
+                                        "Euclidean centroid (PCA space)"))
+    fig.add_trace(
+        go.Heatmap(z=w2_mat, x=labels, y=labels, colorscale="Viridis",
+                   showscale=True, colorbar=dict(x=0.43, len=0.75)),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Heatmap(z=eu_mat, x=labels, y=labels, colorscale="Plasma",
+                   showscale=True, colorbar=dict(x=1.02, len=0.75)),
+        row=1, col=2,
+    )
+    fig.update_layout(
+        title=f"(response × archetype) pairwise distances — Spearman ρ = {rho:.3f}",
+        height=520, width=1200,
+    )
+    return fig, float(rho) if not np.isnan(rho) else rho
