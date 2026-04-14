@@ -486,3 +486,47 @@ def test_prep_tnbcrad_writes_three_outputs():
                  "adata_tnbc_train.h5ad",
                  "adata_tnbc_holdout.h5ad"):
         assert name in src, f"prep must write {name}"
+
+
+# ============================================================================
+# Task 11 — run_paper_part2_tnbc.py scaffold + Phase 1
+# ============================================================================
+
+
+def _read_run_source() -> str:
+    path = REPO_ROOT / "scripts" / "run_paper_part2_tnbc.py"
+    return path.read_text() if path.exists() else ""
+
+
+def test_run_part2_prototype_banner():
+    src = _read_run_source()
+    assert src, "run_paper_part2_tnbc.py missing"
+    assert "Step 1 of 5" in src
+    # Must reference the downstream steps explicitly so forks see the map
+    for step in ("Step 2", "Step 3", "Step 4", "Step 5"):
+        assert step in src
+
+
+def test_run_part2_config_constants():
+    src = _read_run_source()
+    for const in (
+        "SUBSAMPLE_FRACTION = 0.2",
+        "MAX_EPOCHS_FINAL = 200",
+        "N_PCS = 12",
+        'SUBSAMPLE_STRATIFY = "response_group"',
+        "EARLY_STOP_PATIENCE = 15",
+        "K_RANGE = list(range(3, 11))",
+    ):
+        assert const in src, f"missing config constant: {const}"
+
+
+def test_run_part2_phase1_calls():
+    src = _read_run_source()
+    assert "phase1_train_model" in src
+    assert "pc.tl.hyperparameter_search" in src
+    assert "pc.tl.train_archetypal" in src
+    assert "pc.tl.archetypal_coordinates" in src
+    assert "pc.tl.assign_archetypas" not in src  # typo check
+    assert "pc.tl.assign_archetypes" in src
+    assert "build_drift_qc_panel" in src
+    assert "build_holdout_projection_qc" in src
