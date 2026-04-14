@@ -500,9 +500,170 @@ def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
 
 
 def phase3_figure3bc(adata_train, res, report: HTMLReport):
-    """Fig 3B + gated Fig 3C. Implemented in Task 13."""
-    report.add_section("Phase 3: Fig 3B/3C (stub)",
-                        "<p><em>Pending Task 13.</em></p>", step_num=3)
+    """Fig 3B (gene/pathway/stress dotplots) + gated Fig 3C (heatmaps + diversity)."""
+    t_phase = time.time()
+
+    # ------ Fig 3B ---------------------------------------------------------
+    fig3b_parts: list = []
+
+    # 3B.1 — degree-1 gene simplex regression
+    try:
+        reg_genes = pc.tl.feature_simplex_regression(
+            adata_train, degrees=(1,), fdr_threshold=FDR_THRESHOLD,
+        )
+        # Convert to long dataframe for dotplot. Be defensive about schema.
+        gene_df = None
+        d1 = (reg_genes.get("degree_1") or {})
+        if "feature_results" in d1:
+            gene_df = pd.DataFrame(d1["feature_results"])
+        if gene_df is not None and len(gene_df):
+            # Filter for archetype-exclusive (ratio >= 2.5) and FDR <= 0.05
+            gene_df = gene_df[gene_df.get("q", gene_df.get("fdr", 1.0)) <= FDR_THRESHOLD]
+            if "exclusive_ratio" in gene_df.columns:
+                gene_df = gene_df[gene_df["exclusive_ratio"] >= EXCLUSIVE_RATIO_THRESHOLD]
+            figsize = dotplot_figsize(gene_df, y_col="feature")
+            fig_b1 = pc.pl.dotplot(
+                adata_train, gene_df, group_col="archetype", feature_col="feature",
+                size_col="coef", color_col="q", figsize=figsize,
+            )
+            fig3b_parts.append(report.fig_to_img(
+                fig_b1, "Fig 3B-1 — archetype-exclusive genes (deg-1 simplex regression)."
+            ))
+        else:
+            fig3b_parts.append(error_html(
+                "No archetype-exclusive genes survived filters (FDR ≤ 0.05, ratio ≥ 2.5)."
+            ))
+    except Exception as e:
+        fig3b_parts.append(error_html(f"Fig 3B gene dotplot failed: {e}"))
+
+    # 3B.2 — pathway simplex regression (if pathway_scores present)
+    if "pathway_scores" in adata_train.obsm:
+        try:
+            reg_pw = pc.tl.feature_simplex_regression(
+                adata_train, degrees=(1,),
+                feature_matrix="pathway_scores",
+                fdr_threshold=FDR_THRESHOLD,
+            )
+            pw_df = pd.DataFrame((reg_pw.get("degree_1") or {}).get("feature_results") or [])
+            if len(pw_df):
+                pw_df = pw_df[pw_df.get("q", pw_df.get("fdr", 1.0)) <= FDR_THRESHOLD]
+                figsize = dotplot_figsize(pw_df, y_col="feature")
+                fig_b2 = pc.pl.dotplot(
+                    adata_train, pw_df, group_col="archetype", feature_col="feature",
+                    size_col="coef", color_col="q", figsize=figsize,
+                )
+                fig3b_parts.append(report.fig_to_img(
+                    fig_b2, "Fig 3B-2 — archetype pathway enrichment."
+                ))
+        except Exception as e:
+            fig3b_parts.append(error_html(f"Fig 3B pathway dotplot failed: {e}"))
+    else:
+        fig3b_parts.append(error_html(
+            "adata.obsm['pathway_scores'] absent — Fig 3B-2 pathway dotplot skipped. "
+            "Upstream prep must add this via pp.compute_pathway_scores."
+        ))
+
+    # 3B.3 — stress-gene subset
+    try:
+        stress_in_data = [g for g in STRESS_GENES_FLAT if g in adata_train.var_names]
+        if not stress_in_data:
+            raise ValueError("No stress genes found in adata.var_names.")
+        adata_stress = adata_train[:, stress_in_data].copy()
+        # Re-propagate archetypes col which we need for dotplot grouping
+        adata_stress.obs = adata_train.obs.copy()
+        adata_stress.obsm = adata_train.obsm.copy()
+        adata_stress.uns = adata_train.uns.copy()
+        reg_stress = pc.tl.feature_simplex_regression(
+            adata_stress, degrees=(1,), fdr_threshold=FDR_THRESHOLD,
+        )
+        s_df = pd.DataFrame((reg_stress.get("degree_1") or {}).get("feature_results") or [])
+        if len(s_df):
+            figsize = dotplot_figsize(s_df, y_col="feature")
+            fig_b3 = pc.pl.dotplot(
+                adata_stress, s_df, group_col="archetype", feature_col="feature",
+                size_col="coef", color_col="q", figsize=figsize,
+            )
+            fig3b_parts.append(report.fig_to_img(
+                fig_b3, f"Fig 3B-3 — stress genes (n={len(stress_in_data)} overlap)."
+            ))
+        else:
+            fig3b_parts.append(error_html(
+                "No stress genes reached FDR ≤ 0.05 — negative control confirmed."
+            ))
+    except Exception as e:
+        fig3b_parts.append(error_html(f"Fig 3B stress dotplot failed: {e}"))
+
+    report.add_section("Fig 3B — Archetype molecular characterization",
+                        "\n".join(fig3b_parts), step_num=3, open_by_default=True)
+
+    # ------ Fig 3C ---------------------------------------------------------
+    fig3c_parts: list = []
+
+    weights = adata_train.obsm["cell_archetype_weights"]
+
+    # 3C gate computation
+    try:
+        seg = build_segregation_ratio(
+            adata_train.obs, weights,
+            response_col="response_group", treatment_col="treatment",
+        )
+        fig3c_parts.append(metric_grid([
+            metric_card("Within (mean W2)", seg["within"], ".3f"),
+            metric_card("Between (mean W2)", seg["between"], ".3f"),
+            metric_card("Segregation ratio", seg["ratio"], ".3f"),
+            metric_card("Gate (≥ 1.3)", "PASS" if seg["ratio"] >= FIG3C_GATE_THRESHOLD else "FAIL", "s"),
+            metric_card("N within pairs", seg["n_within_pairs"], "d"),
+            metric_card("N between pairs", seg["n_between_pairs"], "d"),
+        ]))
+        gate_passed = seg["ratio"] >= FIG3C_GATE_THRESHOLD
+    except Exception as e:
+        fig3c_parts.append(error_html(f"segregation ratio failed: {e}"))
+        gate_passed = False
+
+    # 3C-i — gated heatmaps
+    if gate_passed:
+        try:
+            fig_heat, rho = build_distance_heatmaps(
+                adata_train.obs, weights, adata_train.obsm["X_pca"],
+                response_col="response_group", archetypes_col="archetypes",
+            )
+            fig3c_parts.append(report.plotly_to_div(
+                fig_heat,
+                f"Fig 3C-i — (response × archetype) distances: W2 vs Euclidean "
+                f"centroid. Spearman ρ = {rho:.3f}."
+            ))
+        except Exception as e:
+            fig3c_parts.append(error_html(f"Fig 3C-i heatmaps failed: {e}"))
+    else:
+        fig3c_parts.append(
+            '<div style="padding:8px;background:#fffbeb;border-left:4px solid #ca8a04">'
+            "<strong>Fig 3C-i skipped.</strong> Segregation ratio below threshold "
+            f"({FIG3C_GATE_THRESHOLD}). Consider K±1, per-timepoint modeling, or "
+            "batch correction on PC1 (see Phase 1 PC1 scan)."
+            "</div>"
+        )
+
+    # 3C-ii — always rendered
+    try:
+        fig_div, summary = build_diversity_block(
+            adata_train.obs, weights, adata_train.obsm["X_pca"],
+            group_col="response_group", bootstrap_n=200, subsample=500,
+            random_state=42,
+        )
+        fig3c_parts.append(report.plotly_to_div(
+            fig_div,
+            f"Fig 3C-ii — Diversity block. "
+            f"KW H={summary['per_cell_shannon_kw_stat']:.2f}, "
+            f"p={summary['per_cell_shannon_kw_p']:.2e}. "
+            f"Per-group PCA dispersion (pre-registered test for R2 &lt; NR): "
+            f"{summary['per_group_pca_dispersion']}."
+        ))
+    except Exception as e:
+        fig3c_parts.append(error_html(f"Fig 3C-ii diversity block failed: {e}"))
+
+    report.add_section("Fig 3C — Segregation distances + diversity",
+                        "\n".join(fig3c_parts), step_num=4, open_by_default=True)
+    print(f"  phase3: done in {time.time() - t_phase:.1f}s")
 
 
 # ============================================================================

@@ -544,3 +544,20 @@ def test_run_part2_phase2_calls():
     assert "build_archetype_hypergeometric_tables" in src
     assert "Fig 3A" in src or "Figure 3A" in src
     assert "pc.pl.archetypal_space" in src
+
+
+# ============================================================================
+# Task 13 — Phase 3 (Fig 3B/3C)
+# ============================================================================
+
+
+def test_run_part2_phase3_calls():
+    src = _read_run_source()
+    assert "build_segregation_ratio" in src
+    assert "build_distance_heatmaps" in src
+    assert "build_diversity_block" in src
+    assert "STRESS_GENES_FLAT" in src
+    assert "FIG3C_GATE_THRESHOLD" in src
+    assert "pc.tl.feature_simplex_regression" in src
+    assert "Fig 3B" in src or "Figure 3B" in src
+    assert "Fig 3C" in src or "Figure 3C" in src
