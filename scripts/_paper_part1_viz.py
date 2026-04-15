@@ -244,8 +244,10 @@ def _summary_table_html(rows):
     the HTMLReport helper in the paper scripts."""
     cols = [
         "model",
+        "n_epochs",
         "final_drift_mean",
         "final_drift_max",
+        "last10_drift_median",
         "final_stability_mean",
         "converged",
     ]
@@ -319,11 +321,33 @@ def build_drift_qc_panel(
         final_dmax = _final_value(dmax_hist)
         final_smean = _final_value(smean_hist)
 
+        # Expose the actual median value so we can see what the badge is
+        # comparing against (r14 bug: CMP final_drift_mean=0.00001 but flag
+        # still DRIFTING — suggests the median over the window is getting
+        # dragged by a spike within the window, not just an outlier outside
+        # it).
+        last10_median = _window_median(dmean_hist, converged_window)
+        n_epochs = len(dmean_hist) if dmean_hist is not None else 0
         converged = _is_converged(dmean_hist, drift_threshold, converged_window)
         if converged:
             badges_html += _badge_html(f"{label}: STABLE", "#2ca02c")
         else:
             badges_html += _badge_html(f"{label}: DRIFTING", "#c0392b")
+
+        # Diagnostic stderr line — helps reconcile the badge with the raw
+        # history when the answer is surprising.
+        import sys as _sys
+        try:
+            _tail_preview = list(dmean_hist[-converged_window:])
+            print(
+                f"[drift-qc] {label}: n_epochs={n_epochs}, "
+                f"last10_median={last10_median:.6f}, "
+                f"threshold={drift_threshold}, converged={converged}, "
+                f"last10_values={[f'{v:.5f}' for v in _tail_preview]}",
+                file=_sys.stderr, flush=True,
+            )
+        except Exception:
+            pass
 
         def _fmt(v):
             if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -332,8 +356,10 @@ def build_drift_qc_panel(
 
         rows.append({
             "model": label,
+            "n_epochs": str(n_epochs),
             "final_drift_mean": _fmt(final_dmean),
             "final_drift_max": _fmt(final_dmax),
+            "last10_drift_median": _fmt(last10_median),
             "final_stability_mean": _fmt(final_smean),
             "converged": "Y" if converged else "N",
         })
@@ -375,6 +401,7 @@ def convergence_status(
     *,
     window: int = 10,
     delta_threshold: float = 0.01,
+    loss_key: str = "archetypal_loss",
 ) -> Tuple[str, float]:
     """Classify a final training run as converged or not from its loss history.
 
@@ -432,7 +459,18 @@ def convergence_status(
     """
     import math
 
-    losses = list((history or {}).get("loss", []) or [])
+    # r14-item-82: default to the ``archetypal_loss`` (reconstruction)
+    # history instead of the combined ``loss`` so convergence is judged on
+    # the reconstruction signal alone. The combined loss includes the KLD
+    # term, which can continue to drift as the encoder variance settles
+    # even after archetypal reconstruction has plateaued — producing
+    # spurious NON_CONVERGED_HIT_CAP flags. Fallback to the combined
+    # ``loss`` if the model was trained without per-component history or
+    # if the requested key is absent.
+    hist = history or {}
+    losses = list(hist.get(loss_key, []) or [])
+    if len(losses) < 2:
+        losses = list(hist.get("loss", []) or [])
 
     # Rule 1: need at least 2 loss entries to compute any delta.
     if len(losses) < 2:
@@ -1540,10 +1578,13 @@ def build_response_timepoint_colormap(
 
     Raises ValueError if an unknown response is passed.
     """
+    # R1 moved from oranges to greens (r3 review) — NR warm reds are otherwise
+    # hard to distinguish from R1 oranges at cell-level opacity. Three hue
+    # families now stay visually distinct even at alpha=1.0.
     ramps = {
-        "NR": ["#fca5a5", "#ef4444", "#991b1b"],
-        "R1": ["#fed7aa", "#f97316", "#9a3412"],
-        "R2": ["#93c5fd", "#2563eb", "#1e3a8a"],
+        "NR": ["#fca5a5", "#ef4444", "#991b1b"],   # reds: light → dark
+        "R1": ["#86efac", "#16a34a", "#14532d"],   # greens: light → dark
+        "R2": ["#93c5fd", "#2563eb", "#1e3a8a"],   # blues: light → dark
     }
     unknown = set(responses) - set(ramps)
     if unknown:

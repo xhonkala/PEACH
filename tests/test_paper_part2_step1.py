@@ -110,8 +110,9 @@ def test_response_timepoint_colormap_hue_by_response():
     # Crude check: red hex starts with high R (first 2 hex chars high)
     assert int(cmap[("NR", "Base")][1:3], 16) > 200  # light red
     assert int(cmap[("NR", "RTPD1")][1:3], 16) < 200  # darker red
-    # R1 — orange (red + green)
-    assert int(cmap[("R1", "Base")][1:3], 16) > 200  # light orange
+    # R1 — green (low red, high green)
+    assert int(cmap[("R1", "Base")][1:3], 16) < 180  # green has low-ish red
+    assert int(cmap[("R1", "Base")][3:5], 16) > 200  # green has high green channel
     # R2 — blue (low red, high blue)
     assert int(cmap[("R2", "Base")][1:3], 16) < 200   # blue has low red
     assert int(cmap[("R2", "Base")][5:7], 16) > 200   # blue has high blue

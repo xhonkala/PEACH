@@ -224,18 +224,22 @@ def regression_to_long_df(reg_result, *, y_col="gene", exclusive_only=False,
 
     n_feat, K = coefs.shape
 
+    # r14 fix (per Part 1): exclusive filter uses β² proxy (squared) so the
+    # threshold compounds. Emit each feature ONLY under its argmax archetype
+    # to prevent the UBE2C-everywhere bug where a single dominant gene would
+    # appear in every archetype column.
     if exclusive_only:
-        abs_coefs = np.abs(coefs)
-        sorted_abs = np.sort(abs_coefs, axis=1)[:, ::-1]
-        max_c = sorted_abs[:, 0]
-        second_c = sorted_abs[:, 1] if K > 1 else np.zeros(n_feat)
-        second_c_safe = np.where(second_c < 1e-10, 1e-10, second_c)
-        ratio = max_c / second_c_safe
+        r2_proxy = coefs ** 2
+        sorted_r2 = np.sort(r2_proxy, axis=1)[:, ::-1]
+        max_r2 = sorted_r2[:, 0]
+        second_r2 = sorted_r2[:, 1] if K > 1 else np.zeros(n_feat)
+        second_safe = np.where(second_r2 < 1e-10, 1e-10, second_r2)
+        ratio = max_r2 / second_safe
         keep_feat_mask = ratio >= exclusive_threshold
     else:
         keep_feat_mask = np.ones(n_feat, dtype=bool)
 
-    argmax_arch = np.argmax(np.abs(coefs), axis=1)
+    argmax_arch = np.argmax(coefs ** 2, axis=1)
 
     rows = []
     for fi in range(n_feat):
@@ -247,37 +251,42 @@ def regression_to_long_df(reg_result, *, y_col="gene", exclusive_only=False,
             feat_fdr = float(per_feat_sig_fdr[fi])
             if feat_fdr > fdr_threshold:
                 continue
-        for a in range(K):
-            if per_arch_sig_fdr is not None:
-                p = float(pvals[fi, a]) if pvals.size else 1.0
-                f = float(per_arch_sig_fdr[fi, a]) if per_arch_sig_fdr.size else 1.0
-                if f > fdr_threshold:
-                    continue
-            else:
-                f = float(per_feat_sig_fdr[fi])
-                p = f
-            rows.append({
-                y_col: feat_names[fi],
-                "archetype": f"archetype_{a}",
-                "mean_archetype": float(np.abs(coefs[fi, a])),
-                "signed_coef": float(coefs[fi, a]),
-                "pvalue": p,
-                "pvalue_fdr": f,
-                "r_squared": float(r2[fi]),
-                "argmax_archetype": int(argmax_arch[fi]),
-            })
+        a = int(argmax_arch[fi])
+        if per_arch_sig_fdr is not None:
+            p = float(pvals[fi, a]) if pvals.size else 1.0
+            f = float(per_arch_sig_fdr[fi, a]) if per_arch_sig_fdr.size else 1.0
+            if f > fdr_threshold:
+                continue
+        else:
+            f = float(per_feat_sig_fdr[fi])
+            p = f
+        rows.append({
+            y_col: feat_names[fi],
+            "archetype": f"archetype_{a}",
+            "mean_archetype": float(np.abs(coefs[fi, a])),
+            "signed_coef": float(coefs[fi, a]),
+            "pvalue": p,
+            "pvalue_fdr": f,
+            "r_squared": float(r2[fi]),
+            "argmax_archetype": a,
+        })
     df = pd.DataFrame(rows)
     if df.empty:
         return df
 
+    # Top-N per archetype by R² within its argmax group — with argmax-only
+    # emission above, this cleanly selects the strongest features per archetype
+    # without the cross-archetype leak that caused the r14 UBE2C bug.
     keep_mask = np.zeros(len(df), dtype=bool)
     for a in range(K):
-        is_argmax = df["argmax_archetype"] == a
-        if not is_argmax.any():
+        is_argmax_a = (df["argmax_archetype"] == a).values
+        if not is_argmax_a.any():
             continue
-        sub = df[is_argmax].drop_duplicates(subset=[y_col])
+        sub_idx = np.where(is_argmax_a)[0]
+        sub = df.iloc[sub_idx]
         top_feats = sub.nlargest(top_n_per_archetype, "r_squared")[y_col].values
-        keep_mask |= df[y_col].isin(top_feats)
+        keep_this = is_argmax_a & df[y_col].isin(top_feats).values
+        keep_mask |= keep_this
     df = df[keep_mask].reset_index(drop=True)
     return df
 
@@ -372,6 +381,21 @@ def phase1_train_model(report: HTMLReport):
                                       pca_key="X_pca", verbose=False)
     pc.tl.archetypal_coordinates(adata_holdout, verbose=False)
     pc.tl.assign_archetypes(adata_holdout, percentage_per_archetype=0.15, verbose=False)
+
+    # 1d-bis — compute pathway scores so Fig 3B-2 can render.
+    # Loads MSigDB c5_bp (GO:BP) networks; decoupler + tqdm are required.
+    try:
+        pathway_net = pc.pp.load_pathway_networks(
+            sources=["c5_bp"], organism="human", verbose=False,
+        )
+        pc.pp.compute_pathway_scores(
+            adata_train, net=pathway_net,
+            obsm_key="pathway_scores", verbose=False,
+        )
+        print(f"  phase1: pathway_scores computed, shape="
+              f"{adata_train.obsm['pathway_scores'].shape}")
+    except Exception as e:
+        print(f"  phase1: pathway_scores FAILED ({e}); Fig 3B-2 will skip.")
 
     # 1e — Phase 1 section
     html_parts: list = []
@@ -498,23 +522,26 @@ def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
         adata_train.obs["treatment"].astype(str)
     ).astype("category")
 
-    # 2.2 — main 3D plot
+    # 2.2 — main 3D plot (cell_opacity=1.0 per r3 review)
     try:
         fig_main = pc.pl.archetypal_space(
             adata_train,
             color_by="response_treatment",
-            cell_opacity=0.55,
+            cell_opacity=1.0,
             show_archetype_labels=True,
             title="Fig 3A — Global archetypal space (response × timepoint)",
             categorical_colors=cmap_flat,
         )
         html_parts.append(report.plotly_to_div(
-            fig_main, "Fig 3A — main: 9-combo ramp (hue=response, lightness=timepoint)."
+            fig_main,
+            "Fig 3A — main: 9-combo ramp (hue=response: NR=reds / R1=greens / "
+            "R2=blues; lightness=timepoint: Base→PD1→RTPD1)."
         ))
     except Exception as e:
         html_parts.append(error_html(f"Fig 3A main plot failed: {e}"))
 
-    # 2.3 — per-timepoint facet panel (3 subplots)
+    # 2.3 — per-timepoint facet panel (3 subplots).
+    # r3 adds: archetype diamonds + full connecting edges on each facet, alpha=1.0.
     try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
@@ -522,42 +549,68 @@ def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
                                     specs=[[{"type": "scatter3d"}] * 3],
                                     subplot_titles=("Base", "PD1", "RTPD1"))
         archetype_pos = np.asarray(adata_train.uns["archetype_coordinates"])[:, :3]
+        K = archetype_pos.shape[0]
+        # Per-facet cell counts — warn user if RTPD1 is severely imbalanced
+        facet_n = {}
         for col, tp in enumerate(("Base", "PD1", "RTPD1"), start=1):
             mask = (adata_train.obs["treatment"].astype(str) == tp).values
+            facet_n[tp] = int(mask.sum())
             pts = adata_train.obsm["X_pca"][mask, :3]
             resp = adata_train.obs.loc[mask, "response_group"].astype(str).values
             colors = [cmap_tuple[(r, tp)] for r in resp]
             fig_facet.add_trace(go.Scatter3d(
                 x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
-                mode="markers", marker=dict(size=2.0, color=colors, opacity=0.55),
+                mode="markers", marker=dict(size=2.0, color=colors, opacity=1.0),
                 showlegend=False,
             ), row=1, col=col)
+            # Archetype-archetype connecting edges (simplex edges)
+            for i in range(K):
+                for j in range(i + 1, K):
+                    fig_facet.add_trace(go.Scatter3d(
+                        x=[archetype_pos[i, 0], archetype_pos[j, 0]],
+                        y=[archetype_pos[i, 1], archetype_pos[j, 1]],
+                        z=[archetype_pos[i, 2], archetype_pos[j, 2]],
+                        mode="lines",
+                        line=dict(color="black", width=1.5),
+                        showlegend=False, hoverinfo="skip",
+                    ), row=1, col=col)
+            # Archetype diamonds + labels on top
             fig_facet.add_trace(go.Scatter3d(
                 x=archetype_pos[:, 0], y=archetype_pos[:, 1], z=archetype_pos[:, 2],
                 mode="markers+text",
-                marker=dict(size=6, color="black", symbol="diamond"),
-                text=[f"A{i}" for i in range(archetype_pos.shape[0])],
-                showlegend=False,
+                marker=dict(size=8, color="black", symbol="diamond"),
+                text=[f"A{i}" for i in range(K)],
+                textposition="top center",
+                showlegend=False, hoverinfo="skip",
             ), row=1, col=col)
-        fig_facet.update_layout(height=500, width=1300,
+        fig_facet.update_layout(height=560, width=1400,
                                   title="Fig 3A-ii — Per-timepoint facets")
         html_parts.append(report.plotly_to_div(
-            fig_facet, "Fig 3A-ii — 3 facets (Base / PD1 / RTPD1)."
+            fig_facet,
+            f"Fig 3A-ii — 3 facets (Base / PD1 / RTPD1). Cell counts: "
+            f"Base={facet_n.get('Base', 0)}, PD1={facet_n.get('PD1', 0)}, "
+            f"RTPD1={facet_n.get('RTPD1', 0)}. "
+            f"Note RTPD1 imbalance if counts differ by ≥5× — may affect "
+            f"response-group separation visibility."
         ))
     except Exception as e:
         html_parts.append(error_html(f"Fig 3A facet panel failed: {e}"))
 
-    # 2.4 — holdout projection visualization
+    # 2.4 — holdout projection visualization.
+    # r3 fix: make train background clearly visible grey, holdout smaller/brighter
+    # so the grey backdrop reads properly.
     try:
         import plotly.graph_objects as go
         archetype_pos = np.asarray(adata_train.uns["archetype_coordinates"])[:, :3]
         fig_ho = go.Figure()
+        # Train cells — deliberate grey backdrop. Drawn first so holdout renders on top.
         fig_ho.add_trace(go.Scatter3d(
             x=adata_train.obsm["X_pca"][:, 0],
             y=adata_train.obsm["X_pca"][:, 1],
             z=adata_train.obsm["X_pca"][:, 2],
-            mode="markers", marker=dict(size=1.5, color="lightgray", opacity=0.4),
-            name="train",
+            mode="markers",
+            marker=dict(size=1.6, color="rgb(200,200,200)", opacity=0.7),
+            name=f"train (n={adata_train.n_obs})",
         ))
         ho_resp = adata_holdout.obs["response_group"].astype(str).values
         ho_tx = adata_holdout.obs["treatment"].astype(str).values
@@ -566,21 +619,96 @@ def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
             x=adata_holdout.obsm["X_pca"][:, 0],
             y=adata_holdout.obsm["X_pca"][:, 1],
             z=adata_holdout.obsm["X_pca"][:, 2],
-            mode="markers", marker=dict(size=2.5, color=ho_colors, opacity=0.85),
-            name="holdout",
+            mode="markers", marker=dict(size=3.2, color=ho_colors, opacity=1.0,
+                                         line=dict(color="black", width=0.3)),
+            name=f"holdout (n={adata_holdout.n_obs})",
         ))
+        # Archetype simplex edges for reference
+        K = archetype_pos.shape[0]
+        for i in range(K):
+            for j in range(i + 1, K):
+                fig_ho.add_trace(go.Scatter3d(
+                    x=[archetype_pos[i, 0], archetype_pos[j, 0]],
+                    y=[archetype_pos[i, 1], archetype_pos[j, 1]],
+                    z=[archetype_pos[i, 2], archetype_pos[j, 2]],
+                    mode="lines",
+                    line=dict(color="black", width=1.5),
+                    showlegend=False, hoverinfo="skip",
+                ))
         fig_ho.add_trace(go.Scatter3d(
             x=archetype_pos[:, 0], y=archetype_pos[:, 1], z=archetype_pos[:, 2],
             mode="markers+text",
             marker=dict(size=8, color="black", symbol="diamond"),
-            text=[f"A{i}" for i in range(archetype_pos.shape[0])],
+            text=[f"A{i}" for i in range(K)],
+            textposition="top center",
+            showlegend=False,
         ))
-        fig_ho.update_layout(title="Fig 3A-iii — Holdout cells projected", height=560)
+        fig_ho.update_layout(title="Fig 3A-iii — Holdout cells projected", height=620)
         html_parts.append(report.plotly_to_div(
-            fig_ho, "Fig 3A-iii — held-out cells (colored) over train cells (grey)."
+            fig_ho,
+            "Fig 3A-iii — train cells (grey backdrop) + held-out cells "
+            "(9-combo ramp, black outline) + archetype simplex edges."
         ))
     except Exception as e:
         html_parts.append(error_html(f"Fig 3A holdout projection failed: {e}"))
+
+    # 2.4b — Holdout projection stats (new in r3): per-archetype KS + Hotelling T².
+    try:
+        from scipy.stats import ks_2samp, chi2
+        try:
+            from statsmodels.stats.multitest import multipletests
+        except ImportError:
+            multipletests = None
+
+        weights_tr = adata_train.obsm["cell_archetype_weights"]
+        weights_ho = adata_holdout.obsm["cell_archetype_weights"]
+        K_ = weights_tr.shape[1]
+
+        # Per-archetype KS test (train vs holdout weight on that archetype)
+        ks_rows = []
+        for k in range(K_):
+            stat, p = ks_2samp(weights_tr[:, k], weights_ho[:, k])
+            ks_rows.append({"archetype": f"archetype_{k}",
+                             "ks_statistic": float(stat),
+                             "p": float(p)})
+        ks_df = pd.DataFrame(ks_rows)
+        if multipletests is not None and len(ks_df):
+            _, qs, _, _ = multipletests(ks_df["p"].values, method="fdr_bh")
+            ks_df["q (BH)"] = qs
+        html_parts.append(report.df_to_html(
+            ks_df,
+            "Holdout projection QC — per-archetype KS test on archetype "
+            "weights (train vs holdout). BH-corrected q. Large p/q = holdout "
+            "weight distribution matches train for that archetype."
+        ))
+
+        # Hotelling's T² on mean weight vector (multivariate)
+        mu_tr = weights_tr.mean(axis=0)
+        mu_ho = weights_ho.mean(axis=0)
+        n1, n2 = weights_tr.shape[0], weights_ho.shape[0]
+        # Pooled covariance
+        cov_tr = np.cov(weights_tr, rowvar=False)
+        cov_ho = np.cov(weights_ho, rowvar=False)
+        pooled_cov = ((n1 - 1) * cov_tr + (n2 - 1) * cov_ho) / max(n1 + n2 - 2, 1)
+        # Tikhonov-regularize for invertibility
+        pooled_cov = pooled_cov + 1e-8 * np.eye(K_)
+        diff = (mu_tr - mu_ho).reshape(-1, 1)
+        inv_cov = np.linalg.pinv(pooled_cov)
+        t2 = float((n1 * n2 / (n1 + n2)) * (diff.T @ inv_cov @ diff)[0, 0])
+        # F approximation: T² ~ (n1+n2-2)*p / (n1+n2-p-1) * F(p, n1+n2-p-1)
+        p_dim = K_
+        df1, df2 = p_dim, n1 + n2 - p_dim - 1
+        F_stat = t2 * df2 / (df1 * (n1 + n2 - 2))
+        from scipy.stats import f as f_dist
+        ho_p = float(1 - f_dist.cdf(F_stat, df1, df2)) if df2 > 0 else float("nan")
+        html_parts.append(metric_grid([
+            metric_card("Hotelling T²", t2, ".3f"),
+            metric_card("F (approx)", F_stat, ".3f"),
+            metric_card("df1 / df2", f"{df1} / {df2}", "s"),
+            metric_card("Hotelling p", ho_p, ".3e"),
+        ]))
+    except Exception as e:
+        html_parts.append(error_html(f"holdout KS/Hotelling failed: {e}"))
 
     # 2.5 — characterization table.
     # Run simplex regression ONCE here; store into adata.uns so Phase 3 can reuse.
@@ -628,19 +756,45 @@ def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
     except Exception as e:
         html_parts.append(error_html(f"characterization table failed: {e}"))
 
-    # 2.6 — hypergeometric OR tables
+    # 2.6 — hypergeometric OR tables. r3: drop majority_voting (not useful —
+    # nearly all cells are 'tumor' by design, so no contrast).
     try:
         or_tables = build_archetype_hypergeometric_tables(
             adata_train.obs,
             archetypes_col="archetypes",
-            covariate_cols=["response_group", "treatment", "majority_voting", "cohort"],
+            covariate_cols=["response_group", "treatment", "cohort"],
             min_level_cells=50,
         )
         for cov, df in or_tables.items():
-            cap = f"Hypergeometric enrichment — {cov} × archetype (BH q-values within covariate)."
+            cap = (f"Hypergeometric enrichment — {cov} × archetype "
+                   f"(BH q-values within covariate).")
             html_parts.append(report.df_to_html(df, cap, max_rows=60))
     except Exception as e:
         html_parts.append(error_html(f"hypergeometric tables failed: {e}"))
+
+    # 2.6b — per-(archetype × level) cell count contingency tables (r3 diagnostic).
+    # Helps investigate surprising OR + q results (e.g. r2 reported OR=0.029 with
+    # q=5e-80 on archetype 1 × R2) by exposing the raw observed cell counts.
+    try:
+        rows_diag = []
+        for cov in ("response_group", "treatment"):
+            for a in sorted(adata_train.obs["archetypes"].dropna().unique()):
+                sub = adata_train.obs.loc[adata_train.obs["archetypes"] == a]
+                counts = sub[cov].value_counts()
+                row = {"archetype": str(a), "covariate": cov,
+                        "archetype_total": int(len(sub))}
+                for lv in sorted(adata_train.obs[cov].dropna().unique()):
+                    row[f"n_{lv}"] = int(counts.get(lv, 0))
+                rows_diag.append(row)
+        if rows_diag:
+            html_parts.append(report.df_to_html(
+                pd.DataFrame(rows_diag),
+                "Diagnostic — observed cell counts per (archetype × level). "
+                "Compare with OR tables above to sanity-check surprising enrichments.",
+                max_rows=60,
+            ))
+    except Exception as e:
+        html_parts.append(error_html(f"count-contingency diagnostic failed: {e}"))
 
     report.add_section("Fig 3A — Global archetype space (response × timepoint)",
                         "\n".join(html_parts), step_num=2, open_by_default=True)
@@ -827,6 +981,100 @@ def phase3_figure3bc(adata_train, res, report: HTMLReport):
         ))
     except Exception as e:
         fig3c_parts.append(error_html(f"Fig 3C-ii diversity block failed: {e}"))
+
+    # 3C-iii — gene-profile-based diversity per response group (r3 addition).
+    # Three complementary gene-level metrics, all aggregated per group:
+    #   1. Mean per-gene CV across top HVGs — intra-group gene-level
+    #      heterogeneity.
+    #   2. Mean pairwise cell-cell Pearson correlation in HVG space —
+    #      inverse diversity (high r = homogeneous).
+    #   3. Pairwise Jensen-Shannon divergence between group pseudobulks —
+    #      inter-group separation in gene space.
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        from scipy.spatial.distance import jensenshannon
+
+        # Pick top 500 HVGs by variance in .X (log1p counts)
+        X = adata_train.X
+        if hasattr(X, "toarray"):
+            X_full = X.toarray()
+        else:
+            X_full = np.asarray(X)
+        gene_var = X_full.var(axis=0)
+        hvg_idx = np.argsort(-gene_var)[:500]
+        X_hvg = X_full[:, hvg_idx]
+
+        groups = sorted(adata_train.obs["response_group"].dropna().unique())
+        rng = np.random.default_rng(42)
+
+        per_group_cv = {}
+        per_group_mean_corr = {}
+        pseudobulks = {}
+        for g in groups:
+            mask = (adata_train.obs["response_group"].values == g)
+            Xg = X_hvg[mask]
+            if Xg.shape[0] < 2:
+                per_group_cv[g] = float("nan")
+                per_group_mean_corr[g] = float("nan")
+                pseudobulks[g] = np.zeros(X_hvg.shape[1])
+                continue
+            # Metric 1: mean CV across HVGs (stdev / |mean|)
+            means = Xg.mean(axis=0)
+            stds = Xg.std(axis=0)
+            cv = np.where(np.abs(means) > 1e-8, stds / np.abs(means), 0.0)
+            per_group_cv[g] = float(cv.mean())
+            # Metric 2: mean pairwise Pearson in HVG space (subsample for speed)
+            n_sample = min(300, Xg.shape[0])
+            idx = rng.choice(Xg.shape[0], size=n_sample, replace=False)
+            Xs = Xg[idx]
+            corr = np.corrcoef(Xs)
+            iu = np.triu_indices_from(corr, k=1)
+            per_group_mean_corr[g] = float(corr[iu].mean())
+            # Metric 3 input: pseudobulk gene profile (sum-normalized to probability)
+            pb = Xg.sum(axis=0) + 1e-10
+            pseudobulks[g] = pb / pb.sum()
+
+        # Inter-group JSD heatmap (symmetric)
+        js_mat = np.zeros((len(groups), len(groups)))
+        for i, gi in enumerate(groups):
+            for j, gj in enumerate(groups):
+                js_mat[i, j] = jensenshannon(pseudobulks[gi], pseudobulks[gj])
+
+        # Three-panel figure
+        fig_gp = make_subplots(rows=1, cols=3, subplot_titles=(
+            "Mean per-gene CV (top 500 HVGs)",
+            "Mean pairwise cell-cell Pearson (HVG space)",
+            "Pairwise JSD between group pseudobulks",
+        ))
+        fig_gp.add_trace(go.Bar(
+            x=list(groups), y=[per_group_cv[g] for g in groups],
+            showlegend=False,
+        ), row=1, col=1)
+        fig_gp.add_trace(go.Bar(
+            x=list(groups), y=[per_group_mean_corr[g] for g in groups],
+            showlegend=False,
+        ), row=1, col=2)
+        fig_gp.add_trace(go.Heatmap(
+            z=js_mat, x=list(groups), y=list(groups),
+            colorscale="Viridis", showscale=True,
+            colorbar=dict(x=1.02, len=0.75, title="JSD"),
+        ), row=1, col=3)
+        fig_gp.update_layout(
+            height=440, width=1400,
+            title="Fig 3C-iii — Gene-profile diversity (top 500 HVGs)",
+        )
+        fig3c_parts.append(report.plotly_to_div(
+            fig_gp,
+            f"Fig 3C-iii — gene-profile diversity per response group. "
+            f"CV: higher = more gene-level heterogeneity within group. "
+            f"Pearson: lower = more diverse cell profiles within group. "
+            f"JSD: higher = more different between groups. "
+            f"CV={ {g: f'{per_group_cv[g]:.3f}' for g in groups} }, "
+            f"meanCorr={ {g: f'{per_group_mean_corr[g]:.3f}' for g in groups} }."
+        ))
+    except Exception as e:
+        fig3c_parts.append(error_html(f"Fig 3C-iii gene-profile diversity failed: {e}"))
 
     report.add_section("Fig 3C — Segregation distances + diversity",
                         "\n".join(fig3c_parts), step_num=4, open_by_default=True)
