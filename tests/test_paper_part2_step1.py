@@ -119,49 +119,49 @@ def test_response_timepoint_colormap_hue_by_response():
 
 
 # ============================================================================
-# Task 3 — compute_w2_archetype_distance (Bures–Wasserstein)
+# Task 3 — wasserstein2_distance (sample-based POT)
 # ============================================================================
 
 
 def test_w2_identical_distributions_is_zero():
-    from _paper_part1_viz import compute_w2_archetype_distance
+    from _paper_part1_viz import wasserstein2_distance
 
     rng = np.random.default_rng(0)
     weights = rng.dirichlet(alpha=[1.0, 1.0, 1.0], size=200)
-    d = compute_w2_archetype_distance(weights, weights)
+    d = wasserstein2_distance(weights, weights)
     assert d == pytest.approx(0.0, abs=1e-6)
 
 
 def test_w2_symmetric():
-    from _paper_part1_viz import compute_w2_archetype_distance
+    from _paper_part1_viz import wasserstein2_distance
 
     rng = np.random.default_rng(0)
     a = rng.dirichlet(alpha=[5.0, 1.0, 1.0], size=100)
     b = rng.dirichlet(alpha=[1.0, 1.0, 5.0], size=100)
-    d_ab = compute_w2_archetype_distance(a, b)
-    d_ba = compute_w2_archetype_distance(b, a)
+    d_ab = wasserstein2_distance(a, b)
+    d_ba = wasserstein2_distance(b, a)
     assert d_ab == pytest.approx(d_ba, rel=1e-5)
 
 
 def test_w2_nonnegative():
-    from _paper_part1_viz import compute_w2_archetype_distance
+    from _paper_part1_viz import wasserstein2_distance
     rng = np.random.default_rng(0)
     a = rng.dirichlet(alpha=[1.0, 1.0, 1.0], size=50)
     b = rng.dirichlet(alpha=[10.0, 1.0, 1.0], size=50)
-    assert compute_w2_archetype_distance(a, b) > 0
+    assert wasserstein2_distance(a, b) > 0
 
 
 def test_w2_ordering_makes_sense():
     """Distribution far apart in mean should have larger W2 than similar ones."""
-    from _paper_part1_viz import compute_w2_archetype_distance
+    from _paper_part1_viz import wasserstein2_distance
     rng = np.random.default_rng(42)
     near = rng.dirichlet(alpha=[5.0, 1.0, 1.0], size=200)
     mid = rng.dirichlet(alpha=[1.0, 5.0, 1.0], size=200)
     far = rng.dirichlet(alpha=[1.0, 1.0, 5.0], size=200)
     anchor = rng.dirichlet(alpha=[5.0, 1.0, 1.0], size=200)
-    d_near = compute_w2_archetype_distance(anchor, near)
-    d_mid = compute_w2_archetype_distance(anchor, mid)
-    d_far = compute_w2_archetype_distance(anchor, far)
+    d_near = wasserstein2_distance(anchor, near)
+    d_mid = wasserstein2_distance(anchor, mid)
+    d_far = wasserstein2_distance(anchor, far)
     # anchor and near share the Dirichlet — distance small
     assert d_near < d_mid
     assert d_near < d_far

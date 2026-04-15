@@ -1601,65 +1601,39 @@ def build_response_timepoint_colormap(
     return out
 
 
-def compute_w2_archetype_distance(weights_a, weights_b):
-    """2-Wasserstein distance between two cell groups' archetype-weight
-    distributions, via the Bures–Wasserstein closed form on Gaussian
-    approximations.
+def wasserstein2_distance(X, Y, *, max_n=2000, seed=42):
+    """2-Wasserstein distance between two point clouds (sample-based via POT).
+
+    Mirrors the helper in scripts/run_paper_part1_hsc.py so Part 2 can
+    reuse the same implementation. Uses scipy.stats.wasserstein_distance_nd
+    (which calls POT). Subsamples to ``max_n`` per side for tractability.
 
     Parameters
     ----------
-    weights_a, weights_b : np.ndarray
-        Shape ``(n_cells_*, n_archetypes)``. Each row is a simplex
-        point. Groups may have different cell counts.
+    X : np.ndarray, shape [n1, d]
+        Source point cloud (e.g. archetype weights or PCA coords).
+    Y : np.ndarray, shape [n2, d]
+        Target point cloud, same dim.
+    max_n : int
+        Maximum points per side. If either side exceeds this, randomly subsample.
+    seed : int
+        RNG seed for subsampling.
 
     Returns
     -------
     float
-        Non-negative W2 distance. Returns 0.0 when both inputs are
-        identical (bit-exact).
+        Wasserstein-2 distance in input units.
     """
     import numpy as np
-    from scipy.linalg import sqrtm
-
-    a = np.asarray(weights_a, dtype=np.float64)
-    b = np.asarray(weights_b, dtype=np.float64)
-
-    # Short-circuit: W2(P, P) = 0 by definition; avoids sqrtm roundoff.
-    if a.shape == b.shape and np.array_equal(a, b):
-        return 0.0
-
-    if a.shape[1] != b.shape[1]:
-        raise ValueError(
-            f"Archetype dim mismatch: a={a.shape[1]}, b={b.shape[1]}"
-        )
-    if a.shape[0] < 2 or b.shape[0] < 2:
-        raise ValueError("Each group needs at least 2 cells for a covariance.")
-
-    mu_a = a.mean(axis=0)
-    mu_b = b.mean(axis=0)
-    Sig_a = np.cov(a, rowvar=False)
-    Sig_b = np.cov(b, rowvar=False)
-
-    # Numerical floor on the diagonals (archetype weights can be near-degenerate)
-    eps = 1e-10
-    Sig_a = Sig_a + eps * np.eye(Sig_a.shape[0])
-    Sig_b = Sig_b + eps * np.eye(Sig_b.shape[0])
-
-    # Mean-distance term
-    mean_term = float(np.sum((mu_a - mu_b) ** 2))
-
-    # Bures term: Tr(Σa + Σb - 2 * (Σa^½ Σb Σa^½)^½)
-    sqrt_Sa = sqrtm(Sig_a)
-    # sqrtm may return complex due to floating round-off; drop imaginary
-    sqrt_Sa = np.asarray(sqrt_Sa).real
-    middle = sqrt_Sa @ Sig_b @ sqrt_Sa
-    sqrt_middle = sqrtm(middle)
-    sqrt_middle = np.asarray(sqrt_middle).real
-    bures = float(np.trace(Sig_a) + np.trace(Sig_b) - 2.0 * np.trace(sqrt_middle))
-
-    # Numerical clamp (tiny negatives from sqrtm roundoff)
-    w2_sq = max(0.0, mean_term + bures)
-    return float(np.sqrt(w2_sq))
+    from scipy.stats import wasserstein_distance_nd
+    rng = np.random.default_rng(seed)
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
+    if X.shape[0] > max_n:
+        X = X[rng.choice(X.shape[0], max_n, replace=False)]
+    if Y.shape[0] > max_n:
+        Y = Y[rng.choice(Y.shape[0], max_n, replace=False)]
+    return float(wasserstein_distance_nd(X, Y))
 
 
 def build_segregation_ratio(obs, weights, response_col: str,
@@ -1707,7 +1681,7 @@ def build_segregation_ratio(obs, weights, response_col: str,
         for g2 in unique_ok[i + 1:]:
             w1 = weights[idx_of[g1]]
             w2 = weights[idx_of[g2]]
-            d = compute_w2_archetype_distance(w1, w2)
+            d = wasserstein2_distance(w1, w2)
             kind = "within" if g1[0] == g2[0] else "between"
             pair_dists.append({"group_a": g1, "group_b": g2, "kind": kind, "w2": d})
             if kind == "within":
@@ -2002,7 +1976,7 @@ def build_distance_heatmaps(
                 continue
             wi = weights[idx_of[gi]]
             wj = weights[idx_of[gj]]
-            w2 = compute_w2_archetype_distance(wi, wj)
+            w2 = wasserstein2_distance(wi, wj)
             w2_mat[i, j] = w2_mat[j, i] = w2
             pi = pca[idx_of[gi]].mean(axis=0)
             pj = pca[idx_of[gj]].mean(axis=0)
