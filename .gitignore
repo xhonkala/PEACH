@@ -106,3 +106,5 @@ tests/e2e_outputs_v12/
 # Dev scratch files
 working_memory.md
 claude.md
+
+*.html
