@@ -3382,13 +3382,14 @@ class SimplexRegressionResult(BaseModel):
     n_archetypes: int
 
     # Degree 1 (linear)
-    vertex_coefficients: np.ndarray  # [n_features, K]
+    vertex_coefficients: np.ndarray  # [n_features, K] raw beta_j at each vertex
+    vertex_contrasts: np.ndarray | None = None  # [n_features, K] beta_j - mean(beta); sum to 0 per feature
     r_squared_degree1: np.ndarray  # [n_features]
-    f_pvalue: np.ndarray  # [n_features] raw
+    f_pvalue: np.ndarray  # [n_features] raw; tests H0: all beta_j equal (df_reg=K-1)
     f_pvalue_fdr: np.ndarray  # [n_features] BH-corrected
-    vertex_pvalues: np.ndarray  # [n_features, K]
+    vertex_pvalues: np.ndarray  # [n_features, K] H0: beta_j = mean(beta) (contrast t-test)
     vertex_pvalues_fdr: np.ndarray  # [n_features, K] FDR-corrected
-    vertex_se: np.ndarray  # [n_features, K]
+    vertex_se: np.ndarray  # [n_features, K] SE of contrast beta_j - mean(beta)
 
     # Degree 2 (interactions) — None if max_degree=1
     interaction_coefficients: np.ndarray | None = None  # [n_features, K-choose-2]

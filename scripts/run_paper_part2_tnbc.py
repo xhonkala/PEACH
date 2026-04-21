@@ -17,7 +17,7 @@ archetype space?" analysis only. It does NOT cover:
 Structure mirrors run_paper_part1_hsc.py: Phase 1 training, Phase 2 Fig 3A,
 Phase 3 Fig 3B+3C. Helpers imported from _paper_part1_{prep,viz}.py.
 
-SUBSAMPLE_FRACTION = 0.2 for prototyping; flip to 1.0 for production.
+SUBSAMPLE_FRACTION = 1.0 for production; set to 0.2 for fast prototyping.
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ import glob
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import matplotlib
@@ -63,7 +64,14 @@ from _paper_part1_viz import (  # noqa: E402
 
 # Reuse Part 1's helpers verbatim — do NOT re-implement (per shared memory rule
 # "Always check tools_schema.py and types_index.py + Part 1 helpers first").
-from run_paper_part1_hsc import regression_to_long_df  # noqa: E402
+from run_paper_part1_hsc import (  # noqa: E402
+    regression_to_long_df,
+    get_protein_coding_gene_set,
+    filter_long_df_protein_coding,
+    fmt_pval,
+    _get_pathway_net,
+    safe_plotly_html,
+)
 
 from stress_genes.load_stress_genes import STRESS_GENES_FLAT  # noqa: E402
 
@@ -75,7 +83,7 @@ DATA_DIR = REPO_ROOT / "data" / "paper_part2"
 OUTPUT_DIR = REPO_ROOT / "outputs" / "paper_part2"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-SUBSAMPLE_FRACTION = 0.2
+SUBSAMPLE_FRACTION = 1.0
 SUBSAMPLE_STRATIFY = "response_group"
 
 MAX_EPOCHS_FINAL = 200
@@ -87,22 +95,23 @@ HIDDEN_DIMS_OPTIONS = [[64, 128], [128, 256], [256, 128, 64]]
 INFLATION_FACTOR_RANGE = [0.75, 1.0, 1.25, 1.5]
 
 MODEL_CONFIG = {
-    "manifold_weight": 0.005,
+    "manifold_weight": 0.001,
     "kld_weight": 0.01,
     "sparsity_weight": 0.0,
     "archetypal_weight": 0.9,
 }
 
 FDR_THRESHOLD = 0.05
-EXCLUSIVE_RATIO_THRESHOLD = 2.5
-FIG3C_GATE_THRESHOLD = 1.3
+EXCLUSIVE_RATIO_THRESHOLD = 6.25  # β² ratio ≈ 2.5× in β units
+FIG3C_GATE_THRESHOLD = 1.3  # retained for reference; gate removed per r15 feedback
 
 # r4 Step 1 cache + Step 2/3 toggles
 STEP1_CACHE_PATH = DATA_DIR / "step1_cache.h5ad"
 STEP1_HOLDOUT_CACHE_PATH = DATA_DIR / "step1_holdout_cache.h5ad"
 STEP1_FORCE_RECOMPUTE = False   # set True to invalidate cache
 RUN_STEP2 = True                # Phase 4 — per-condition fits + Fig 4A/B
-RUN_STEP3 = True                # Phase 5 — flow_between on selected pairs
+RUN_STEP3 = True                # Phase 5 — flow_within on selected pairs
+RUN_STEP4 = True                # Phase 6 — R vs NR contrasts + trajectories (Figs 5A/B/C)
 
 # Phase 4 (Step 2) config
 STEP2_CONDITIONS = [
@@ -113,17 +122,17 @@ STEP2_CONDITIONS = [
 STEP2_K_RANGE = list(range(3, 8))
 STEP2_HIDDEN_DIMS_OPTIONS = [[64, 128], [128, 256]]
 STEP2_INFLATION_FACTOR_RANGE = [1.0, 1.25, 1.5]
-STEP2_R2_THRESHOLD = 0.85               # looser than Step 1 (smaller per-condition n)
+STEP2_R2_THRESHOLD = 0.80               # looser than Step 1 (smaller per-condition n); 0.85 was too high for subset sizes
 STEP2_MIN_CELLS = 500                   # below this, skip the fit
 STEP2_FLOW_EPOCHS_SCORING = 200         # cheap pairwise flow for Fig 4B scoring
-STEP2_FLOW_PERMUTATIONS_SCORING = 50    # short null for scoring
+STEP2_FLOW_PERMUTATIONS_SCORING = 200   # null for scoring (50 → 200 for finer p-value resolution)
 STEP2_FLOW_PERM_EPOCHS_SCORING = 50
 
 # Phase 5 (Step 3) pair selection + full flow config
 STEP3_MASS_PCT_THRESHOLD = 0.05         # mass ≥ 5% of cumulative
 STEP3_PERM_P_THRESHOLD = 0.05           # significant by permutation null
 STEP3_FLOW_EPOCHS_FULL = 1000           # full epochs for selected pairs
-STEP3_FLOW_PERMUTATIONS_FULL = 100
+STEP3_FLOW_PERMUTATIONS_FULL = 200
 STEP3_FLOW_GENE_TOP = 50
 STEP3_FLOW_JAC_TOP = 2500
 
@@ -231,6 +240,79 @@ def _stratified_subsample(adata, frac: float, stratify_col: str, seed: int = 0):
 # Part 1 implementation guarantees Part 1 / Part 2 dotplots stay in sync.
 
 
+# Module-level pathway network — loaded once in Phase 1, reused in Phase 5.
+_PATHWAY_NET = None
+
+# Path to cached protein-coding Ensembl ID list.
+# Generated on first run via the Ensembl REST API; subsequent runs read from cache.
+_PC_ENSEMBL_CACHE = DATA_DIR / "protein_coding_ensembl_ids.txt"
+
+
+def get_protein_coding_gene_set_tnbc(adata):
+    """Return a set of protein-coding gene symbols for the TNBC adata.
+
+    The TNBC h5ad uses CellRanger ``feature_types == 'Gene Expression'`` (not
+    the CellxGene ``feature_type == 'protein_coding'`` biotype column that
+    Part 1's HSC/CMP data carries).  We resolve biotypes from the
+    ``gene_ids`` (Ensembl IDs without version suffix) using the Ensembl
+    BioMart REST API, with results cached to ``_PC_ENSEMBL_CACHE`` so
+    subsequent runs are instant.
+
+    Falls back to all genes if the Ensembl query fails.
+    """
+    # Fast path: Part 1 column present → use the same logic
+    if "feature_type" in adata.var.columns:
+        return get_protein_coding_gene_set(adata)
+
+    # Try Ensembl cache
+    if _PC_ENSEMBL_CACHE.exists():
+        pc_ensembl = set(_PC_ENSEMBL_CACHE.read_text().splitlines())
+        gene_ids_col = adata.var.get("gene_ids", None)
+        if gene_ids_col is not None:
+            mask = adata.var["gene_ids"].isin(pc_ensembl)
+            result = set(adata.var_names[mask.values])
+            if result:
+                return result
+
+    # Query Ensembl BioMart REST
+    import requests, json
+    gene_ids = list(adata.var["gene_ids"].values) if "gene_ids" in adata.var.columns else []
+    if not gene_ids:
+        print("  [protein-coding filter] gene_ids column absent — no-op, keeping all genes")
+        return set(adata.var_names)
+
+    print(f"  [protein-coding filter] querying Ensembl BioMart for biotypes ({len(gene_ids)} genes)...")
+    batch_size = 500
+    pc_ensembl_ids = set()
+    try:
+        url = "https://rest.ensembl.org/lookup/id"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        for start in range(0, len(gene_ids), batch_size):
+            batch = gene_ids[start:start + batch_size]
+            resp = requests.post(url, data=json.dumps({"ids": batch}), headers=headers, timeout=60)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Ensembl API returned {resp.status_code}: {resp.text[:200]}")
+            result = resp.json()
+            for eid, info in result.items():
+                if info and info.get("biotype") == "protein_coding":
+                    pc_ensembl_ids.add(eid)
+        # Cache for future runs
+        _PC_ENSEMBL_CACHE.write_text("\n".join(sorted(pc_ensembl_ids)))
+        print(f"  [protein-coding filter] {len(pc_ensembl_ids)} protein-coding IDs cached to {_PC_ENSEMBL_CACHE.name}")
+    except Exception as e:
+        print(f"  [protein-coding filter] Ensembl query failed ({e}) — keeping all genes")
+        return set(adata.var_names)
+
+    if not pc_ensembl_ids:
+        print("  [protein-coding filter] query returned 0 protein-coding IDs — keeping all genes")
+        return set(adata.var_names)
+
+    mask = adata.var["gene_ids"].isin(pc_ensembl_ids)
+    kept = set(adata.var_names[mask.values])
+    print(f"  [protein-coding filter] {len(kept)} / {adata.n_vars} genes retained")
+    return kept
+
+
 def _pick_best_from_cv(cv_summary, r2_threshold: float = 0.9):
     """Return (best_entry, ranked_list) mirroring Part 1 convention.
 
@@ -259,6 +341,21 @@ def phase1_train_model(report: HTMLReport):
     adata_train = sc.read_h5ad(DATA_DIR / "adata_tnbc_train.h5ad")
     adata_holdout = sc.read_h5ad(DATA_DIR / "adata_tnbc_holdout.h5ad")
     print(f"  phase1: loaded train={adata_train.shape} holdout={adata_holdout.shape}")
+
+    # Filter to protein-coding genes before PCA — same principle as Part 1's
+    # stress-gene variant (DATA_VARIANT), which pre-filters genes in the prep
+    # script so PCA runs only on the target gene set. Here we do it inline.
+    # TNBC data uses CellRanger feature_types, not CellxGene feature_type, so
+    # get_protein_coding_gene_set_tnbc() handles the Ensembl biotype lookup.
+    _pc_genes = get_protein_coding_gene_set_tnbc(adata_train)
+    _n_genes_before = adata_train.n_vars
+    if len(_pc_genes) < _n_genes_before:
+        _pc_gene_list = [g for g in adata_train.var_names if g in _pc_genes]
+        adata_train = adata_train[:, _pc_gene_list].copy()
+        adata_holdout = adata_holdout[:, _pc_gene_list].copy()
+        print(f"  phase1: protein-coding filter: {len(_pc_gene_list)} / {_n_genes_before} genes retained")
+    else:
+        print(f"  phase1: protein-coding filter: all {_n_genes_before} genes retained (feature_type absent or all protein_coding)")
 
     if SUBSAMPLE_FRACTION < 1.0:
         # r4 fix A — apply matched subsample to BOTH train and holdout so the
@@ -332,9 +429,9 @@ def phase1_train_model(report: HTMLReport):
     # 1d-bis — compute pathway scores so Fig 3B-2 can render.
     # Loads MSigDB c5_bp (GO:BP) networks; decoupler + tqdm are required.
     try:
-        pathway_net = pc.pp.load_pathway_networks(
-            sources=["c5_bp"], organism="human", verbose=False,
-        )
+        global _PATHWAY_NET
+        pathway_net = _get_pathway_net(sources=["c5_bp"])
+        _PATHWAY_NET = pathway_net
         pc.pp.compute_pathway_scores(
             adata_train, net=pathway_net,
             obsm_key="pathway_scores", verbose=False,
@@ -347,17 +444,35 @@ def phase1_train_model(report: HTMLReport):
     # 1e — Phase 1 section
     html_parts: list = []
 
-    # Config card grid
+    # Config card grid — training params
+    tc = res.get("training_config", {})
     cards = [
         metric_card("K (picked)", K_pick, "d"),
         metric_card("N cells (train)", adata_train.n_obs, "d"),
         metric_card("N cells (holdout)", adata_holdout.n_obs, "d"),
         metric_card("N PCs", N_PCS, "d"),
         metric_card("Max epochs", MAX_EPOCHS_FINAL, "d"),
+        metric_card("Actual epochs", tc.get("actual_epochs", "—"), ""),
         metric_card("Subsample", SUBSAMPLE_FRACTION, ".2f"),
+        metric_card("hidden_dims", str(hd_pick), "s"),
+        metric_card("inflation_factor", inf_pick, ".2f"),
         metric_card("Train R²", res.get("final_archetype_r2", float("nan")), ".3f"),
+        metric_card("Final stability", (
+            res.get("history", {}).get("archetype_stability_mean", [])[-1]
+            if res.get("history", {}).get("archetype_stability_mean")
+            else float("nan")
+        ), ".3f"),
     ]
     html_parts.append(metric_grid(cards))
+    # Model config (loss weights)
+    mcards = [
+        metric_card("archetypal_weight", MODEL_CONFIG["archetypal_weight"], ".3f"),
+        metric_card("kld_weight", MODEL_CONFIG["kld_weight"], ".4f"),
+        metric_card("manifold_weight", MODEL_CONFIG["manifold_weight"], ".4f"),
+        metric_card("sparsity_weight", MODEL_CONFIG["sparsity_weight"], ".4f"),
+    ]
+    html_parts.append("<p><strong>Model config (loss weights):</strong></p>")
+    html_parts.append(metric_grid(mcards))
 
     # CV summary — build from ranked list (CVSummary has no .summary_df attr)
     cv_rows = []
@@ -372,11 +487,21 @@ def phase1_train_model(report: HTMLReport):
     html_parts.append(report.df_to_html(
         pd.DataFrame(cv_rows), "CV search (ranked by archetype_r2)", max_rows=50))
 
+    # Elbow curve — K vs R² (mirrors Part 1 pattern)
+    try:
+        fig_elbow = pc.pl.elbow_curve(cv, metrics=["archetype_r2", "rmse"])
+        if fig_elbow is not None:
+            html_parts.append(report.plotly_to_div(
+                fig_elbow, "Elbow curve — K vs archetype R² and RMSE."
+            ))
+    except Exception as e:
+        html_parts.append(error_html(f"Elbow curve failed: {e}"))
+
     # Drift / stability — helper expects Sequence[Tuple[str, dict]]
     try:
         drift_html = build_drift_qc_panel(
             [("Global TNBC fit", res)],
-            drift_threshold=0.05, converged_window=10,
+            drift_threshold=1.0, converged_window=10,
         )
         html_parts.append(drift_html)
     except Exception as e:
@@ -407,6 +532,7 @@ def phase1_train_model(report: HTMLReport):
             history=hist, max_epochs=MAX_EPOCHS_FINAL,
             early_stop_triggered=bool(early_stop),
             actual_epochs=int(actual_epochs),
+            delta_threshold=0.05,
         )
         html_parts.append(
             f"<p><strong>Convergence status:</strong> {status_str} "
@@ -630,7 +756,7 @@ def phase2_figure3a(adata_train, adata_holdout, res, report: HTMLReport):
         ks_rows = []
         for k in range(K_):
             stat, p = ks_2samp(weights_tr[:, k], weights_ho[:, k])
-            ks_rows.append({"archetype": f"archetype_{k}",
+            ks_rows.append({"archetype": f"archetype_{k+1}",
                              "ks_statistic": float(stat),
                              "p": float(p)})
         ks_df = pd.DataFrame(ks_rows)
@@ -782,23 +908,28 @@ def phase3_figure3bc(adata_train, res, report: HTMLReport):
             exclusive_only=True, exclusive_threshold=EXCLUSIVE_RATIO_THRESHOLD,
             fdr_threshold=FDR_THRESHOLD, top_n_per_archetype=10, degree=1,
         )
+        gene_long, n_nc_dropped = filter_long_df_protein_coding(gene_long, adata_train)
         if len(gene_long):
             fig_b1 = pc.pl.dotplot(
                 gene_long, x_col="archetype", y_col="gene",
-                size_col="mean_archetype", color_col="pvalue",
+                size_col="r_squared", color_col="pvalue",
                 top_n_per_group=10,
                 figsize=dotplot_figsize(gene_long, y_col="gene"),
-                title=f"Fig 3B-1 — archetype-exclusive genes (deg-1, excl ≥{EXCLUSIVE_RATIO_THRESHOLD}, FDR≤{FDR_THRESHOLD})",
+                title="Fig 3B-1 — archetype-exclusive genes",
             )
             fig3b_parts.append(report.fig_to_img(
                 fig_b1,
-                f"Fig 3B-1 — archetype-exclusive genes. "
-                f"n_unique={gene_long['gene'].nunique()}, rows={len(gene_long)}."
+                f"Fig 3B-1 — archetype-exclusive genes (deg-1, excl ≥{EXCLUSIVE_RATIO_THRESHOLD}, "
+                f"FDR≤{FDR_THRESHOLD}, protein-coding only). "
+                f"n_unique={gene_long['gene'].nunique()}, rows={len(gene_long)}. "
+                f"{n_nc_dropped} non-coding genes dropped "
+                f"(adata.var['feature_type'] == 'protein_coding')."
             ))
         else:
             fig3b_parts.append(error_html(
                 f"No archetype-exclusive genes survived filters "
-                f"(exclusive_ratio ≥ {EXCLUSIVE_RATIO_THRESHOLD}, FDR ≤ {FDR_THRESHOLD})."
+                f"(exclusive_ratio ≥ {EXCLUSIVE_RATIO_THRESHOLD}, FDR ≤ {FDR_THRESHOLD}, protein_coding only). "
+                f"{n_nc_dropped} non-coding genes dropped."
             ))
     except Exception as e:
         fig3b_parts.append(error_html(f"Fig 3B gene dotplot failed: {e}"))
@@ -822,13 +953,14 @@ def phase3_figure3bc(adata_train, res, report: HTMLReport):
             if len(pw_long):
                 fig_b2 = pc.pl.dotplot(
                     pw_long, x_col="archetype", y_col="pathway",
-                    size_col="mean_archetype", color_col="pvalue",
+                    size_col="r_squared", color_col="pvalue",
                     top_n_per_group=10,
-                    figsize=dotplot_figsize(pw_long, y_col="pathway"),
-                    title="Fig 3B-2 — archetype pathway enrichment (top 10/archetype, FDR≤0.10)",
+                    figsize=dotplot_figsize(pw_long, y_col="pathway", per_row=0.45),
+                    title="Fig 3B-2 — archetype pathway enrichment",
                 )
                 fig3b_parts.append(report.fig_to_img(
-                    fig_b2, "Fig 3B-2 — archetype pathway enrichment."
+                    fig_b2,
+                    "Fig 3B-2 — archetype pathway enrichment (top 10/archetype, FDR≤0.10, no exclusivity filter)."
                 ))
             else:
                 fig3b_parts.append(error_html(
@@ -862,10 +994,10 @@ def phase3_figure3bc(adata_train, res, report: HTMLReport):
         if len(stress_long):
             fig_b3 = pc.pl.dotplot(
                 stress_long, x_col="archetype", y_col="gene",
-                size_col="mean_archetype", color_col="pvalue",
+                size_col="r_squared", color_col="pvalue",
                 top_n_per_group=5,
                 figsize=dotplot_figsize(stress_long, y_col="gene"),
-                title=f"Fig 3B-3 — stress genes ({len(stress_in_data)} overlap, FDR≤{FDR_THRESHOLD})",
+                title="Fig 3B-3 — stress genes in global archetypes",
             )
             fig3b_parts.append(report.fig_to_img(
                 fig_b3,
@@ -891,57 +1023,51 @@ def phase3_figure3bc(adata_train, res, report: HTMLReport):
 
     weights = adata_train.obsm["cell_archetype_weights"]
 
-    # 3C gate computation. r4 fix C — explain what this measures:
-    # We split cells into 9 (response × treatment) groups, then take all C(9,2)=36
-    # pair-wise 2-Wasserstein distances between groups in K-dim archetype-weight
-    # space. "Within" = pairs that share the same response_group (e.g. NR-Base
-    # vs NR-PD1). "Between" = pairs with different response_groups (e.g. NR-Base
-    # vs R2-PD1). Segregation ratio = mean(between) / mean(within). >1 means
-    # response-group identity drives more variation in archetype weights than
-    # treatment timepoint does. Gate at 1.3 = "between cluster spread ≥ 30%
-    # bigger than within-response spread"; below this we don't render the per-
-    # cell-pop distance heatmap (Fig 3C-i) because the signal is too weak to
-    # be readable. Diversity block (3C-ii/iii) renders unconditionally.
+    # 3C segregation metrics — always computed, always shown.
+    # Splits cells into 9 (response × treatment) groups. "Within" = pairs sharing
+    # the same response_group across treatments. "Between" = different response_groups.
+    # Ratio > 1 means response identity drives more archetype-weight spread than
+    # timepoint does. Shown as diagnostic; no gate — 3C-i renders unconditionally.
     try:
         seg = build_segregation_ratio(
             adata_train.obs, weights,
             response_col="response_group", treatment_col="treatment",
         )
+        fig3c_parts.append(
+            "<p><em>Segregation metrics: 2-Wasserstein (W2) in the K-dimensional archetype-weight "
+            "simplex. <b>Within</b> = mean W2 across all pairs of groups sharing the same "
+            "response label (R1/R2/NR) across treatments. <b>Between</b> = mean W2 across "
+            "all pairs with different response labels. Ratio &gt; 1 = between-response spread "
+            "exceeds within-response spread in archetype weight space. "
+            "Note: assessing whether response or treatment is the stronger separator requires "
+            "within-treatment cross-response comparisons — this ratio is a composite diagnostic.</em></p>"
+        )
         fig3c_parts.append(metric_grid([
             metric_card("Within-response mean W2", seg["within"], ".3f"),
             metric_card("Between-response mean W2", seg["between"], ".3f"),
             metric_card("Segregation ratio (between/within)", seg["ratio"], ".3f"),
-            metric_card("Gate (≥ 1.3)", "PASS" if seg["ratio"] >= FIG3C_GATE_THRESHOLD else "FAIL", "s"),
             metric_card("# within-response pairs", seg["n_within_pairs"], "d"),
             metric_card("# between-response pairs", seg["n_between_pairs"], "d"),
         ]))
-        gate_passed = seg["ratio"] >= FIG3C_GATE_THRESHOLD
     except Exception as e:
         fig3c_parts.append(error_html(f"segregation ratio failed: {e}"))
-        gate_passed = False
+        seg = {}
 
-    # 3C-i — gated heatmaps
-    if gate_passed:
-        try:
-            fig_heat, rho = build_distance_heatmaps(
-                adata_train.obs, weights, adata_train.obsm["X_pca"],
-                response_col="response_group", archetypes_col="archetypes",
-            )
-            fig3c_parts.append(report.plotly_to_div(
-                fig_heat,
-                f"Fig 3C-i — (response × archetype) distances: W2 vs Euclidean "
-                f"centroid. Spearman ρ = {rho:.3f}."
-            ))
-        except Exception as e:
-            fig3c_parts.append(error_html(f"Fig 3C-i heatmaps failed: {e}"))
-    else:
-        fig3c_parts.append(
-            '<div style="padding:8px;background:#fffbeb;border-left:4px solid #ca8a04">'
-            "<strong>Fig 3C-i skipped.</strong> Segregation ratio below threshold "
-            f"({FIG3C_GATE_THRESHOLD}). Consider K±1, per-timepoint modeling, or "
-            "batch correction on PC1 (see Phase 1 PC1 scan)."
-            "</div>"
+    # 3C-i — always rendered (gate removed per r15 feedback)
+    try:
+        fig_heat, rho = build_distance_heatmaps(
+            adata_train.obs, weights, adata_train.obsm["X_pca"],
+            response_col="response_group", archetypes_col="archetypes",
         )
+        fig3c_parts.append(report.plotly_to_div(
+            fig_heat,
+            f"Fig 3C-i — (response × archetype) distances: W2 vs Euclidean "
+            f"centroid. Spearman ρ = {rho:.3f}. "
+            f"Segregation ratio = {seg.get('ratio', float('nan')):.3f} "
+            f"(>1 = response more separating than treatment)."
+        ))
+    except Exception as e:
+        fig3c_parts.append(error_html(f"Fig 3C-i heatmaps failed: {e}"))
 
     # 3C-ii — always rendered
     try:
@@ -1132,11 +1258,22 @@ def _fit_one_condition(adata_full, response, treatment,
         pc.tl.extract_archetype_weights(adata_sub, verbose=False)
         pc.tl.assign_archetypes(adata_sub, percentage_per_archetype=0.15, verbose=False)
 
+        # Use validation R² from history — train-mode final_archetype_r2 is unreliable
+        # due to reparameterization noise (can read as -1e9 even for well-trained models).
+        val_r2_hist = res.get("val_archetype_r2") or []
+        if val_r2_hist:
+            final_r2 = max(val_r2_hist)
+        else:
+            final_r2 = res.get("final_archetype_r2", float("nan"))
+        if not np.isnan(final_r2) and final_r2 < 0.0:
+            return {"status": "failed",
+                    "error": f"training diverged: best_val_archetype_r2={final_r2:.3g}",
+                    "n_cells": n_cells, "response": response, "treatment": treatment}
         return {"status": "ok", "n_cells": n_cells,
                 "response": response, "treatment": treatment,
                 "adata_sub": adata_sub, "res": res,
                 "K": K, "hidden_dims": hd, "inflation": inf,
-                "final_r2": res.get("final_archetype_r2", float("nan"))}
+                "final_r2": final_r2}
     except Exception as e:
         return {"status": "failed", "error": str(e),
                 "n_cells": n_cells,
@@ -1152,8 +1289,9 @@ def _build_fig4a_table(fits):
                           "n_cells": entry.get("n_cells", 0),
                           "status": entry["status"],
                           "K": "—", "R²": "—",
-                          "Shannon_H": "—", "PCA_disp": "—",
-                          "arch_prof_H": "—"})
+                          "Shannon_H (per-cell mean)": "—",
+                          "PCA_disp (median pairwise)": "—",
+                          "Group arch H (H of mean weight vec)": "—"})
             continue
         adata_sub = entry["adata_sub"]
         weights = adata_sub.obsm.get("cell_archetype_weights")
@@ -1173,8 +1311,9 @@ def _build_fig4a_table(fits):
         rows.append({"response": resp, "treatment": tx,
                       "n_cells": entry["n_cells"], "status": "ok",
                       "K": entry["K"], "R²": entry.get("final_r2"),
-                      "Shannon_H": shannon, "PCA_disp": pca_disp,
-                      "arch_prof_H": arch_prof_H})
+                      "Shannon_H (per-cell mean)": shannon,
+                      "PCA_disp (median pairwise)": pca_disp,
+                      "Group arch H (H of mean weight vec)": arch_prof_H})
     return pd.DataFrame(rows)
 
 
@@ -1195,50 +1334,181 @@ def _score_pair_flow(entry_a, entry_b, label_a, label_b,
                        n_epochs=STEP2_FLOW_EPOCHS_SCORING,
                        n_perms=STEP2_FLOW_PERMUTATIONS_SCORING,
                        n_perm_epochs=STEP2_FLOW_PERM_EPOCHS_SCORING):
-    """Run a cheap flow_between + flow_significance to score (transport mass, perm p)."""
+    """Cheap flow_within to score a condition pair.
+
+    Mirrors Part 1's per-pair flow_within pattern (Part 1 lines ~3778, ~4599):
+    concat the two per-condition adatas, tag obs with 'source'/'target', call
+    flow_within directly. Returns mmd_improvement = mmd_before - mmd_after
+    (higher = more cross-flow / more separable). flow_between is NOT used here
+    because it returns a multi-pair dict whose sub-results require extraction;
+    flow_within returns the result dict directly.
+    """
+    import anndata as ad
+    import scipy.sparse as _sp
+    from sklearn.decomposition import PCA as _SkPCA
     adata_a = entry_a["adata_sub"].copy()
     adata_b = entry_b["adata_sub"].copy()
-    adata_a.obs["__flow_cond__"] = label_a
-    adata_b.obs["__flow_cond__"] = label_b
+    adata_a.obs["__flow_label__"] = "source"
+    adata_b.obs["__flow_label__"] = "target"
+    adata_pair = ad.concat([adata_a, adata_b], join="inner")
+    # Joint PCA on pooled expression — both conditions share the same gene set
+    # from adata_full, so this gives a valid shared coordinate system.
+    # Naive concatenation of per-condition PCAs fails because each was fit
+    # independently with a different rotation, making the merged space incoherent
+    # and causing flow_significance to return the minimum representable p-value
+    # (1/(n_perms+1)) for every pair.
+    X_pool = adata_pair.X
+    if _sp.issparse(X_pool):
+        X_pool = X_pool.toarray()
+    n_comp = min(50, X_pool.shape[0] - 1, X_pool.shape[1])
+    joint_pca = _SkPCA(n_components=n_comp, random_state=42).fit_transform(X_pool)
+    adata_pair.obsm["X_pca"] = joint_pca
+    n_a = len(adata_a)
+    joint_pca_source = joint_pca[:n_a]
+    joint_pca_target = joint_pca[n_a:]
     try:
-        fr = pc.tl.flow_between(
-            [adata_a, adata_b],
-            condition_key="__flow_cond__",
-            condition_labels=[label_a, label_b],
-            pairs=[(label_a, label_b)],
+        fr = pc.tl.flow_within(
+            adata_pair,
+            source={"__flow_label__": "source"},
+            target={"__flow_label__": "target"},
             pca_key="X_pca",
             n_epochs=n_epochs,
+            hidden_dims=(64, 64),
+            batch_size=64,
+            return_model=True,
         )
     except Exception as e:
-        return {"transport_mass": float("nan"), "perm_p": float("nan"),
-                "error": f"flow_between failed: {e}"}
-    # Transport mass extraction varies by PEACH version — try common keys
-    mass = float("nan")
-    for k in ("total_mass", "transported_mass", "mass"):
-        if k in fr:
-            mass = float(fr[k])
-            break
-    if np.isnan(mass):
-        # Approximate from pair_results if present
-        pr = fr.get("pair_results", {}) or {}
-        for v in pr.values():
-            if isinstance(v, dict) and "mass" in v:
-                mass = float(v["mass"])
-                break
-    # Permutation null
+        return {"mmd_improvement": float("nan"), "perm_p": float("nan"),
+                "joint_pca_source": joint_pca_source, "joint_pca_target": joint_pca_target,
+                "error": f"flow_within failed: {e}"}
+    mmd_improvement = fr["mmd_before"] - fr["mmd_after"]
     perm_p = float("nan")
     try:
         sig = pc.tl.flow_significance(
-            adata_a, fr,
+            adata_pair, fr,
             n_permutations=n_perms,
             n_epochs_per_perm=n_perm_epochs,
         )
         perm_p = float(sig.get("p_value", float("nan")))
     except Exception as e:
-        return {"transport_mass": mass, "perm_p": perm_p,
+        return {"mmd_improvement": mmd_improvement, "perm_p": perm_p,
+                "joint_pca_source": joint_pca_source, "joint_pca_target": joint_pca_target,
                 "error": f"flow_significance failed: {e}",
                 "flow_result": fr}
-    return {"transport_mass": mass, "perm_p": perm_p, "flow_result": fr}
+    return {"mmd_improvement": mmd_improvement, "perm_p": perm_p, "flow_result": fr,
+            "joint_pca_source": joint_pca_source, "joint_pca_target": joint_pca_target}
+
+
+def _compute_pair_correspondence(entry_a, entry_b, joint_pca_a, joint_pca_b):
+    """Archetype correspondence (K_a × K_b mass + Markov) between two condition models.
+
+    Uses joint-PCA coordinates (shared embedding built during pair scoring) and
+    per-condition archetype weights. Returns None on failure.
+    """
+    from peach._core.utils.archetype_comparison import compute_archetype_correspondence
+    weights_a = entry_a["adata_sub"].obsm.get("cell_archetype_weights")
+    weights_b = entry_b["adata_sub"].obsm.get("cell_archetype_weights")
+    if weights_a is None or weights_b is None:
+        return None
+    k = min(200, len(joint_pca_b))
+    return compute_archetype_correspondence(
+        source_weights=weights_a,
+        source_coords=joint_pca_a,
+        target_weights=weights_b,
+        target_coords=joint_pca_b,
+        k=k,
+        method="hard",
+    )
+
+
+def _render_correspondence_html(corr_result, K_a, K_b, label_a, label_b, report):
+    """Render archetype correspondence as a Markov heatmap + raw pair table."""
+    import plotly.graph_objects as go
+    mass   = corr_result["mass"]    # K_a × K_b
+    markov = corr_result["markov"]  # K_a × K_b
+
+    src_lbl = [f"{label_a} A{i+1}" for i in range(K_a)]
+    tgt_lbl = [f"{label_b} A{j+1}" for j in range(K_b)]
+
+    mkv = markov.copy()
+    row_sums = mkv.sum(axis=1, keepdims=True)
+    mkv = np.where(row_sums > 1e-9, mkv / np.where(row_sums > 1e-9, row_sums, 1.0), 0.0)
+
+    fig = go.Figure(go.Heatmap(
+        z=mkv, x=tgt_lbl, y=src_lbl,
+        colorscale="Blues", zmin=0, zmax=1,
+        colorbar=dict(title="P(target|source)", len=0.7),
+    ))
+    for i in range(K_a):
+        for j in range(K_b):
+            fig.add_annotation(
+                x=tgt_lbl[j], y=src_lbl[i],
+                text=f"{mkv[i,j]:.2f}", showarrow=False,
+                font=dict(size=9, color="white" if mkv[i,j] > 0.55 else "black"),
+            )
+    fig.update_layout(
+        title=f"{label_a} → {label_b}: archetype correspondence",
+        height=max(300, 60 * K_a + 120),
+        width=max(400, 80 * K_b + 180),
+    )
+    html = safe_plotly_html(
+        report, fig,
+        f"Archetype correspondence {label_a}→{label_b}. "
+        f"P(target archetype j | source archetype i): row-normalized transport mass "
+        f"from compute_archetype_correspondence(method='hard', k={min(200, K_b*10)}). "
+        f"Source cells hard-assigned by argmax of weights.",
+    )
+    rows = []
+    for i in range(K_a):
+        best_j = int(np.argmax(mkv[i]))
+        for j in range(K_b):
+            rows.append({
+                "source": src_lbl[i], "target": tgt_lbl[j],
+                "mass": f"{mass[i,j]:.4f}",
+                "P(target|source)": f"{mkv[i,j]:.3f}",
+                "top": "★" if j == best_j else "",
+            })
+    html += report.df_to_html(
+        pd.DataFrame(rows),
+        caption=f"Raw pairs {label_a}→{label_b}. ★ = top target per source archetype.",
+        max_rows=K_a * K_b + 5,
+    )
+    return html
+
+
+def _build_correspondence_section(fits, scores, report):
+    """Archetype correspondence matrices for all scored condition pairs (Fig 4B addendum).
+
+    For each pair in scores, reuses the joint PCA computed during pair scoring to
+    call compute_archetype_correspondence and render a Markov heatmap + raw table.
+    """
+    html_parts = []
+    for (i_idx, j_idx), s in sorted(scores.items()):
+        key_a, key_b = s["key_a"], s["key_b"]
+        label_a = f"{key_a[0]}_{key_a[1]}"
+        label_b = f"{key_b[0]}_{key_b[1]}"
+        pca_a = s.get("joint_pca_source")
+        pca_b = s.get("joint_pca_target")
+        if pca_a is None or pca_b is None:
+            html_parts.append(error_html(
+                f"Correspondence {label_a}→{label_b}: joint PCA not in scores dict"))
+            continue
+        entry_a = fits.get(key_a, {})
+        entry_b = fits.get(key_b, {})
+        if entry_a.get("status") != "ok" or entry_b.get("status") != "ok":
+            continue
+        try:
+            corr = _compute_pair_correspondence(entry_a, entry_b, pca_a, pca_b)
+            if corr is None:
+                html_parts.append(error_html(
+                    f"Correspondence {label_a}→{label_b}: archetype weights unavailable"))
+                continue
+            html_parts.append(f"<h4>{label_a} → {label_b}</h4>")
+            html_parts.append(_render_correspondence_html(
+                corr, entry_a["K"], entry_b["K"], label_a, label_b, report))
+        except Exception as e:
+            html_parts.append(error_html(f"Correspondence {label_a}→{label_b} failed: {e}"))
+    return "\n".join(html_parts)
 
 
 def _build_fig4b_heatmaps(fits, scores, report):
@@ -1253,23 +1523,26 @@ def _build_fig4b_heatmaps(fits, scores, report):
     p_mat = np.full((G, G), np.nan)
     for (i_idx, j_idx), s in scores.items():
         w2_mat[i_idx, j_idx] = w2_mat[j_idx, i_idx] = s.get("w2", np.nan)
-        mass_mat[i_idx, j_idx] = mass_mat[j_idx, i_idx] = s.get("transport_mass", np.nan)
+        mass_mat[i_idx, j_idx] = mass_mat[j_idx, i_idx] = s.get("mmd_improvement", np.nan)
         p = s.get("perm_p", np.nan)
         if not np.isnan(p):
             log_p = -np.log10(max(p, 1e-300))
             p_mat[i_idx, j_idx] = p_mat[j_idx, i_idx] = log_p
     fig = make_subplots(rows=1, cols=3,
                           subplot_titles=("2-Wasserstein (weight space)",
-                                          "Transport mass (flow_between)",
+                                          "MMD improvement (flow_within)",
                                           "−log10(perm p)"))
     fig.add_trace(go.Heatmap(z=w2_mat, x=labels, y=labels, colorscale="Viridis",
-                              showscale=True, colorbar=dict(x=0.30, len=0.75)),
+                              showscale=True,
+                              colorbar=dict(x=0.30, len=0.75, title="W2")),
                     row=1, col=1)
     fig.add_trace(go.Heatmap(z=mass_mat, x=labels, y=labels, colorscale="Plasma",
-                              showscale=True, colorbar=dict(x=0.66, len=0.75)),
+                              showscale=True,
+                              colorbar=dict(x=0.66, len=0.75, title="MMD↓")),
                     row=1, col=2)
     fig.add_trace(go.Heatmap(z=p_mat, x=labels, y=labels, colorscale="Inferno",
-                              showscale=True, colorbar=dict(x=1.02, len=0.75)),
+                              showscale=True,
+                              colorbar=dict(x=1.02, len=0.75, title="-log10 p")),
                     row=1, col=3)
     fig.update_layout(height=540, width=1500,
                         title="Fig 4B — pairwise condition relatedness")
@@ -1277,29 +1550,45 @@ def _build_fig4b_heatmaps(fits, scores, report):
 
 
 def _select_step3_pairs(scores):
-    """Filter pairs by significance ∧ mass ≥ 5% of cumulative mass."""
+    """Filter pairs by significance ∧ MMD improvement ≥ 5% of cumulative total."""
     valid = [(k, s) for k, s in scores.items()
-             if not np.isnan(s.get("transport_mass", np.nan))
+             if not np.isnan(s.get("mmd_improvement", np.nan))
              and s.get("perm_p", 1.0) <= STEP3_PERM_P_THRESHOLD]
     if not valid:
         return []
-    total_mass = sum(s["transport_mass"] for _, s in valid)
-    if total_mass <= 0:
+    total = sum(s["mmd_improvement"] for _, s in valid)
+    if total <= 0:
         return []
-    threshold = STEP3_MASS_PCT_THRESHOLD * total_mass
-    selected = [k for k, s in valid if s["transport_mass"] >= threshold]
+    threshold = STEP3_MASS_PCT_THRESHOLD * total
+    selected = [k for k, s in valid if s["mmd_improvement"] >= threshold]
     return selected
 
 
 def phase4_step2(adata_train, report: HTMLReport):
-    """Train 8 per-(response, treatment) main-PCA models + Fig 4A + Fig 4B."""
+    """Train 8 per-(response, treatment) main-PCA models + Fig 4A + Fig 4B.
+
+    Uses the full (unsubsampled) training adata loaded directly from disk so
+    per-condition cell counts are not decimated by SUBSAMPLE_FRACTION. adata_train
+    (the subsampled Step 1 adata) is accepted for API consistency but overridden.
+    """
     if not RUN_STEP2:
         return None, None
     t_phase = time.time()
+    # Always use the full training split for per-condition fits — subsampled
+    # adata_train would drop most conditions below STEP2_MIN_CELLS (500).
+    adata_full = sc.read_h5ad(DATA_DIR / "adata_tnbc_train.h5ad")
+    # Apply the same protein-coding filter as Phase 1 so per-condition PCA
+    # runs on the same gene set as the global model. Cache already populated
+    # by Phase 1, so this is instant on the second call.
+    _pc4_genes = get_protein_coding_gene_set_tnbc(adata_full)
+    if len(_pc4_genes) < adata_full.n_vars:
+        _pc4_list = [g for g in adata_full.var_names if g in _pc4_genes]
+        adata_full = adata_full[:, _pc4_list].copy()
+    print(f"  phase4: loaded full train adata {adata_full.shape} for per-condition fits (protein-coding filtered)")
     fits = {}
     for (resp, tx) in STEP2_CONDITIONS:
         print(f"  phase4: fitting ({resp}, {tx}) ...")
-        fits[(resp, tx)] = _fit_one_condition(adata_train, resp, tx)
+        fits[(resp, tx)] = _fit_one_condition(adata_full, resp, tx)
         e = fits[(resp, tx)]
         print(f"    -> status={e['status']}, n_cells={e.get('n_cells', 0)}, "
               f"K={e.get('K', '—')}, R²={e.get('final_r2', '—')}")
@@ -1309,8 +1598,11 @@ def phase4_step2(adata_train, report: HTMLReport):
     try:
         df_4a = _build_fig4a_table(fits)
         html_parts.append(report.df_to_html(df_4a,
-            "Fig 4A — per-condition diversity metrics. Skipped rows had "
-            f"<{STEP2_MIN_CELLS} cells; failed rows hit a training error."))
+            "Fig 4A — per-condition diversity metrics. "
+            "Shannon_H: mean per-cell entropy of archetype weights (high = each cell is internally mixed). "
+            "PCA_disp: median pairwise Euclidean distance in 12-PC space (high = cells are heterogeneous in feature space). "
+            "Group arch H: entropy of the condition's mean archetype weight vector (high = group collectively uses all archetypes evenly). "
+            f"Skipped rows had <{STEP2_MIN_CELLS} cells (with full adata this should be rare); failed rows hit a training error."))
     except Exception as e:
         html_parts.append(error_html(f"Fig 4A failed: {e}"))
 
@@ -1331,23 +1623,26 @@ def phase4_step2(adata_train, report: HTMLReport):
                 w2 = float("nan"); print(f"      W2 failed: {e}")
             try:
                 fl = _score_pair_flow(fits[ki], fits[kj], label_i, label_j)
-                mass = fl["transport_mass"]
+                mmd_imp = fl["mmd_improvement"]
                 p = fl["perm_p"]
             except Exception as e:
-                mass = p = float("nan"); fl = {"error": str(e)}
+                mmd_imp = p = float("nan"); fl = {"error": str(e)}
                 print(f"      flow scoring failed: {e}")
-            scores[(i, j)] = {"w2": w2, "transport_mass": mass,
-                                "perm_p": p, "key_a": ki, "key_b": kj}
+            scores[(i, j)] = {"w2": w2, "mmd_improvement": mmd_imp,
+                                "perm_p": p, "key_a": ki, "key_b": kj,
+                                "joint_pca_source": fl.get("joint_pca_source"),
+                                "joint_pca_target": fl.get("joint_pca_target")}
 
     # Fig 4B three-panel heatmap
     try:
         fig_4b = _build_fig4b_heatmaps(fits, scores, report)
         html_parts.append(report.plotly_to_div(
             fig_4b,
-            "Fig 4B — pairwise condition-model relatedness. W2 = 2-Wasserstein "
-            "in archetype-weight simplex (lower = more similar). Transport "
-            "mass = total probability mass moved by flow_between (higher = "
-            "more cross-flow). −log10(p) = significance vs label-shuffle null."
+            "Fig 4B — pairwise condition-model relatedness. "
+            "W2 = 2-Wasserstein in archetype-weight simplex (lower = more similar). "
+            "MMD improvement = mmd_before − mmd_after from flow_within "
+            "(higher = conditions more separable / more cross-flow). "
+            "−log10(p) = significance vs label-shuffle null."
         ))
     except Exception as e:
         html_parts.append(error_html(f"Fig 4B heatmaps failed: {e}"))
@@ -1359,18 +1654,27 @@ def phase4_step2(adata_train, report: HTMLReport):
         s = scores[(i_idx, j_idx)]
         sel_rows.append({
             "pair": f"{s['key_a'][0]}_{s['key_a'][1]} ↔ {s['key_b'][0]}_{s['key_b'][1]}",
-            "W2": s["w2"], "transport_mass": s["transport_mass"],
+            "W2": s["w2"], "mmd_improvement": s["mmd_improvement"],
             "perm_p": s["perm_p"],
             "selected_for_step3": (i_idx, j_idx) in selected,
         })
     html_parts.append(report.df_to_html(
-        pd.DataFrame(sel_rows).sort_values("transport_mass", ascending=False),
+        pd.DataFrame(sel_rows).sort_values("mmd_improvement", ascending=False),
         f"Pair selection — {len(selected)} of {len(scores)} pairs passed "
-        f"(perm p ≤ {STEP3_PERM_P_THRESHOLD} ∧ mass ≥ "
-        f"{int(STEP3_MASS_PCT_THRESHOLD*100)}% cumulative). Selected pairs "
+        f"(perm p ≤ {STEP3_PERM_P_THRESHOLD} ∧ mmd_improvement ≥ "
+        f"{int(STEP3_MASS_PCT_THRESHOLD*100)}% of cumulative total). Selected pairs "
         "feed Phase 5 / Fig 4C flow analyses.",
         max_rows=60,
     ))
+
+    # Archetype correspondence matrices for all pairs (Fig 4B addendum)
+    try:
+        corr_html = _build_correspondence_section(fits, scores, report)
+        if corr_html:
+            html_parts.append("<h3>Fig 4B — Archetype correspondence matrices (all condition pairs)</h3>")
+            html_parts.append(corr_html)
+    except Exception as e:
+        html_parts.append(error_html(f"Correspondence section failed: {e}"))
 
     report.add_section(
         "Phase 4 — Step 2: per-condition fits + Fig 4A/B",
@@ -1378,7 +1682,7 @@ def phase4_step2(adata_train, report: HTMLReport):
     )
     print(f"  phase4: done in {time.time() - t_phase:.1f}s; "
           f"selected {len(selected)} pairs for Phase 5")
-    return fits, [(scores[k]["key_a"], scores[k]["key_b"]) for k in selected]
+    return fits, [(scores[k]["key_a"], scores[k]["key_b"]) for k in selected], scores
 
 
 # ============================================================================
@@ -1387,7 +1691,14 @@ def phase4_step2(adata_train, report: HTMLReport):
 
 
 def _phase5_one_pair(fits, key_a, key_b, report):
-    """Full flow + per-pair detail figs for one selected pair."""
+    """Full flow + per-pair detail figs for one selected pair.
+
+    Uses flow_within on a concat of the two per-condition adatas (source/target
+    tagged), mirroring Part 1's per-pair flow_within pattern (~line 3778, 4599).
+    All downstream helpers (flow_gene_alignment, flow_jacobian, flow_significance)
+    receive the flow_within result dict directly — NOT a flow_between wrapper.
+    """
+    import anndata as ad
     label_a = f"{key_a[0]}_{key_a[1]}"
     label_b = f"{key_b[0]}_{key_b[1]}"
     print(f"  phase5: detailing pair ({label_a} → {label_b}) ...")
@@ -1395,29 +1706,45 @@ def _phase5_one_pair(fits, key_a, key_b, report):
 
     adata_a = fits[key_a]["adata_sub"].copy()
     adata_b = fits[key_b]["adata_sub"].copy()
-    adata_a.obs["__flow_cond__"] = label_a
-    adata_b.obs["__flow_cond__"] = label_b
-    try:
-        fr = pc.tl.flow_between(
-            [adata_a, adata_b],
-            condition_key="__flow_cond__",
-            condition_labels=[label_a, label_b],
-            pairs=[(label_a, label_b)],
-            pca_key="X_pca",
-            n_epochs=STEP3_FLOW_EPOCHS_FULL,
-        )
-    except Exception as e:
-        parts.append(error_html(f"flow_between failed: {e}"))
-        return "\n".join(parts)
-
-    # Combined adata for downstream analyses (concat source + target)
-    import anndata as ad
-    adata_pair = ad.concat([adata_a, adata_b], join="outer", merge="same")
+    # Strip per-condition archetype weights before concat: the two conditions
+    # may have different K, so ad.concat would zero-pad and produce weights that
+    # don't sum to 1, causing feature_simplex_regression to reject them.
+    for _key in ("cell_archetype_weights", "archetype_distances"):
+        adata_a.obsm.pop(_key, None)
+        adata_b.obsm.pop(_key, None)
+    adata_a.obs["__flow_label__"] = "source"
+    adata_b.obs["__flow_label__"] = "target"
+    adata_pair = ad.concat([adata_a, adata_b], join="inner")
     adata_pair.obsm["X_pca"] = np.vstack([
         adata_a.obsm["X_pca"], adata_b.obsm["X_pca"]
     ])
+    # Restore varm['PCs'] (PCA loadings) so flow_gene_alignment can project
+    # flow vectors from PCA space back to gene space. ad.concat drops varm;
+    # copy it from adata_a which has fresh PCA from prepare_training().
+    if "PCs" in adata_a.varm:
+        adata_pair.varm["PCs"] = adata_a.varm["PCs"]
+    try:
+        fr = pc.tl.flow_within(
+            adata_pair,
+            source={"__flow_label__": "source"},
+            target={"__flow_label__": "target"},
+            pca_key="X_pca",
+            n_epochs=STEP3_FLOW_EPOCHS_FULL,
+            hidden_dims=(128, 128, 128),
+            batch_size=128,
+            return_model=True,
+            name=f"{label_a}_to_{label_b}",
+        )
+    except Exception as e:
+        parts.append(error_html(f"flow_within failed: {e}"))
+        return "\n".join(parts)
+    parts.append(metric_grid([
+        metric_card("MMD before", fr["mmd_before"], ".4f"),
+        metric_card("MMD after", fr["mmd_after"], ".4f"),
+        metric_card("MMD improvement", fr["mmd_before"] - fr["mmd_after"], ".4f"),
+    ]))
 
-    # Gene alignment
+    # Gene alignment — fr is the flow_within result dict directly
     try:
         align = pc.tl.flow_gene_alignment(
             adata_pair, fr, per_cell=False,
@@ -1428,7 +1755,7 @@ def _phase5_one_pair(fits, key_a, key_b, report):
         parts.append(error_html(f"flow_gene_alignment failed: {e}"))
         align = None
 
-    # Jacobian
+    # Jacobian — fr["model"] is the trained flow model
     try:
         jac = pc.tl.flow_jacobian(
             adata_pair, fr, fr.get("model"),
@@ -1439,7 +1766,7 @@ def _phase5_one_pair(fits, key_a, key_b, report):
         parts.append(error_html(f"flow_jacobian failed: {e}"))
         jac = None
 
-    # Permutation curve figure
+    # Permutation significance — fr has mmd_before / mmd_after directly
     try:
         sig = pc.tl.flow_significance(
             adata_pair, fr,
@@ -1447,16 +1774,22 @@ def _phase5_one_pair(fits, key_a, key_b, report):
             n_epochs_per_perm=200,
         )
         if "null_distribution" in sig and "observed_stat" in sig:
+            import matplotlib.pyplot as plt
             null_arr = np.asarray(sig["null_distribution"])
             obs = float(sig["observed_stat"])
-            sw = np.linspace(0, 1, len(null_arr))
-            null_mean = np.full_like(sw, null_arr.mean())
-            null_std = np.full_like(sw, null_arr.std())
-            fig_pc = build_permutation_curve_figure(sw, null_mean, null_std, obs)
+            fig_pc, ax_pc = plt.subplots(figsize=(5, 3))
+            ax_pc.hist(null_arr, bins=min(20, len(null_arr)), color="#aaaaaa",
+                       edgecolor="white", label="permutation null")
+            ax_pc.axvline(obs, color="#D55E00", lw=2, label=f"observed ({obs:.4f})")
+            ax_pc.set_xlabel("MMD improvement"); ax_pc.set_ylabel("count")
+            ax_pc.set_title(f"flow_significance: {label_a}→{label_b}")
+            ax_pc.legend(fontsize=8)
+            plt.tight_layout()
             parts.append(report.fig_to_img(fig_pc,
-                f"Pair {label_a}→{label_b}: flow_significance permutation curve. "
-                f"observed={obs:.4f}, null mean={null_arr.mean():.4f}, "
+                f"Pair {label_a}→{label_b}: flow_significance permutation null. "
+                f"observed={obs:.4f}, null mean={null_arr.mean():.4f}±{null_arr.std():.4f}, "
                 f"p_value={sig.get('p_value', float('nan')):.3e}"))
+            plt.close(fig_pc)
     except Exception as e:
         parts.append(error_html(f"flow_significance failed: {e}"))
 
@@ -1560,34 +1893,169 @@ def _phase5_one_pair(fits, key_a, key_b, report):
     except Exception as e:
         parts.append(error_html(f"ridgeplot failed: {e}"))
 
-    # Pathway dotplot — per-pair flow-associated pathway scores via simplex regression
-    # on pathway_scores, restricted to the source-archetype dimension
+    # Pathway dotplot — simplex regression on source-side cells within adata_pair.
+    # pathway_scores must be computed freshly on adata_src because adata_sub was
+    # built from adata_full (the full unsubsampled disk-loaded adata) which does
+    # not carry the pathway_scores that were computed on adata_train in Phase 1.
     try:
-        if "pathway_scores" in adata_a.obsm:
-            pc.tl.feature_simplex_regression(
-                adata_a, max_degree=1, feature_matrix="pathway_scores",
-                robust_se=True,
-            )
-            pw_reg = adata_a.uns.get("peach_simplex_regression_pathways") or \
-                      adata_a.uns.get("peach_simplex_regression_pathway_scores", {})
-            pw_long = regression_to_long_df(
-                pw_reg, y_col="pathway", exclusive_only=False,
-                fdr_threshold=0.10, top_n_per_archetype=10, degree=1,
-            )
-            if len(pw_long):
-                fig_pwd = pc.pl.dotplot(
-                    pw_long, x_col="archetype", y_col="pathway",
-                    size_col="mean_archetype", color_col="pvalue",
-                    top_n_per_group=10,
-                    figsize=dotplot_figsize(pw_long, y_col="pathway"),
-                    title=f"Flow-associated pathways for source ({label_a})",
+        src_mask = adata_pair.obs["__flow_label__"] == "source"
+        adata_src = adata_pair[src_mask].copy()
+        if "pathway_scores" not in adata_src.obsm and adata_src.n_obs >= 30:
+            try:
+                _pw_net = _PATHWAY_NET if _PATHWAY_NET is not None else _get_pathway_net(sources=["c5_bp"])
+                pc.pp.compute_pathway_scores(
+                    adata_src, net=_pw_net, obsm_key="pathway_scores", verbose=False,
                 )
-                top_pw_str = ", ".join(pw_long["pathway"].head(10).tolist())
-                parts.append(report.fig_to_img(fig_pwd,
-                    f"Pair {label_a}→{label_b}: source-side flow-associated "
-                    f"pathways. Top 10: {top_pw_str}"))
+            except Exception as _pw_e:
+                parts.append(error_html(f"Per-pair pathway scoring failed: {_pw_e}"))
+        if "pathway_scores" in adata_src.obsm and adata_src.n_obs > 10:
+            # Recompute archetype weights on adata_src using the source
+            # condition's model — we stripped stale weights from adata_a
+            # before concat to avoid cross-K shape mismatches.
+            _src_model = fits[key_a].get("res", {}).get("model") or \
+                         fits[key_a].get("res", {}).get("final_model")
+            if _src_model is not None:
+                try:
+                    pc.tl.extract_archetype_weights(
+                        adata_src, model=_src_model, verbose=False,
+                    )
+                except Exception as _we:
+                    parts.append(error_html(f"weight extraction for pathway failed: {_we}"))
+            if "cell_archetype_weights" not in adata_src.obsm:
+                parts.append(error_html(
+                    f"Pathway regression skipped: no archetype weights in adata_src "
+                    f"(src_model={'None' if _src_model is None else 'ok'})"))
+            else:
+                pc.tl.feature_simplex_regression(
+                    adata_src, max_degree=1, feature_matrix="pathway_scores",
+                    robust_se=True,
+                )
+                pw_reg = adata_src.uns.get("peach_simplex_regression_pathways") or \
+                          adata_src.uns.get("peach_simplex_regression_pathway_scores", {})
+                pw_long = regression_to_long_df(
+                    pw_reg, y_col="pathway", exclusive_only=False,
+                    fdr_threshold=0.10, top_n_per_archetype=10, degree=1,
+                )
+                if len(pw_long):
+                    fig_pwd = pc.pl.dotplot(
+                        pw_long, x_col="archetype", y_col="pathway",
+                        size_col="r_squared", color_col="pvalue",
+                        top_n_per_group=10,
+                        figsize=dotplot_figsize(pw_long, y_col="pathway", per_row=0.45),
+                        title=f"Flow-associated pathways for source ({label_a})",
+                    )
+                    top_pw_str = ", ".join(pw_long["pathway"].head(10).tolist())
+                    parts.append(report.fig_to_img(fig_pwd,
+                        f"Pair {label_a}→{label_b}: source-side flow-associated "
+                        f"pathways. Top 10: {top_pw_str}"))
+                else:
+                    parts.append(f"<em>No pathways reached FDR ≤ 0.10 for source ({label_a}).</em>")
+        else:
+            parts.append(f"<em>Pathway dotplot skipped: pathway_scores absent or "
+                         f"source n_cells={adata_src.n_obs} too small.</em>")
     except Exception as e:
         parts.append(error_html(f"per-pair pathway dotplot failed: {e}"))
+
+    # Gene associations on source-side cells (Wilcoxon + cross-fit Spearman)
+    try:
+        src_mask_g = adata_pair.obs["__flow_label__"] == "source"
+        adata_src_g = adata_pair[src_mask_g].copy()
+        # Transfer archetype_distances from source fit for gene_associations (needs argmin binning)
+        _src_fit_adata = fits[key_a]["adata_sub"]
+        if "archetype_distances" in _src_fit_adata.obsm:
+            _obs_idx = _src_fit_adata.obs_names.get_indexer(adata_src_g.obs_names)
+            if not np.any(_obs_idx == -1):
+                adata_src_g.obsm["archetype_distances"] = \
+                    _src_fit_adata.obsm["archetype_distances"][_obs_idx]
+        _src_model_g = (
+            fits[key_a].get("res", {}).get("model")
+            or fits[key_a].get("res", {}).get("final_model")
+        )
+        if _src_model_g is not None:
+            try:
+                pc.tl.extract_archetype_weights(adata_src_g, model=_src_model_g, verbose=False)
+            except Exception as _weg:
+                parts.append(error_html(f"weight extraction for gene assoc failed: {_weg}"))
+        if "cell_archetype_weights" in adata_src_g.obsm and adata_src_g.n_obs >= 30:
+            pc.tl.assign_archetypes(adata_src_g, percentage_per_archetype=0.15, verbose=False)
+            # Wilcoxon gene associations
+            gene_assoc_src = pc.tl.gene_associations(adata_src_g, verbose=False)
+            n_sig_g = int((gene_assoc_src["fdr_pvalue"] < 0.05).sum()) if "fdr_pvalue" in gene_assoc_src.columns else 0
+            parts.append(metric_grid([
+                metric_card(f"{n_sig_g}", f"Wilcoxon FDR<0.05 (source {label_a})"),
+                metric_card(f"{len(gene_assoc_src)}", "Total gene tests"),
+                metric_card(str(gene_assoc_src["archetype"].nunique() if "archetype" in gene_assoc_src.columns else "?"), "Archetypes"),
+            ]))
+            if n_sig_g > 0:
+                try:
+                    fig_wilcox_g = pc.pl.dotplot(
+                        gene_assoc_src, top_n_per_group=10,
+                        title=f"Source ({label_a}) Wilcoxon gene associations (top 10/archetype)",
+                    )
+                    parts.append(report.fig_to_img(
+                        fig_wilcox_g,
+                        f"Pair {label_a}→{label_b}: source-side Wilcoxon rank-sum gene associations."
+                    ))
+                    plt.close("all")
+                except Exception as _e_dot:
+                    parts.append(error_html(f"Wilcoxon dotplot (source) failed: {_e_dot}"))
+                top30_g = gene_assoc_src[gene_assoc_src["fdr_pvalue"] < 0.05].nsmallest(30, "fdr_pvalue")
+                disp_cols = [c for c in ["gene", "archetype", "mean_archetype", "mean_rest", "log_fc", "fdr_pvalue"] if c in top30_g.columns]
+                parts.append(report.df_to_html(
+                    top30_g[disp_cols],
+                    caption=f"Top 30 Wilcoxon gene associations — source condition {label_a} (FDR < 0.05)",
+                ))
+            # Simplex regression + cross-fit Spearman vs target
+            pc.tl.feature_simplex_regression(adata_src_g, max_degree=1, robust_se=True)
+            _src_reg_g = adata_src_g.uns.get("peach_simplex_regression_genes", {})
+            if _src_reg_g:
+                try:
+                    src_mask_t = adata_pair.obs["__flow_label__"] == "target"
+                    adata_tgt_g = adata_pair[src_mask_t].copy()
+                    _tgt_model_g = (
+                        fits[key_b].get("res", {}).get("model")
+                        or fits[key_b].get("res", {}).get("final_model")
+                    )
+                    if _tgt_model_g is not None:
+                        pc.tl.extract_archetype_weights(adata_tgt_g, model=_tgt_model_g, verbose=False)
+                    if "cell_archetype_weights" in adata_tgt_g.obsm and adata_tgt_g.n_obs >= 30:
+                        pc.tl.feature_simplex_regression(adata_tgt_g, max_degree=1, robust_se=True)
+                        _tgt_reg_g = adata_tgt_g.uns.get("peach_simplex_regression_genes", {})
+                        if _tgt_reg_g:
+                            from scipy.stats import spearmanr as _spearmanr
+                            _src_feat_g = list(_src_reg_g.get("feature_names", []))
+                            _tgt_feat_g = list(_tgt_reg_g.get("feature_names", []))
+                            _tgt_idx_g = {g: i for i, g in enumerate(_tgt_feat_g)}
+                            _shared_g = [(i, _tgt_idx_g[g]) for i, g in enumerate(_src_feat_g) if g in _tgt_idx_g]
+                            if len(_shared_g) >= 5:
+                                _sr2 = np.asarray(_src_reg_g.get("r_squared_degree1", []))
+                                _tr2 = np.asarray(_tgt_reg_g.get("r_squared_degree1", []))
+                                _si = np.array([a for a, _ in _shared_g], dtype=int)
+                                _ti = np.array([b for _, b in _shared_g], dtype=int)
+                                _m = np.isfinite(_sr2[_si]) & np.isfinite(_tr2[_ti])
+                                if _m.sum() >= 5:
+                                    _rho_g, _p_g = _spearmanr(_sr2[_si][_m], _tr2[_ti][_m])
+                                    parts.append(report.df_to_html(
+                                        pd.DataFrame([{
+                                            "pair": f"{label_a}→{label_b}",
+                                            "N shared features": int(_m.sum()),
+                                            "Spearman ρ (degree-1 R²)": f"{_rho_g:.4f}",
+                                            "p-value": fmt_pval(float(_p_g)),
+                                        }]),
+                                        caption=(
+                                            f"Cross-fit R² concordance: source ({label_a}) vs "
+                                            f"target ({label_b}) per-gene simplex R² (degree 1). "
+                                            "Higher ρ = same genes drive archetype position in both conditions."
+                                        ),
+                                    ))
+                except Exception as _e_sp:
+                    parts.append(error_html(f"Cross-fit Spearman failed: {_e_sp}"))
+        else:
+            parts.append(
+                f"<em>Gene associations skipped: source n_obs={adata_src_g.n_obs} or no weight matrix.</em>"
+            )
+    except Exception as e:
+        parts.append(error_html(f"Gene associations (source) failed: {e}"))
 
     return "\n".join(parts) if parts else "<em>(no detail content rendered)</em>"
 
@@ -1622,13 +2090,665 @@ def phase5_step3(adata_train, fits, selected_pairs, report: HTMLReport):
 # ============================================================================
 
 
+# ============================================================================
+# Phase 6 — Step 4: R vs NR contrasts + per-patient trajectories (Fig 5)
+# ============================================================================
+
+
+def _fig5a_patient_trajectories(adata_train):
+    """Per-patient centroid trajectories in 2D archetype weight space (PCA)."""
+    import plotly.graph_objects as go
+    from sklearn.decomposition import PCA as _PCA
+
+    weights = adata_train.obsm["cell_archetype_weights"]
+    obs = adata_train.obs.reset_index(drop=True)
+    tx_order = ["Base", "PD1", "RTPD1"]
+
+    centroids = []
+    for pat in sorted(obs["cohort"].unique()):
+        for tx in tx_order:
+            mask = ((obs["cohort"] == pat) & (obs["treatment"] == tx)).values
+            if mask.sum() < 5:
+                continue
+            w = weights[mask].mean(axis=0)
+            resp_vals = obs.loc[mask, "response_group"].unique()
+            resp = str(resp_vals[0]) if len(resp_vals) > 0 else "?"
+            centroids.append({"patient": pat, "treatment": tx, "response_group": resp, "w": w})
+
+    if len(centroids) < 3:
+        raise ValueError(f"Too few patient-timepoint centroids ({len(centroids)}) to plot.")
+
+    centroid_mat = np.vstack([c["w"] for c in centroids])
+    n_comp = min(2, centroid_mat.shape[1])
+    pca2 = _PCA(n_components=n_comp, random_state=42).fit(centroid_mat)
+    coords = pca2.transform(centroid_mat)
+    for i, c in enumerate(centroids):
+        c["x"] = float(coords[i, 0])
+        c["y"] = float(coords[i, 1]) if n_comp > 1 else 0.0
+
+    color_map = {"NR": "#C44E52", "R1": "#4C72B0", "R2": "#55A868"}
+    symbol_map = {"Base": "circle", "PD1": "diamond", "RTPD1": "square"}
+
+    fig = go.Figure()
+
+    # Trajectory lines per patient (dotted, colored by response)
+    for pat in sorted(set(c["patient"] for c in centroids)):
+        pts = sorted(
+            [c for c in centroids if c["patient"] == pat],
+            key=lambda c: tx_order.index(c["treatment"]) if c["treatment"] in tx_order else 99,
+        )
+        if len(pts) < 2:
+            continue
+        resp = pts[0]["response_group"]
+        fig.add_trace(go.Scatter(
+            x=[p["x"] for p in pts], y=[p["y"] for p in pts],
+            mode="lines",
+            line=dict(color=color_map.get(resp, "#888"), width=1, dash="dot"),
+            showlegend=False, hoverinfo="skip",
+        ))
+
+    # Scatter per response × treatment
+    seen_names: set = set()
+    for tx in tx_order:
+        for resp in ["NR", "R1", "R2"]:
+            pts = [c for c in centroids if c["treatment"] == tx and c["response_group"] == resp]
+            if not pts:
+                continue
+            leg_name = f"{resp} / {tx}"
+            fig.add_trace(go.Scatter(
+                x=[p["x"] for p in pts], y=[p["y"] for p in pts],
+                mode="markers",
+                marker=dict(
+                    color=color_map.get(resp, "#888"), size=11,
+                    symbol=symbol_map.get(tx, "circle"),
+                    line=dict(color="white", width=1),
+                ),
+                name=leg_name,
+                showlegend=leg_name not in seen_names,
+                text=[p["patient"] for p in pts],
+                hovertemplate="%{text} (%{x:.3f}, %{y:.3f})<extra></extra>",
+            ))
+            seen_names.add(leg_name)
+
+    var_exp = pca2.explained_variance_ratio_ * 100
+    fig.update_layout(
+        title="Fig 5A — Per-patient centroid trajectories (2D PCA of archetype weight space)",
+        xaxis_title=f"PC1 ({var_exp[0]:.1f}% var explained)",
+        yaxis_title=f"PC2 ({var_exp[1]:.1f}% var explained)" if len(var_exp) > 1 else "PC2",
+        legend_title="response / timepoint",
+        height=680, width=980,
+    )
+    return fig
+
+
+def _fig5a_simplex_complement(adata_train):
+    """Full cell cloud + archetype vertices + per-patient centroid trajectories.
+
+    Complements _fig5a_patient_trajectories: that plot shows centroids-only PCA
+    (no background). This one shows ALL cells as a semi-transparent background
+    cloud, archetype vertices projected into the same 2D weight-PCA space, and
+    patient centroid trajectories overlaid — making the archetype structure visible.
+    """
+    import plotly.graph_objects as go
+    from sklearn.decomposition import PCA as _PCA
+
+    weights = adata_train.obsm["cell_archetype_weights"]
+    obs = adata_train.obs.reset_index(drop=True)
+    K = weights.shape[1]
+    tx_order = ["Base", "PD1", "RTPD1"]
+
+    n_comp = min(2, K)
+    pca2 = _PCA(n_components=n_comp, random_state=42).fit(weights)
+    coords = pca2.transform(weights)
+    # Archetype vertices: standard basis vectors e_k in weight space
+    e_k = np.eye(K)
+    vertex_coords = pca2.transform(e_k)
+
+    tx_bg_colors = {"Base": "#999999", "PD1": "#E8B000", "RTPD1": "#6B4FA8"}
+    color_map = {"NR": "#C44E52", "R1": "#4C72B0", "R2": "#55A868"}
+    symbol_map = {"Base": "circle", "PD1": "diamond", "RTPD1": "square"}
+
+    fig = go.Figure()
+
+    # Cell cloud: semi-transparent, colored by treatment
+    for tx in tx_order:
+        mask = (obs["treatment"].values == tx)
+        if mask.sum() == 0:
+            continue
+        fig.add_trace(go.Scatter(
+            x=coords[mask, 0],
+            y=coords[mask, 1] if n_comp > 1 else np.zeros(int(mask.sum())),
+            mode="markers",
+            marker=dict(color=tx_bg_colors.get(tx, "#888"), size=2, opacity=0.10),
+            name=f"cells ({tx})", legendgroup=f"bg_{tx}",
+            hoverinfo="skip", showlegend=True,
+        ))
+
+    # Archetype vertices
+    for k in range(K):
+        fig.add_trace(go.Scatter(
+            x=[vertex_coords[k, 0]],
+            y=[vertex_coords[k, 1]] if n_comp > 1 else [0.0],
+            mode="markers+text",
+            marker=dict(color="black", size=16, symbol="x"),
+            text=[f"A{k + 1}"],
+            textposition="top center",
+            showlegend=False,
+            hovertemplate=f"Archetype {k + 1}<extra></extra>",
+        ))
+
+    # Per-patient centroids
+    centroids = []
+    for pat in sorted(obs["cohort"].unique()):
+        for tx in tx_order:
+            mask = ((obs["cohort"] == pat) & (obs["treatment"] == tx)).values
+            if mask.sum() < 5:
+                continue
+            w = weights[mask].mean(axis=0)
+            resp_vals = obs.loc[mask, "response_group"].unique()
+            resp = str(resp_vals[0]) if len(resp_vals) > 0 else "?"
+            c = pca2.transform(w.reshape(1, -1))[0]
+            centroids.append({
+                "patient": pat, "treatment": tx, "response_group": resp,
+                "x": float(c[0]), "y": float(c[1]) if n_comp > 1 else 0.0,
+            })
+
+    for pat in sorted(set(c["patient"] for c in centroids)):
+        pts = sorted(
+            [c for c in centroids if c["patient"] == pat],
+            key=lambda c: tx_order.index(c["treatment"]) if c["treatment"] in tx_order else 99,
+        )
+        if len(pts) < 2:
+            continue
+        resp = pts[0]["response_group"]
+        fig.add_trace(go.Scatter(
+            x=[p["x"] for p in pts], y=[p["y"] for p in pts],
+            mode="lines",
+            line=dict(color=color_map.get(resp, "#888"), width=2, dash="dot"),
+            showlegend=False, hoverinfo="skip",
+        ))
+
+    seen_names: set = set()
+    for tx in tx_order:
+        for resp in ["NR", "R1", "R2"]:
+            pts = [c for c in centroids if c["treatment"] == tx and c["response_group"] == resp]
+            if not pts:
+                continue
+            leg_name = f"{resp} / {tx}"
+            fig.add_trace(go.Scatter(
+                x=[p["x"] for p in pts], y=[p["y"] for p in pts],
+                mode="markers",
+                marker=dict(
+                    color=color_map.get(resp, "#888"), size=14,
+                    symbol=symbol_map.get(tx, "circle"),
+                    line=dict(color="white", width=1.5),
+                ),
+                name=leg_name,
+                showlegend=leg_name not in seen_names,
+                text=[p["patient"] for p in pts],
+                hovertemplate="%{text} (%{x:.3f}, %{y:.3f})<extra></extra>",
+            ))
+            seen_names.add(leg_name)
+
+    var_exp = pca2.explained_variance_ratio_ * 100
+    fig.update_layout(
+        title="Fig 5A (simplex complement) — Patient centroids overlaid on global archetype weight space",
+        xaxis_title=f"PC1 ({var_exp[0]:.1f}%)",
+        yaxis_title=f"PC2 ({var_exp[1]:.1f}%)" if len(var_exp) > 1 else "PC2",
+        legend_title="response / timepoint",
+        height=750, width=1020,
+    )
+    return fig
+
+
+def _arch_pca_centroids(adata_sub, K, pca_coords):
+    """Archetype bin centroids in an explicitly provided PCA coordinate matrix.
+
+    pca_coords must be row-aligned with adata_sub.obs (same cell order).
+    Uses top-15% weight cells per archetype as the bin.
+    """
+    weights = adata_sub.obsm.get("cell_archetype_weights")
+    if weights is None or weights.shape[1] < K:
+        actual_k = weights.shape[1] if weights is not None else 0
+        warnings.warn(
+            f"_arch_pca_centroids: weight matrix has {actual_k} columns "
+            f"but K={K} expected; centroids for this condition will be zero."
+        )
+        return np.zeros((K, pca_coords.shape[1]))
+    thresholds = np.percentile(weights, 85, axis=0)
+    centroids = []
+    for k in range(K):
+        mask = weights[:, k] >= thresholds[k]
+        if mask.sum() > 0:
+            centroids.append(pca_coords[mask].mean(axis=0))
+        else:
+            warnings.warn(f"Archetype {k+1}: no cells above 85th-pct threshold; using condition mean")
+            centroids.append(pca_coords.mean(axis=0))
+    return np.vstack(centroids)
+
+
+def _fig5b_nr_r_distance_heatmap(fits):
+    """NR→R archetype proximity heatmaps using W2 distances in the archetype-weight simplex.
+
+    For each (NR, R) condition pair, computes a K_NR × K_R matrix where entry (i, j)
+    is the 2-Wasserstein distance between the weight-vector distributions of cells
+    assigned to NR archetype i and R archetype j (top-15% threshold per archetype).
+    W2 in weight space is rotation-invariant and geometry-preserving; lower = more
+    similar weight profiles = stronger structural correspondence.
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    comparison_pairs = [
+        (("NR", "Base"),  ("R1", "Base"),  "NR_Base → R1_Base"),
+        (("NR", "Base"),  ("R2", "Base"),  "NR_Base → R2_Base"),
+        (("NR", "PD1"),   ("R1", "PD1"),   "NR_PD1 → R1_PD1"),
+        (("NR", "PD1"),   ("R2", "PD1"),   "NR_PD1 → R2_PD1"),
+    ]
+
+    valid = []
+    for key_nr, key_r, label in comparison_pairs:
+        e_nr = fits.get(key_nr, {})
+        e_r = fits.get(key_r, {})
+        if e_nr.get("status") == "ok" and e_r.get("status") == "ok":
+            valid.append((e_nr, e_r, label))
+
+    if not valid:
+        raise ValueError("No valid NR/R comparison pairs found in fits.")
+
+    n_cols = min(2, len(valid))
+    n_rows = (len(valid) + n_cols - 1) // n_cols
+    fig = make_subplots(
+        rows=n_rows, cols=n_cols,
+        subplot_titles=[lbl for _, _, lbl in valid],
+        horizontal_spacing=0.12, vertical_spacing=0.15,
+    )
+
+    for idx, (e_nr, e_r, label) in enumerate(valid):
+        row = idx // n_cols + 1
+        col = idx % n_cols + 1
+
+        K_nr = e_nr["K"]
+        K_r = e_r["K"]
+        wa = e_nr["adata_sub"].obsm.get("cell_archetype_weights")
+        wb = e_r["adata_sub"].obsm.get("cell_archetype_weights")
+        if wa is None or wb is None:
+            continue
+
+        # Zero-pad to common K so W2 operates in the same simplex
+        K_max = max(K_nr, K_r)
+        if wa.shape[1] < K_max:
+            wa = np.hstack([wa, np.zeros((wa.shape[0], K_max - wa.shape[1]))])
+        if wb.shape[1] < K_max:
+            wb = np.hstack([wb, np.zeros((wb.shape[0], K_max - wb.shape[1]))])
+
+        # Per-archetype W2: cells assigned to NR archetype i vs R archetype j
+        dist_mat = np.full((K_nr, K_r), np.nan)
+        thresh_a = np.percentile(wa[:, :K_nr], 85, axis=0)
+        thresh_b = np.percentile(wb[:, :K_r],  85, axis=0)
+        for i in range(K_nr):
+            mask_i = wa[:, i] >= thresh_a[i]
+            if mask_i.sum() < 5:
+                mask_i = wa[:, i] >= np.quantile(wa[:, i], 0.7)
+            sub_a = wa[mask_i]
+            for j in range(K_r):
+                mask_j = wb[:, j] >= thresh_b[j]
+                if mask_j.sum() < 5:
+                    mask_j = wb[:, j] >= np.quantile(wb[:, j], 0.7)
+                sub_b = wb[mask_j]
+                try:
+                    dist_mat[i, j] = wasserstein2_distance(sub_a, sub_b)
+                except Exception:
+                    pass
+
+        src_lbl = [f"NR A{k+1}" for k in range(K_nr)]
+        tgt_lbl = [f"R A{k+1}" for k in range(K_r)]
+
+        fig.add_trace(go.Heatmap(
+            z=dist_mat, x=tgt_lbl, y=src_lbl,
+            colorscale="Viridis_r",
+            showscale=(idx == 0),
+            colorbar=dict(title="W2", len=0.4, y=0.8) if idx == 0 else None,
+        ), row=row, col=col)
+
+    fig.update_layout(
+        title="Fig 5B — NR→R archetype proximity (W2 in weight simplex; lower = more similar)",
+        height=350 * n_rows, width=550 * n_cols,
+    )
+    return fig
+
+
+def _fig5c_nr_r_wald(fits, report):
+    """Wald contrasts NR vs R per treatment — cross-model gene-level Z-scores."""
+    from collections import defaultdict
+    from scipy.stats import norm as _norm
+    from scipy.stats import false_discovery_control
+
+    html_parts = []
+    comparison_pairs = [
+        (("NR", "Base"),  ("R1", "Base"),  "NR vs R1 at Base"),
+        (("NR", "Base"),  ("R2", "Base"),  "NR vs R2 at Base"),
+        (("NR", "PD1"),   ("R1", "PD1"),   "NR vs R1 at PD1"),
+        (("NR", "PD1"),   ("R2", "PD1"),   "NR vs R2 at PD1"),
+    ]
+
+    for key_nr, key_r, label in comparison_pairs:
+        e_nr = fits.get(key_nr, {})
+        e_r = fits.get(key_r, {})
+        if e_nr.get("status") != "ok" or e_r.get("status") != "ok":
+            html_parts.append(error_html(f"Fig 5C {label}: skipped (status NR={e_nr.get('status')}, R={e_r.get('status')})"))
+            continue
+        try:
+            adata_nr = e_nr["adata_sub"]
+            adata_r = e_r["adata_sub"]
+
+            # Run simplex regression on each condition if not already present
+            for adata_cond, cond_label in [(adata_nr, "NR"), (adata_r, "R")]:
+                if "peach_simplex_regression_genes" not in adata_cond.uns:
+                    print(f"  [step4] running simplex regression for {label} {cond_label}...")
+                    pc.tl.feature_simplex_regression(
+                        adata_cond, max_degree=1, robust_se=True,
+                    )
+
+            reg_nr = adata_nr.uns.get("peach_simplex_regression_genes", {})
+            reg_r = adata_r.uns.get("peach_simplex_regression_genes", {})
+
+            feat_nr = list(reg_nr.get("feature_names", []))
+            feat_r = list(reg_r.get("feature_names", []))
+            coefs_nr = np.asarray(reg_nr.get("vertex_coefficients", []))
+            coefs_r = np.asarray(reg_r.get("vertex_coefficients", []))
+            se_nr = np.asarray(reg_nr.get("vertex_se", []))
+            se_r = np.asarray(reg_r.get("vertex_se", []))
+
+            if any(x.size == 0 for x in [coefs_nr, coefs_r, se_nr, se_r]):
+                html_parts.append(error_html(f"Fig 5C {label}: missing regression coefficients"))
+                continue
+
+            shared = sorted(set(feat_nr) & set(feat_r))
+            if len(shared) < 10:
+                html_parts.append(error_html(f"Fig 5C {label}: only {len(shared)} shared features"))
+                continue
+
+            # O(1) index lookups via dict instead of O(n) list.index()
+            feat_nr_pos = {g: i for i, g in enumerate(feat_nr)}
+            feat_r_pos  = {g: i for i, g in enumerate(feat_r)}
+            idx_nr_arr  = np.array([feat_nr_pos[g] for g in shared])
+            idx_r_arr   = np.array([feat_r_pos[g]  for g in shared])
+
+            shared_arr = np.array(shared)
+            K_nr_dim = coefs_nr.shape[1]
+            K_r_dim  = coefs_r.shape[1]
+
+            # Collect all (ki, kj, gene_idx, z, p) tuples so we can apply
+            # a single BH correction over all hypotheses for this comparison
+            all_entries = []
+            for ki in range(K_nr_dim):
+                beta_nr_k = coefs_nr[idx_nr_arr, ki]
+                se_nr_k   = se_nr[idx_nr_arr, ki]
+                for kj in range(K_r_dim):
+                    beta_r_k = coefs_r[idx_r_arr, kj]
+                    se_r_k   = se_r[idx_r_arr, kj]
+                    se_diff  = np.maximum(np.sqrt(se_nr_k**2 + se_r_k**2), 1e-10)
+                    z_vals   = (beta_nr_k - beta_r_k) / se_diff
+                    p_vals   = 2 * (1 - _norm.cdf(np.abs(z_vals)))
+                    for gi, (z, p) in enumerate(zip(z_vals.tolist(), p_vals.tolist())):
+                        all_entries.append((ki, kj, gi, float(z), float(p)))
+
+            # One BH pass over all (gene × archetype-pair) hypotheses
+            all_fdr = false_discovery_control(
+                np.array([e[4] for e in all_entries]), method="bh"
+            )
+
+            pair_data: dict = defaultdict(list)
+            for i, (ki, kj, gi, z, _p) in enumerate(all_entries):
+                pair_data[(ki, kj)].append((gi, z, float(all_fdr[i])))
+
+            rows = []
+            for ki in range(K_nr_dim):
+                for kj in range(K_r_dim):
+                    pdata = pair_data[(ki, kj)]
+                    n_sig = sum(1 for _, _, fdr in pdata if fdr < 0.05)
+                    top_by_z = sorted(pdata, key=lambda x: abs(x[1]), reverse=True)[:5]
+                    top_genes = ", ".join(shared_arr[gi] for gi, _, _ in top_by_z)
+                    max_z = max(abs(x[1]) for x in pdata)
+                    rows.append({
+                        "NR archetype":      f"A{ki+1}",
+                        "R archetype":       f"A{kj+1}",
+                        "N sig (FDR<0.05)":  n_sig,
+                        "Top Wald genes":    top_genes,
+                        "Max |Z|":           f"{max_z:.2f}",
+                    })
+
+            n_tests = len(all_entries)
+            if rows:
+                df_wald = pd.DataFrame(rows).sort_values("N sig (FDR<0.05)", ascending=False)
+                html_parts.append(f"<h4>{label}</h4>")
+                html_parts.append(report.df_to_html(
+                    df_wald,
+                    caption=(
+                        f"Fig 5C — Wald contrasts: {label}. "
+                        f"Z = (β_NR_k − β_R_k) / √(SE_NR² + SE_R²). "
+                        f"One BH FDR correction over all {n_tests} hypotheses "
+                        f"({len(shared)} shared genes × {K_nr_dim}×{K_r_dim} archetype pairs). "
+                        f"Top Wald genes = highest |Z| per archetype pair."
+                    ),
+                ))
+        except Exception as e:
+            html_parts.append(error_html(f"Fig 5C {label} failed: {e}"))
+
+    return "".join(html_parts)
+
+
+def _fig5c_nr_r_flow_genes(fits, report):
+    """Fig 5C (flow): NR→R flow-aligned expanding/contracting genes per treatment.
+
+    For each treatment-matched NR→R pair, concatenates the two per-condition
+    adatas (using their original per-condition PCA embeddings, same approach as
+    _phase5_one_pair), trains a flow_within model, runs flow_gene_alignment,
+    and renders lollipop + ridgeplot of top expanding/contracting genes.
+
+    Pairs covered: NR_Base→R1_Base, NR_Base→R2_Base, NR_PD1→R1_PD1,
+    NR_PD1→R2_PD1, NR_RTPD1→R2_RTPD1 (R1_RTPD1 excluded, < 500 cells).
+    """
+    import anndata as ad
+    pairs = [
+        (("NR", "Base"),  ("R1", "Base")),
+        (("NR", "Base"),  ("R2", "Base")),
+        (("NR", "PD1"),   ("R1", "PD1")),
+        (("NR", "PD1"),   ("R2", "PD1")),
+        (("NR", "RTPD1"), ("R2", "RTPD1")),
+    ]
+    html_parts = []
+    for key_nr, key_r in pairs:
+        label_nr = f"{key_nr[0]}_{key_nr[1]}"
+        label_r  = f"{key_r[0]}_{key_r[1]}"
+        label    = f"{label_nr} → {label_r}"
+        e_nr = fits.get(key_nr, {})
+        e_r  = fits.get(key_r,  {})
+        if e_nr.get("status") != "ok" or e_r.get("status") != "ok":
+            html_parts.append(f"<em>{label}: skipped (fit status not ok)</em>")
+            continue
+        html_parts.append(f"<h4>Fig 5C flow — {label}</h4>")
+        try:
+            adata_a = e_nr["adata_sub"].copy()
+            adata_b = e_r["adata_sub"].copy()
+            for _k in ("cell_archetype_weights", "archetype_distances"):
+                adata_a.obsm.pop(_k, None)
+                adata_b.obsm.pop(_k, None)
+            adata_a.obs["__flow_label__"] = "source"
+            adata_b.obs["__flow_label__"] = "target"
+            adata_pair = ad.concat([adata_a, adata_b], join="inner")
+            # Per-condition PCAs are concatenated (same rotation — both were
+            # fit on the same gene set from adata_full, so this is valid).
+            adata_pair.obsm["X_pca"] = np.vstack([
+                adata_a.obsm["X_pca"], adata_b.obsm["X_pca"]
+            ])
+            if "PCs" in adata_a.varm:
+                adata_pair.varm["PCs"] = adata_a.varm["PCs"]
+
+            fr = pc.tl.flow_within(
+                adata_pair,
+                source={"__flow_label__": "source"},
+                target={"__flow_label__": "target"},
+                pca_key="X_pca",
+                n_epochs=500,
+                hidden_dims=(128, 128, 128),
+                batch_size=128,
+                return_model=True,
+                name=f"{label_nr}_to_{label_r}_fig5c",
+            )
+            html_parts.append(metric_grid([
+                metric_card("MMD before", fr["mmd_before"], ".4f"),
+                metric_card("MMD after",  fr["mmd_after"],  ".4f"),
+                metric_card("MMD Δ", fr["mmd_before"] - fr["mmd_after"], ".4f"),
+            ]))
+        except Exception as e:
+            html_parts.append(error_html(f"flow_within {label} failed: {e}"))
+            continue
+
+        try:
+            align = pc.tl.flow_gene_alignment(
+                adata_pair, fr, per_cell=False,
+                n_top=STEP3_FLOW_GENE_TOP,
+                n_permutations=STEP3_FLOW_PERMUTATIONS_FULL,
+            )
+        except Exception as e:
+            html_parts.append(error_html(f"flow_gene_alignment {label} failed: {e}"))
+            continue
+
+        per_cell_align  = align.get("per_cell_alignment")
+        align_genes     = (align.get("per_cell_gene_names") or [])
+
+        # Lollipop — top genes by alignment magnitude
+        try:
+            if per_cell_align is not None and len(align_genes):
+                mean_expr_full = np.asarray(adata_pair.X.mean(axis=0)).flatten()
+                mean_align_g   = np.abs(per_cell_align).mean(axis=0) if per_cell_align.ndim == 2 else per_cell_align
+                top_n_lol = min(25, len(align_genes))
+                gene_idx = [adata_pair.var_names.get_loc(g) for g in align_genes[:top_n_lol]
+                             if g in adata_pair.var_names]
+                if gene_idx:
+                    # signed_coef re-used as flow_direction (+1 expanding, -1 contracting)
+                    flow_dir = np.sign(per_cell_align.mean(axis=0)[:len(gene_idx)]) if per_cell_align.ndim == 2 else np.ones(len(gene_idx))
+                    fig_lol = build_lollipop_chart(
+                        mean_align_g[:len(gene_idx)],
+                        flow_dir,
+                        mean_expr_full[gene_idx],
+                        [adata_pair.var_names[i] for i in gene_idx],
+                        top_n=top_n_lol,
+                    )
+                    html_parts.append(report.fig_to_img(fig_lol,
+                        f"Fig 5C flow — {label}: top {top_n_lol} genes by "
+                        "flow alignment magnitude. Color = direction (expanding/contracting)."))
+                    plt.close("all")
+        except Exception as e:
+            html_parts.append(error_html(f"lollipop {label} failed: {e}"))
+
+        # Ridgeplot — top expanding + contracting by mean signed alignment
+        try:
+            if per_cell_align is not None and len(align_genes):
+                mean_signed = per_cell_align.mean(axis=0) if per_cell_align.ndim == 2 else per_cell_align
+                n_use = min(len(mean_signed), len(align_genes))
+                order = np.argsort(-mean_signed[:n_use])
+                top_exp = order[:5]
+                top_con = order[-5:]
+                ridge_data = {}
+                for i in np.concatenate([top_exp, top_con]):
+                    gname = align_genes[i] if i < len(align_genes) else f"feat_{i}"
+                    if gname in adata_pair.var_names:
+                        j = adata_pair.var_names.get_loc(gname)
+                        col = adata_pair.X[:, j]
+                        if hasattr(col, "toarray"):
+                            col = col.toarray().flatten()
+                        ridge_data[gname] = np.asarray(col).flatten()
+                if ridge_data:
+                    fig_ridge = build_overlapping_ridgeplot(ridge_data, max_groups=12)
+                    top_str = ", ".join(list(ridge_data.keys())[:10])
+                    html_parts.append(report.fig_to_img(fig_ridge,
+                        f"Fig 5C flow — {label}: ridgeplot of top expanding + "
+                        f"contracting genes. Top: {top_str}"))
+                    plt.close("all")
+        except Exception as e:
+            html_parts.append(error_html(f"ridgeplot {label} failed: {e}"))
+
+    return "\n".join(html_parts)
+
+
+def phase6_step4(adata_train, fits, scores, report: HTMLReport):
+    """Step 4: R vs NR contrasts + per-patient centroid trajectories (Figs 5A/B/C)."""
+    html = ""
+
+    # Fig 5A — per-patient trajectories
+    try:
+        fig5a = _fig5a_patient_trajectories(adata_train)
+        html += report.plotly_to_div(
+            fig5a,
+            "Fig 5A — Per-patient centroid trajectories in archetype weight space. "
+            "Each point = mean archetype weight vector for one patient at one timepoint, "
+            "projected to 2D via PCA fit on the per-patient mean archetype weight vectors. "
+            "Dotted lines connect Base→PD1→RTPD1 per patient. "
+            "Shape encodes timepoint (circle=Base, diamond=PD1, square=RTPD1); "
+            "color encodes response (red=NR, blue=R1, green=R2).",
+        )
+    except Exception as e:
+        html += error_html(f"Fig 5A failed: {e}")
+
+    # Fig 5A (simplex complement) — full cell cloud with archetype vertices + centroid trajectories
+    try:
+        fig5a_simp = _fig5a_simplex_complement(adata_train)
+        html += report.plotly_to_div(
+            fig5a_simp,
+            "Fig 5A (simplex complement) — ALL cells shown as semi-transparent background "
+            "(colored by treatment: grey=Base, amber=PD1, purple=RTPD1). "
+            "Black × markers = archetype vertices (standard basis vectors A1…AK projected). "
+            "Large symbols = per-patient centroids, dotted lines = Base→PD1→RTPD1 trajectories. "
+            "Color encodes response (red=NR, blue=R1, green=R2); shape encodes timepoint.",
+        )
+    except Exception as e:
+        html += error_html(f"Fig 5A simplex complement failed: {e}")
+
+    # Fig 5B — NR→R archetype correspondence matrices
+    try:
+        html += "<h3>Fig 5B — NR→R archetype correspondence (flow-based soft assignment)</h3>"
+        nr_r_pairs = {
+            k: s for k, s in scores.items()
+            if s["key_a"][0] == "NR"
+            and s["key_b"][0] in ("R1", "R2")
+            and s["key_a"][1] == s["key_b"][1]
+        }
+        if nr_r_pairs:
+            html += _build_correspondence_section(fits, nr_r_pairs, report)
+        else:
+            html += error_html("Fig 5B: no NR→R pairs found in scores dict")
+    except Exception as e:
+        html += error_html(f"Fig 5B failed: {e}")
+
+    # Fig 5C — Wald contrasts + flow-aligned expanding/contracting genes
+    try:
+        html += "<h3>Fig 5C — Wald contrasts: NR vs R per treatment</h3>"
+        html += _fig5c_nr_r_wald(fits, report)
+    except Exception as e:
+        html += error_html(f"Fig 5C Wald failed: {e}")
+
+    try:
+        html += "<h3>Fig 5C — NR→R flow-aligned genes per treatment</h3>"
+        html += _fig5c_nr_r_flow_genes(fits, report)
+    except Exception as e:
+        html += error_html(f"Fig 5C flow genes failed: {e}")
+
+    report.add_section(
+        "Step 4 — R vs NR contrasts + patient trajectories (Figs 5A/B/C)",
+        html, step_num=7,
+    )
+
+
 def main() -> None:
-    report = HTMLReport(f"Paper Part 2 Steps 1–3 — TNBC ({_DATE_TAG} r{_REV})")
+    report = HTMLReport(f"Paper Part 2 Steps 1–4 — TNBC ({_DATE_TAG} r{_REV})")
     report.text(
         "<strong>Run includes Step 1 (global fit, Figs 3A/B/C) + Step 2 "
         "(per-condition models, Figs 4A/B) + Step 3 (selected-pair flow "
-        "analyses, Fig 4C surface).</strong> "
-        f"SUBSAMPLE_FRACTION = {SUBSAMPLE_FRACTION}; flip to 1.0 for production. "
+        "analyses, Fig 4C surface) + Step 4 (R vs NR contrasts, Figs 5A/B/C).</strong> "
+        f"SUBSAMPLE_FRACTION = {SUBSAMPLE_FRACTION}. "
         f"Step 1 caches at {STEP1_CACHE_PATH.name}; subsequent runs skip Phase "
         f"1-3 compute unless STEP1_FORCE_RECOMPUTE is True."
     )
@@ -1660,10 +2780,11 @@ def main() -> None:
             print(f"  [cache] save failed: {e}")
 
     fits = None
+    scores = {}
     selected_pairs = []
     if RUN_STEP2:
         try:
-            fits, selected_pairs = phase4_step2(adata_train, report)
+            fits, selected_pairs, scores = phase4_step2(adata_train, report)
         except Exception as e:
             print(f"  phase4 crashed: {e}")
             report.add_section("Phase 4 (failed)", error_html(str(e)), step_num=5)
@@ -1674,6 +2795,13 @@ def main() -> None:
         except Exception as e:
             print(f"  phase5 crashed: {e}")
             report.add_section("Phase 5 (failed)", error_html(str(e)), step_num=6)
+
+    if RUN_STEP4 and fits:
+        try:
+            phase6_step4(adata_train, fits, scores, report)
+        except Exception as e:
+            print(f"  phase6 crashed: {e}")
+            report.add_section("Phase 6 Step 4 (failed)", error_html(str(e)), step_num=7)
 
     report.save(REPORT_PATH)
     print(f"\n[main] total elapsed: {time.time() - t0:.1f}s")

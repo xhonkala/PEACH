@@ -320,6 +320,12 @@ def build_drift_qc_panel(
         final_dmean = _final_value(dmean_hist)
         final_dmax = _final_value(dmax_hist)
         final_smean = _final_value(smean_hist)
+        # Fallback: archetype_stability_mean is in the training metrics whitelist
+        # but never computed in the training loop (only drift_mean is tracked).
+        # Derive stability as the inverse-drift approximation so the summary
+        # table always shows a meaningful value instead of "N/A".
+        if math.isnan(final_smean) and not math.isnan(final_dmean):
+            final_smean = 1.0 / (1.0 + final_dmean)
 
         # Expose the actual median value so we can see what the badge is
         # comparing against (r14 bug: CMP final_drift_mean=0.00001 but flag
@@ -1955,9 +1961,26 @@ def build_distance_heatmaps(
     # Build group index: (response, archetype)
     resp_vals = obs[response_col].values
     arch_vals = obs[archetypes_col].values
+
+    def _arch_to_int(v):
+        """Convert archetype label to sortable int. Handles 'archetype_1' or plain int."""
+        if isinstance(v, (int, np.integer)):
+            return int(v)
+        s = str(v)
+        # assign_archetypes stores "archetype_1", "archetype_2", ... (1-indexed)
+        return int(s.split("_")[-1]) if "_" in s else int(s)
+
+    # Filter out "no_archetype" cells (assign_archetypes with percentage_per_archetype
+    # leaves cells that don't rank in the top P% of any archetype unassigned).
+    _assigned_mask = np.array([str(v) != "no_archetype" for v in arch_vals])
+    if not _assigned_mask.all():
+        obs = obs[_assigned_mask].reset_index(drop=True)
+        resp_vals = resp_vals[_assigned_mask]
+        arch_vals = arch_vals[_assigned_mask]
+
     groups_raw = sorted(
         set(zip(resp_vals, arch_vals)),
-        key=lambda t: (str(t[0]), int(t[1])),
+        key=lambda t: (str(t[0]), _arch_to_int(t[1])),
     )
     # Build index arrays per group using column equality (avoids tuple broadcasting)
     idx_of = {
@@ -1990,7 +2013,7 @@ def build_distance_heatmaps(
     else:
         rho = float("nan")
 
-    labels = [f"{r}/A{int(a)}" for r, a in groups]
+    labels = [f"{r}/A{_arch_to_int(a)}" for r, a in groups]
     fig = make_subplots(rows=1, cols=2,
                         subplot_titles=("W2 (archetype weights)",
                                         "Euclidean centroid (PCA space)"))
@@ -2162,3 +2185,430 @@ def build_diversity_block(
         "dunn_posthoc": dunn_df.to_dict() if dunn_df is not None else None,
     }
     return fig, summary
+
+
+def build_chord_diagram(
+    entries: list,
+    K: int,
+    *,
+    title: str = "",
+    node_labels=None,
+    color_pos: str = "#d62728",
+    color_neg: str = "#1f77b4",
+    alpha_min: float = 0.15,
+    width_min: float = 1.0,
+    width_max: float = 4.0,
+):
+    """Build a plotly chord-style diagram connecting archetype pairs.
+
+    Parameters
+    ----------
+    entries : list of dict, each with keys:
+        j         int   0-indexed source archetype
+        k         int   0-indexed target archetype
+        weight    float chord thickness scaling (e.g., |gamma| or N sig genes)
+        direction float sign: +1 → color_pos (red/rising), -1 → color_neg (blue/falling)
+    K : int
+        Total number of archetypes (nodes on the circle).
+    title : str
+        Figure title.
+    node_labels : list[str] or None
+        Labels for each node.  Defaults to ["A1", …, "AK"].
+    color_pos, color_neg : str
+        Hex colors for positive / negative direction chords.
+    alpha_min : float
+        Minimum chord opacity (prevents near-invisible thin chords).
+    width_min, width_max : float
+        Line-width range mapped to the normalized weight.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    import math as _math
+    import numpy as _np
+    import plotly.graph_objects as go
+
+    if node_labels is None:
+        node_labels = [f"A{i + 1}" for i in range(K)]
+
+    # Node positions on unit circle (top = A1, clockwise)
+    angles = [2 * _math.pi * i / K - _math.pi / 2 for i in range(K)]
+    node_x = [_math.cos(a) for a in angles]
+    node_y = [_math.sin(a) for a in angles]
+
+    # Normalize weights
+    weights = [abs(float(e.get("weight", 1.0))) for e in entries]
+    max_w = max(weights) if weights else 1.0
+
+    def _hex_to_rgb(h):
+        h = h.lstrip("#")
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+    rgb_pos = _hex_to_rgb(color_pos)
+    rgb_neg = _hex_to_rgb(color_neg)
+
+    traces = []
+
+    for e, w in zip(entries, weights):
+        j = int(e["j"])
+        k = int(e["k"])
+        d = float(e.get("direction", 1.0))
+
+        if j == k or j >= K or k >= K:
+            continue
+
+        # Quadratic bezier through origin as control point
+        n_pts = 60
+        t = _np.linspace(0, 1, n_pts)
+        P0x, P0y = node_x[j], node_y[j]
+        P1x, P1y = node_x[k], node_y[k]
+        bx = (1 - t) ** 2 * P0x + t ** 2 * P1x  # Pcx = 0
+        by = (1 - t) ** 2 * P0y + t ** 2 * P1y  # Pcy = 0
+
+        w_norm = w / max_w if max_w > 0 else 0.5
+        alpha = max(alpha_min, 0.85 * w_norm)
+        lw = width_min + (width_max - width_min) * w_norm
+        r, g_c, b_c = rgb_pos if d >= 0 else rgb_neg
+        color_str = f"rgba({r},{g_c},{b_c},{alpha:.2f})"
+
+        lbl = (
+            f"{node_labels[j]}→{node_labels[k]}<br>"
+            f"weight={w:.3f}<br>"
+            f"{'rising' if d >= 0 else 'falling'}"
+        )
+        traces.append(go.Scatter(
+            x=list(bx) + [None],
+            y=list(by) + [None],
+            mode="lines",
+            line=dict(color=color_str, width=lw),
+            hoverinfo="text",
+            text=[lbl] * n_pts + [None],
+            showlegend=False,
+        ))
+
+    # Node markers
+    traces.append(go.Scatter(
+        x=node_x, y=node_y,
+        mode="markers+text",
+        marker=dict(size=16, color="#444444", line=dict(width=1.5, color="white")),
+        text=node_labels,
+        textposition="top center",
+        hovertemplate="%{text}<extra></extra>",
+        showlegend=False,
+    ))
+
+    # Legend proxies
+    traces.append(go.Scatter(
+        x=[None], y=[None], mode="lines",
+        line=dict(color=color_pos, width=2.5),
+        name="rising (γ>0) / δβ>0",
+        showlegend=True,
+    ))
+    traces.append(go.Scatter(
+        x=[None], y=[None], mode="lines",
+        line=dict(color=color_neg, width=2.5),
+        name="falling (γ<0) / δβ<0",
+        showlegend=True,
+    ))
+
+    layout = go.Layout(
+        title=dict(text=title, x=0.5),
+        xaxis=dict(range=[-1.5, 1.5], showgrid=False, zeroline=False,
+                   visible=False, fixedrange=True),
+        yaxis=dict(range=[-1.5, 1.5], showgrid=False, zeroline=False,
+                   visible=False, scaleanchor="x", fixedrange=True),
+        width=520, height=520,
+        margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(x=1.0, y=1.0),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+    )
+    return go.Figure(data=traces, layout=layout)
+
+
+def build_feature_chord_diagram(
+    entries: list,
+    K: int,
+    *,
+    title: str = "",
+    max_nodes: int = 16,
+    width_min: float = 1.0,
+    width_max: float = 5.0,
+):
+    """Feature chord diagram: source genes on the left arc, target on the right arc.
+
+    Position encodes role (source vs target), so each archetype needs only one
+    colour. Chords are coloured by from_arch; nodes are coloured by their
+    archetype (from_arch for left, to_arch for right).
+
+    Parameters
+    ----------
+    entries : list of dict, each with:
+        from_feature  str   gene/pathway on the source (rising) side
+        to_feature    str   gene/pathway on the target (falling) side
+        from_arch     int   0-indexed source archetype
+        to_arch       int   0-indexed target archetype (falls back to from_arch)
+        weight        float chord thickness (e.g., |gamma| or |delta_beta|)
+    K : int
+        Total number of archetypes (for colour palette sizing).
+    max_nodes : int
+        Cap on unique nodes per side.
+    """
+    import math as _math
+    import numpy as _np
+    import plotly.graph_objects as go
+    import plotly.colors as _pc_colors
+
+    palette = _pc_colors.qualitative.Plotly
+    _arch_rgb = {}
+
+    def _rgb(arch_idx):
+        if arch_idx not in _arch_rgb:
+            hex_c = palette[arch_idx % len(palette)].lstrip("#")
+            _arch_rgb[arch_idx] = (int(hex_c[0:2], 16), int(hex_c[2:4], 16), int(hex_c[4:6], 16))
+        return _arch_rgb[arch_idx]
+
+    def _arch_color(arch_idx, alpha=0.65):
+        r, g, b = _rgb(arch_idx)
+        return f"rgba({r},{g},{b},{alpha:.2f})"
+
+    # Collect unique nodes per side, preserving insertion order
+    src_nodes, src_arch = [], {}  # from_feature → from_arch
+    tgt_nodes, tgt_arch = [], {}  # to_feature   → to_arch
+    for e in entries:
+        ff = str(e.get("from_feature", ""))
+        tf = str(e.get("to_feature", ""))
+        fa = int(e.get("from_arch", 0))
+        ta = int(e.get("to_arch", fa))
+        if ff and ff not in src_arch and len(src_nodes) < max_nodes:
+            src_nodes.append(ff)
+            src_arch[ff] = fa
+        if tf and tf not in tgt_arch and len(tgt_nodes) < max_nodes:
+            tgt_nodes.append(tf)
+            tgt_arch[tf] = ta
+
+    if not src_nodes or not tgt_nodes:
+        return go.Figure()
+
+    # Circular arc layout: source nodes on the LEFT arc (108°–252°),
+    # target nodes on the RIGHT arc (72°–(−72°)).
+    # Bezier chords curve inward through the origin.
+    src_angles = [
+        _math.radians(108 + 144 * i / max(len(src_nodes) - 1, 1))
+        for i in range(len(src_nodes))
+    ]
+    tgt_angles = [
+        _math.radians(72 - 144 * j / max(len(tgt_nodes) - 1, 1))
+        for j in range(len(tgt_nodes))
+    ]
+
+    R = 1.0   # node radius
+    src_pos = {n: (R * _math.cos(a), R * _math.sin(a))
+               for n, a in zip(src_nodes, src_angles)}
+    tgt_pos = {n: (R * _math.cos(a), R * _math.sin(a))
+               for n, a in zip(tgt_nodes, tgt_angles)}
+
+    def _text_pos(angle_rad):
+        x, y = _math.cos(angle_rad), _math.sin(angle_rad)
+        if abs(x) >= abs(y):
+            return "middle left" if x < 0 else "middle right"
+        return "top center" if y > 0 else "bottom center"
+
+    weights = [abs(float(e.get("weight", 1.0))) for e in entries]
+    max_w = max(weights) if weights else 1.0
+
+    traces = []
+    legend_archs = set()
+    n_pts = 60
+    t_arr = _np.linspace(0, 1, n_pts)
+
+    for e, w in zip(entries, weights):
+        f1 = str(e.get("from_feature", ""))
+        f2 = str(e.get("to_feature", ""))
+        from_arch = int(e.get("from_arch", 0))
+        to_arch = int(e.get("to_arch", from_arch))
+        if f1 not in src_pos or f2 not in tgt_pos:
+            continue
+        sx, sy = src_pos[f1]
+        tx, ty = tgt_pos[f2]
+        w_norm = w / max_w if max_w > 0 else 0.5
+        lw = width_min + (width_max - width_min) * w_norm
+        alpha = 0.45 + 0.45 * w_norm
+        color_str = _arch_color(from_arch, alpha=alpha)
+        # Quadratic bezier with control point at origin → chord bows inward.
+        bx = (1 - t_arr) ** 2 * sx + t_arr ** 2 * tx
+        by = (1 - t_arr) ** 2 * sy + t_arr ** 2 * ty
+        lbl = f"{f1} (A{from_arch+1}) → {f2} (A{to_arch+1})<br>weight={w:.3f}"
+        traces.append(go.Scatter(
+            x=list(bx) + [None], y=list(by) + [None],
+            mode="lines",
+            line=dict(color=color_str, width=lw),
+            hoverinfo="text",
+            text=[lbl] * n_pts + [None],
+            showlegend=False,
+        ))
+        if from_arch not in legend_archs:
+            legend_archs.add(from_arch)
+            traces.append(go.Scatter(
+                x=[None], y=[None], mode="lines",
+                line=dict(color=_arch_color(from_arch, 0.9), width=2.5),
+                name=f"A{from_arch+1}",
+                showlegend=True,
+            ))
+
+    # Individual node markers — one scatter per node so each gets its own
+    # legend entry and colour (avoids plotly collapsing to single-colour legend).
+    for n, a in zip(src_nodes, src_angles):
+        nx, ny = src_pos[n]
+        traces.append(go.Scatter(
+            x=[nx], y=[ny], mode="markers+text",
+            marker=dict(size=12, color=_arch_color(src_arch[n], 0.9),
+                        symbol="circle", line=dict(width=2, color="white")),
+            text=[n], textposition=_text_pos(a),
+            hovertemplate=f"{n} (source, A{src_arch[n]+1})<extra></extra>",
+            showlegend=False,
+        ))
+    for n, a in zip(tgt_nodes, tgt_angles):
+        nx, ny = tgt_pos[n]
+        traces.append(go.Scatter(
+            x=[nx], y=[ny], mode="markers+text",
+            marker=dict(size=12, color=_arch_color(tgt_arch[n], 0.9),
+                        symbol="diamond", line=dict(width=2, color="white")),
+            text=[n], textposition=_text_pos(a),
+            hovertemplate=f"{n} (target, A{tgt_arch[n]+1})<extra></extra>",
+            showlegend=False,
+        ))
+
+    # Compact legend: shape key for source/target role
+    traces.append(go.Scatter(x=[None], y=[None], mode="markers",
+        marker=dict(size=10, symbol="circle",  color="#444"),
+        name="source (●)", showlegend=True))
+    traces.append(go.Scatter(x=[None], y=[None], mode="markers",
+        marker=dict(size=10, symbol="diamond", color="#444"),
+        name="target (◆)", showlegend=True))
+
+    layout = go.Layout(
+        title=dict(text=title, x=0.5),
+        xaxis=dict(range=[-1.65, 1.65], showgrid=False, zeroline=False,
+                   visible=False, fixedrange=True),
+        yaxis=dict(range=[-1.45, 1.45], showgrid=False, zeroline=False,
+                   visible=False, scaleanchor="x", fixedrange=True),
+        width=620, height=600,
+        margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(x=1.0, y=1.0),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+    )
+    return go.Figure(data=traces, layout=layout)
+
+
+def build_bipartite_chord_diagram(
+    corr_matrix,
+    src_labels: list,
+    tgt_labels: list,
+    *,
+    title: str = "",
+    top_n: int = 15,
+    src_color: str = "#1f77b4",
+    tgt_color: str = "#ff7f0e",
+    width_min: float = 1.0,
+    width_max: float = 6.0,
+):
+    """Bipartite chord diagram for archetype correspondence.
+
+    Source archetypes placed on the left semicircle, target on the right.
+    Chords are drawn for the top_n pairs by transport mass.
+
+    Parameters
+    ----------
+    corr_matrix : array-like, shape (K_src, K_tgt)
+        Raw transport mass matrix.
+    src_labels, tgt_labels : list[str]
+        Archetype labels for source (HSC) and target (CMP).
+    top_n : int
+        Number of highest-mass pairs to draw.
+    src_color, tgt_color : str
+        Hex colours for source and target node markers.
+    """
+    import math as _math
+    import numpy as _np
+    import plotly.graph_objects as go
+
+    corr_matrix = _np.asarray(corr_matrix)
+    K_src, K_tgt = corr_matrix.shape
+
+    def _left_pos(i, n):
+        ang = _math.pi / 2 - _math.pi * i / max(n - 1, 1) if n > 1 else 0.0
+        return -0.85 * _math.cos(ang), 0.85 * _math.sin(ang)
+
+    def _right_pos(j, m):
+        ang = _math.pi / 2 - _math.pi * j / max(m - 1, 1) if m > 1 else 0.0
+        return 0.85 * _math.cos(ang), 0.85 * _math.sin(ang)
+
+    src_pos = [_left_pos(i, K_src) for i in range(K_src)]
+    tgt_pos = [_right_pos(j, K_tgt) for j in range(K_tgt)]
+
+    flat = sorted(
+        [(float(corr_matrix[i, j]), i, j) for i in range(K_src) for j in range(K_tgt)],
+        reverse=True,
+    )
+    top_pairs = flat[:top_n]
+    max_m = top_pairs[0][0] if top_pairs else 1.0
+
+    def _hex_rgba(h, a):
+        h = h.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{b},{a:.2f})"
+
+    traces = []
+    n_pts = 60
+    t_arr = _np.linspace(0, 1, n_pts)
+    for mass, i, j in top_pairs:
+        w_norm = mass / max_m if max_m > 0 else 0.5
+        lw = width_min + (width_max - width_min) * w_norm
+        alpha = 0.25 + 0.65 * w_norm
+        color = _hex_rgba(src_color, alpha)
+        sx, sy = src_pos[i]
+        tx, ty = tgt_pos[j]
+        bx = (1 - t_arr) ** 2 * sx + t_arr ** 2 * tx
+        by = (1 - t_arr) ** 2 * sy + t_arr ** 2 * ty
+        lbl = f"{src_labels[i]}→{tgt_labels[j]}<br>mass={mass:.3f}"
+        traces.append(go.Scatter(
+            x=list(bx) + [None], y=list(by) + [None],
+            mode="lines",
+            line=dict(color=color, width=lw),
+            hoverinfo="text",
+            text=[lbl] * n_pts + [None],
+            showlegend=False,
+        ))
+
+    traces.append(go.Scatter(
+        x=[p[0] for p in src_pos], y=[p[1] for p in src_pos],
+        mode="markers+text",
+        marker=dict(size=14, color=src_color, line=dict(width=1.5, color="white")),
+        text=src_labels, textposition="middle left",
+        hovertemplate="%{text}<extra></extra>",
+        name="HSC archetypes", showlegend=True,
+    ))
+    traces.append(go.Scatter(
+        x=[p[0] for p in tgt_pos], y=[p[1] for p in tgt_pos],
+        mode="markers+text",
+        marker=dict(size=14, color=tgt_color, line=dict(width=1.5, color="white")),
+        text=tgt_labels, textposition="middle right",
+        hovertemplate="%{text}<extra></extra>",
+        name="CMP archetypes", showlegend=True,
+    ))
+
+    layout = go.Layout(
+        title=dict(text=title, x=0.5),
+        xaxis=dict(range=[-1.5, 1.5], showgrid=False, zeroline=False, visible=False, fixedrange=True),
+        yaxis=dict(range=[-1.2, 1.2], showgrid=False, zeroline=False, visible=False,
+                   scaleanchor="x", fixedrange=True),
+        width=640, height=520,
+        margin=dict(l=90, r=90, t=50, b=40),
+        legend=dict(x=0.35, y=-0.05, orientation="h"),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+    )
+    return go.Figure(data=traces, layout=layout)

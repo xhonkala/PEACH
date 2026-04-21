@@ -165,18 +165,24 @@ class TestFTest:
         assert result["f_pvalues"][0] < 1e-10
 
     def test_null_model(self):
-        """Noise independent of weights -> large p-value, low R^2."""
+        """Under the null (Y independent of W) F-test p-values are approximately uniform.
+
+        Tests the distribution over many features rather than a single stochastic
+        assertion (which would fail ~5% of runs by construction).
+        """
         from peach._core.utils.simplex_regression import ols_fit
 
         rng = np.random.default_rng(42)
         K = 3
-        W = rng.dirichlet([1] * K, size=500)
-        # True null: Y is random noise unrelated to W (not just constant)
-        Y = rng.standard_normal((500, 1))
+        n_features = 500
+        W = rng.dirichlet([1] * K, size=200)
+        Y = rng.standard_normal((200, n_features))
 
         result = ols_fit(W, Y)
-        assert result["f_pvalues"][0] > 0.05
-        assert result["r_squared"][0] < 0.05
+        # Fraction significant at alpha=0.05 should be near 5%; allow generous tolerance.
+        frac_sig = np.mean(result["f_pvalues"] < 0.05)
+        assert frac_sig < 0.15, f"Too many significant null features: {frac_sig:.2f}"
+        assert np.mean(result["r_squared"]) < 0.05
 
     def test_underdetermined_raises(self):
         """n < p should raise ValueError."""

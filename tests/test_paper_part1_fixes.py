@@ -498,10 +498,12 @@ def test_paper_part1_grids():
     total_n_arch_sites = 0
     total_inflation_sites = 0
 
-    # Regex captures the list literal (including brackets) after the kwarg.
-    # Non-greedy match to the closing bracket, dot-all so lists can span lines
-    # (though in practice they are on a single line here).
+    # r15: the range is now built dynamically from n_pcs (see
+    # r15.1 stress variant's K-cap safeguard). Instead of looking for
+    # a literal list, check that the script has a variable-based
+    # n_archetypes_range assignment AND sets a reasonable ceiling (12).
     n_arch_re = re.compile(r"n_archetypes_range\s*=\s*(\[[^\]]*\])")
+    dynamic_cap_re = re.compile(r"_k_max_\w+\s*=\s*max\s*\(\s*2\s*,\s*min\s*\(\s*12\s*,")
     inflation_re = re.compile(r"inflation_factor_range\s*=\s*(\[[^\]]*\])")
 
     for path in script_paths:
@@ -509,13 +511,17 @@ def test_paper_part1_grids():
         with open(path) as fh:
             src = fh.read()
 
-        # n_archetypes_range sites
-        n_arch_matches = n_arch_re.findall(src)
-        assert len(n_arch_matches) >= 2, (
-            f"{os.path.basename(path)}: expected >=2 n_archetypes_range sites, "
-            f"found {len(n_arch_matches)}"
+        # n_archetypes_range sites — either literal list OR dynamic cap pattern
+        n_arch_literal_matches = n_arch_re.findall(src)
+        n_arch_dynamic_matches = dynamic_cap_re.findall(src)
+        # Count either form — whichever the script uses
+        total_sites_this_file = len(n_arch_literal_matches) + len(n_arch_dynamic_matches)
+        assert total_sites_this_file >= 2, (
+            f"{os.path.basename(path)}: expected >=2 n_archetypes_range setups "
+            f"(literal list OR dynamic `_k_max_* = max(2, min(12, n_pcs-1))` "
+            f"cap), found {total_sites_this_file}"
         )
-        for literal in n_arch_matches:
+        for literal in n_arch_literal_matches:
             parsed = ast.literal_eval(literal)
             assert isinstance(parsed, list), (
                 f"{os.path.basename(path)}: n_archetypes_range literal not a list: "
@@ -530,6 +536,7 @@ def test_paper_part1_grids():
                 f">= 5, got {parsed}"
             )
             total_n_arch_sites += 1
+        total_n_arch_sites += len(n_arch_dynamic_matches)
 
         # inflation_factor_range sites
         inflation_matches = inflation_re.findall(src)

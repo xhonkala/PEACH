@@ -235,7 +235,7 @@ class TestPublicAPI:
         result = pc.tl.archetype_contrasts(comparison_adata)
         assert "pairs" in result
         assert "delta_beta" in result
-        assert "peach_archetype_contrasts" in comparison_adata.uns
+        assert "peach_archetype_contrasts_genes" in comparison_adata.uns
 
 
 class TestWaldQvalueUnderflow:
@@ -313,11 +313,10 @@ class TestWeightedMMD:
 
 class TestWaldContrastsFeatureSource:
     def test_wald_contrasts_respects_feature_source(self):
-        """Wald contrasts must use the same feature matrix as the original regression."""
+        """Wald contrasts use the feature_type matching the stored regression."""
         import peach as pc
 
         adata = _make_adata_with_weights()
-        # Store a custom feature matrix in obsm
         n_cells = adata.n_obs
         rng = np.random.default_rng(99)
         custom_features = rng.standard_normal((n_cells, 10)).astype(np.float32)
@@ -325,8 +324,8 @@ class TestWaldContrastsFeatureSource:
 
         pc.tl.feature_simplex_regression(adata, feature_matrix="test_features", n_bootstrap=0)
 
-        # Wald contrasts should use the same feature matrix
-        result = pc.tl.archetype_contrasts(adata)
+        # Must pass feature_type matching what was stored ("test_features")
+        result = pc.tl.archetype_contrasts(adata, feature_type="test_features")
         assert result["n_features"] == 10, (
             f"Expected 10 features (from test_features), got {result['n_features']}"
         )

@@ -1,7 +1,10 @@
 """Simplex regression and archetype driver regression public API."""
 
+import warnings
+
 import numpy as np
 from anndata import AnnData
+from scipy import stats
 from statsmodels.stats.multitest import multipletests
 
 from peach._core.utils.feature_utils import (
@@ -27,6 +30,7 @@ def feature_simplex_regression(
     store_residuals: bool = True,
     comprehensive_degree: bool = False,
     store_to_adata: bool = True,
+    random_seed: int = 42,
     copy: bool = False,
 ) -> dict:
     """Simplex regression of features on archetype weights (Scheffe polynomials).
@@ -58,6 +62,8 @@ def feature_simplex_regression(
         If True (default), store results in adata.uns. Set to False when
         calling in a loop (e.g., per-component regression) to avoid
         overwriting shared keys.
+    random_seed : int
+        Seed for bootstrap and permutation RNGs. Vary to check stability.
     copy : bool
         If True, operate on a copy of adata.
 
@@ -84,14 +90,29 @@ def feature_simplex_regression(
     W1, _ = scheffe_design_matrix(weights, degree=1)
     result1 = ols_fit(W1, Y, robust_se=robust_se, return_covariance=True)
 
+    # Vertex contrasts: beta_j - mean(beta), consistent with F-test null H0: all equal.
+    # SE via centering matrix L_K applied to the per-feature covariance sandwich.
+    vertex_betas = result1["coefficients"]  # [n_features, K] (degree-1 p == K)
+    vertex_contrasts = vertex_betas - vertex_betas.mean(axis=1, keepdims=True)
+
+    cov_all = np.array(result1["covariance"])  # [n_features, K, K]
+    L_K = np.eye(K) - np.ones((K, K)) / K
+    contrast_cov_all = np.einsum('ab,gbc,cd->gad', L_K, cov_all, L_K.T)
+    contrast_se = np.sqrt(np.maximum(np.diagonal(contrast_cov_all, axis1=1, axis2=2), 0))
+
+    df1 = max(n_cells - K, 1)
+    contrast_t_stats = np.where(contrast_se > 0, vertex_contrasts / contrast_se, 0.0)
+    contrast_pvalues = 2 * stats.t.sf(np.abs(contrast_t_stats), df=df1)
+
     # FDR correction on F-test (clamp underflowed zeros for large-N datasets)
     f_pvals_clamped = np.clip(result1["f_pvalues"], np.finfo(float).tiny, 1.0)
     _, f_pvalue_fdr, _, _ = multipletests(f_pvals_clamped, method="fdr_bh")
 
-    # FDR on vertex t-pvalues — per-archetype correction (one family per column)
-    vertex_pvalues_fdr = np.ones_like(result1["t_pvalues"])
-    for col in range(result1["t_pvalues"].shape[1]):
-        col_pvals = np.clip(result1["t_pvalues"][:, col], np.finfo(float).tiny, 1.0)
+    # FDR on vertex contrast p-values — per-archetype correction (one family per column).
+    # Tests H0: beta_j = mean(beta), consistent with the df_reg=K-1 F-test null.
+    vertex_pvalues_fdr = np.ones_like(contrast_pvalues)
+    for col in range(contrast_pvalues.shape[1]):
+        col_pvals = np.clip(contrast_pvalues[:, col], np.finfo(float).tiny, 1.0)
         _, col_fdr, _, _ = multipletests(col_pvals, method="fdr_bh")
         vertex_pvalues_fdr[:, col] = col_fdr
 
@@ -127,6 +148,7 @@ def feature_simplex_regression(
         permutation_pvalue, permutation_pvalue_fdr = _permutation_test_regression(
             weights, Y, n_permutations=n_permutations,
             observed_r2=result1["r_squared"],
+            seed=random_seed,
         )
 
     # Bootstrap CIs
@@ -137,11 +159,11 @@ def feature_simplex_regression(
 
     if n_bootstrap > 0:
         vertex_ci_lower, vertex_ci_upper = _bootstrap_regression_cis(
-            weights, Y, degree=1, n_bootstrap=n_bootstrap, K=K
+            weights, Y, degree=1, n_bootstrap=n_bootstrap, K=K, seed=random_seed,
         )
         if max_degree >= 2:
             int_ci_lo, int_ci_hi = _bootstrap_regression_cis(
-                weights, Y, degree=2, n_bootstrap=n_bootstrap, K=K
+                weights, Y, degree=2, n_bootstrap=n_bootstrap, K=K, seed=random_seed,
             )
             interaction_ci_lower = int_ci_lo[:, K:]
             interaction_ci_upper = int_ci_hi[:, K:]
@@ -158,12 +180,13 @@ def feature_simplex_regression(
         n_features=n_features,
         n_archetypes=K,
         vertex_coefficients=result1["coefficients"],
+        vertex_contrasts=vertex_contrasts,
         r_squared_degree1=result1["r_squared"],
         f_pvalue=result1["f_pvalues"],
         f_pvalue_fdr=f_pvalue_fdr,
-        vertex_pvalues=result1["t_pvalues"],
+        vertex_pvalues=contrast_pvalues,
         vertex_pvalues_fdr=vertex_pvalues_fdr,
-        vertex_se=result1["standard_errors"],
+        vertex_se=contrast_se,
         vertex_covariance=result1.get("covariance"),
         interaction_coefficients=interaction_coefficients,
         interaction_pairs=interaction_pairs,
@@ -352,7 +375,6 @@ def _comprehensive_degree_comparison(weights, Y, K, *, robust_se, r_squared_degr
         return {}
 
     if max_degree > 5:
-        import warnings
         from math import comb as _comb
         warnings.warn(
             f"comprehensive_degree with K={K}, max_comparison_degree={max_degree} "
@@ -473,7 +495,6 @@ def archetype_driver_regression(
 
     # Default to pathway scores if available — warn about upcoming behavior change
     if feature_matrix is None and "pathway_scores" in adata.obsm:
-        import warnings
         warnings.warn(
             "archetype_driver_regression() auto-selects pathway_scores when "
             "available. This will change in v0.6.0 to always default to adata.X. "
@@ -528,20 +549,26 @@ def archetype_driver_regression(
     r_squared = np.zeros(K - 1)
     intercepts = np.zeros(K - 1)
 
-    # Check rank and regularize if near-singular (e.g., collinear pathway scores)
+    # Invert design matrix with explicit condition number check.
+    # np.linalg.solve does NOT raise on near-singular matrices (cond ~1e10 silently
+    # returns garbage). Mirror the guard in ols_fit.
     DtD = design.T @ design
-    try:
-        DtD_inv = np.linalg.solve(DtD, np.eye(DtD.shape[0]))
-    except np.linalg.LinAlgError:
-        # Add tiny ridge penalty to handle perfect collinearity
-        import logging
-        logging.getLogger(__name__).warning(
-            f"Design matrix near-singular (rank {np.linalg.matrix_rank(design)}/{design.shape[1]}). "
-            "Adding ridge regularization (λ=1e-8)."
+    _, s_dvals, _ = np.linalg.svd(DtD)
+    cond_d = s_dvals[0] / max(s_dvals[-1], np.finfo(float).tiny)
+    if cond_d > 1e12:
+        warnings.warn(
+            f"Driver regression design matrix is near-singular "
+            f"(condition number {cond_d:.1e}). "
+            "Falling back to pseudoinverse for numerical stability.",
+            RuntimeWarning,
         )
-        DtD_inv = np.linalg.solve(
-            DtD + 1e-8 * np.eye(DtD.shape[0]), np.eye(DtD.shape[0])
-        )
+        DtD_inv = np.linalg.pinv(DtD)
+    else:
+        try:
+            DtD_inv = np.linalg.solve(DtD, np.eye(DtD.shape[0]))
+        except np.linalg.LinAlgError:
+            warnings.warn("DtD is singular; falling back to pseudoinverse.", RuntimeWarning)
+            DtD_inv = np.linalg.pinv(DtD)
 
     for m in range(K - 1):
         y = ilr_weights[:, m]  # [n_cells]

@@ -1,6 +1,7 @@
 """Core compute functions for archetype comparison: MMD, feature similarity, Wald contrasts."""
 
 import logging
+import warnings
 import numpy as np
 from itertools import combinations
 from scipy import stats
@@ -342,8 +343,15 @@ def compute_wald_contrasts(
     cached_cov = reg.get("vertex_covariance")
     if cached_cov is not None:
         beta = np.asarray(reg["vertex_coefficients"])
-        cov_list = [np.asarray(c) for c in cached_cov]
+        cov_all = np.array([np.asarray(c) for c in cached_cov])  # [n_features, K, K]
     else:
+        warnings.warn(
+            "vertex_covariance not cached — re-running full regression to compute Wald SEs. "
+            "This may be slow for large feature matrices. Re-run "
+            "feature_simplex_regression() to cache covariance and avoid this.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
         from .simplex_regression import ols_fit, scheffe_design_matrix
         from .feature_utils import resolve_features
         feature_source = reg.get("feature_source")
@@ -351,16 +359,15 @@ def compute_wald_contrasts(
         W, _ = scheffe_design_matrix(weights, degree=1)
         fit = ols_fit(W, Y, robust_se=robust_se, return_covariance=True)
         beta = fit["coefficients"]  # [n_features, K]
-        cov_list = fit["covariance"]  # list of K x K matrices
+        cov_all = np.array(fit["covariance"])  # [n_features, K, K]
 
     pairs = list(combinations(range(K), 2))
     delta_beta = {}
     delta_se = {}
     z_scores = {}
     pvalues = {}
-    pvalues_fdr = {}
 
-    # First pass: compute per-pair statistics, collect raw p-values
+    # First pass: compute per-pair statistics; collect raw p-values for global FDR
     all_pvals = []
     pair_slices = {}
     offset = 0
@@ -370,10 +377,9 @@ def compute_wald_contrasts(
         contrast[k] = -1.0
 
         d_beta = beta[:, j] - beta[:, k]
-        d_se = np.array([
-            np.sqrt(max(contrast @ cov_list[g] @ contrast, 0))
-            for g in range(n_features)
-        ])
+        # Vectorized: Var(beta_j - beta_k) = c' V_g c for each feature g
+        d_var = np.einsum('k,gkl,l->g', contrast, cov_all, contrast)
+        d_se = np.sqrt(np.maximum(d_var, 0))
 
         z = np.where(d_se > 0, d_beta / d_se, 0.0)
         pval = np.clip(2 * stats.t.sf(np.abs(z), df=df), np.finfo(float).tiny, 1.0)
@@ -387,15 +393,18 @@ def compute_wald_contrasts(
         pair_slices[(j, k)] = slice(offset, offset + n_features)
         offset += n_features
 
-    # Per-pair FDR correction (one family per archetype pair)
-    for j, k in pairs:
-        pair_pvals = np.clip(pvalues[(j, k)], np.finfo(float).tiny, 1.0)
-        testable = pair_pvals < 1.0
-        pair_fdr = np.ones_like(pair_pvals)
+    # Global BH correction across all pairs × features — more conservative than
+    # per-pair correction, controls FDR over the full family of pair comparisons.
+    pvalues_fdr = {}
+    if all_pvals:
+        flat_pvals = np.concatenate(all_pvals)
+        testable = flat_pvals < 1.0
+        flat_fdr = np.ones_like(flat_pvals)
         if testable.any():
-            _, fdr_vals, _, _ = multipletests(pair_pvals[testable], method="fdr_bh")
-            pair_fdr[testable] = fdr_vals
-        pvalues_fdr[(j, k)] = pair_fdr
+            _, fdr_vals, _, _ = multipletests(flat_pvals[testable], method="fdr_bh")
+            flat_fdr[testable] = fdr_vals
+        for j, k in pairs:
+            pvalues_fdr[(j, k)] = flat_fdr[pair_slices[(j, k)]]
 
     return {
         "pairs": pairs,

@@ -112,6 +112,7 @@ def flow_within(
     result = {
         "source_mask": source_mask,
         "target_mask": target_mask,
+        "source_obs_names": adata.obs_names[source_mask].tolist(),
         "transported": transported,
         "losses": losses,
         "mmd_before": mmd_before,
@@ -186,10 +187,10 @@ def flow_between(
     if condition_labels is None:
         condition_labels = [f"condition_{i}" for i in range(len(adatas))]
 
-    # Add condition labels to copies (never mutate caller's data)
+    # Add condition labels without copying expression matrices
     adatas_copy = []
     for a, label in zip(adatas, condition_labels):
-        a_copy = a.copy()
+        a_copy = a.copy(copy_X=False)
         a_copy.obs[condition_key] = label
         adatas_copy.append(a_copy)
 
@@ -217,7 +218,7 @@ def flow_between(
             solver_method=solver_method,
             use_ot=use_ot,
             name=f"{src_label}_to_{tgt_label}",
-            random_state=random_state + pair_idx,
+            random_state=hash((random_state, pair_idx)) % (2 ** 31),
         )
         flows[(src_label, tgt_label)] = result
 
@@ -291,15 +292,33 @@ def flow_gene_alignment(
         Maximum number of genes to include in the per-cell alignment matrix.
         Genes are selected by absolute aggregated alignment score. Default: 2500.
     normalize : bool
-        If True, use cosine similarity (normalize both loadings and velocity
-        to unit vectors) for alignment scores. If False, use raw dot products.
-        Default: True.
+        Deprecated. Alignment scores always use cosine similarity (unit-vector
+        dot product) for both aggregate and per-cell scores. Passing
+        ``normalize=False`` emits a DeprecationWarning and is ignored.
+
+    Note
+    ----
+    Gene scores are mediated through PCA loadings. Genes with low variance
+    explained by the top PCA components will have near-zero scores regardless
+    of their biological relevance to the flow.
     random_state : int
         Random seed for permutation tests. Default: 42.
     """
+    _validate_source_obs_names(adata, flow_result)
     # null_mode overrides null_type when provided (alias for API consistency)
     if null_mode is not None:
         null_type = null_mode
+
+    if not normalize:
+        import warnings
+        warnings.warn(
+            "normalize=False is deprecated in flow_gene_alignment. "
+            "Alignment scores always use cosine similarity. "
+            "This argument will be removed in v0.6.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     # Get PCA loadings
     if pca_loadings_key is None:
         pca_loadings_key = "PCs"
@@ -314,7 +333,6 @@ def flow_gene_alignment(
     model = flow_result.get("model")
 
     if t is not None and model is not None:
-        # Instantaneous velocity at time t via the trained model
         mean_velocity = model.velocity_at(source_pca, t).mean(axis=0)
         velocity_mode = "instantaneous"
     else:
@@ -325,23 +343,16 @@ def flow_gene_alignment(
                 f"with return_model=True). Falling back to full-trajectory displacement.",
                 UserWarning,
             )
-        # Full trajectory displacement (original behavior)
         mean_velocity = (flow_result["transported"] - source_pca).mean(axis=0)
         velocity_mode = "displacement"
 
-    # Trim loadings to match PCA dims
+    # Trim loadings and normalize — always cosine similarity
     n_pcs = len(mean_velocity)
     loadings_trimmed = loadings[:, :n_pcs]
-
-    # Normalize loadings for direction-only alignment (cosine-like)
-    vel_norm_agg = None  # defined unconditionally for permutation null safety
-    if normalize:
-        loading_norms = np.linalg.norm(loadings_trimmed, axis=1, keepdims=True)
-        loadings_for_agg = loadings_trimmed / np.maximum(loading_norms, 1e-10)
-        vel_norm_agg = mean_velocity / (np.linalg.norm(mean_velocity) + 1e-10)
-        alignment_scores = loadings_for_agg @ vel_norm_agg  # [n_genes]
-    else:
-        alignment_scores = loadings_trimmed @ mean_velocity  # [n_genes] — raw dot product
+    loading_norms = np.linalg.norm(loadings_trimmed, axis=1, keepdims=True)
+    loadings_for_agg = loadings_trimmed / np.maximum(loading_norms, 1e-10)
+    vel_norm_agg = mean_velocity / (np.linalg.norm(mean_velocity) + 1e-10)
+    alignment_scores = loadings_for_agg @ vel_norm_agg  # [n_genes]
 
     # Top aligned/opposed
     sorted_idx = np.argsort(alignment_scores)
@@ -391,23 +402,17 @@ def flow_gene_alignment(
         run_rotation = null_type in ("rotation", "both")
         run_shuffle = null_type in ("shuffle", "both")
 
-        # --- Rotation null: loadings @ Q (random orthogonal) ---
-        # Tests: is the loading manifold's orientation relative to velocity special?
-        # Omnibus test — preserves gene-gene correlation, randomizes coordinate frame.
+        # --- Rotation null: random orthogonal rotation of loading matrix ---
+        # Omnibus test — preserves gene-gene correlation, randomizes PC frame.
         if run_rotation:
             rot_null_scores = np.zeros((n_permutations, n_genes))
             for i in range(n_permutations):
                 Z = rng.standard_normal((n_pcs_perm, n_pcs_perm))
                 Q, _ = np.linalg.qr(Z)
                 rotated = loadings_trimmed @ Q
-                if normalize:
-                    rot_norms = np.linalg.norm(rotated, axis=1, keepdims=True)
-                    rot_null_scores[i] = (rotated / np.maximum(rot_norms, 1e-10)) @ vel_norm_agg
-                else:
-                    rot_null_scores[i] = rotated @ mean_velocity
+                rot_norms = np.linalg.norm(rotated, axis=1, keepdims=True)
+                rot_null_scores[i] = (rotated / np.maximum(rot_norms, 1e-10)) @ vel_norm_agg
 
-            # Omnibus p-value: is the max observed |alignment| greater than max
-            # |alignment| under rotation null?
             obs_max = np.max(np.abs(alignment_scores))
             null_maxes = np.max(np.abs(rot_null_scores), axis=1)
             omnibus_p = (np.sum(null_maxes >= obs_max) + 1) / (n_permutations + 1)
@@ -417,17 +422,12 @@ def flow_gene_alignment(
             result["rotation_null_std"] = rot_null_scores.std(axis=0)
 
         # --- Shuffle null: permute gene-to-loading assignments ---
-        # Tests: is THIS gene specifically aligned, vs a random gene in its place?
         # Per-gene test — breaks gene-gene correlation but tests gene identity.
         if run_shuffle:
             shuf_null_scores = np.zeros((n_permutations, n_genes))
-            for i in range(n_permutations):
-                perm_loadings = loadings_trimmed[rng.permutation(n_genes)]
-                if normalize:
-                    perm_norms = np.linalg.norm(perm_loadings, axis=1, keepdims=True)
-                    shuf_null_scores[i] = (perm_loadings / np.maximum(perm_norms, 1e-10)) @ vel_norm_agg
-                else:
-                    shuf_null_scores[i] = perm_loadings @ mean_velocity
+            perm_indices = np.array([rng.permutation(n_genes) for _ in range(n_permutations)])
+            perm_loadings_batch = loadings_for_agg[perm_indices]  # [n_perms, n_genes, n_pcs]
+            shuf_null_scores = perm_loadings_batch @ vel_norm_agg  # [n_perms, n_genes]
 
             shuf_pvalues = np.array([
                 (np.sum(np.abs(shuf_null_scores[:, g]) >= np.abs(alignment_scores[g])) + 1)
@@ -435,25 +435,41 @@ def flow_gene_alignment(
                 for g in range(n_genes)
             ])
 
-            # Pre-filter FDR: only correct within top genes by |alignment score|.
-            # Testing all genes inflates the BH family to ~20K where most are null,
-            # crushing per-gene significance. Instead, pre-select the top 5% by
-            # absolute score, then apply BH over that smaller focused family.
-            abs_scores = np.abs(alignment_scores)
-            top_k = min(n_genes, max(50, int(n_genes * 0.05)))  # at least 50, or 5%, capped at n_genes
-            top_mask = abs_scores >= np.sort(abs_scores)[-top_k]
-            shuf_pvalues_fdr = np.ones(n_genes)
-            if top_mask.sum() > 0:
-                _, fdr_top, _, _ = multipletests(
-                    shuf_pvalues[top_mask], method="fdr_bh"
-                )
-                shuf_pvalues_fdr[top_mask] = fdr_top
+            # BH FDR over the full gene family — pre-filtering introduces
+            # selection bias and is not formally justified.
+            _, shuf_pvalues_fdr, _, _ = multipletests(shuf_pvalues, method="fdr_bh")
 
             result["alignment_pvalues"] = shuf_pvalues
             result["alignment_pvalues_fdr"] = shuf_pvalues_fdr
-            result["alignment_fdr_n_tested"] = int(top_mask.sum())
+            result["alignment_fdr_n_tested"] = n_genes
             result["null_mean"] = shuf_null_scores.mean(axis=0)
             result["null_std"] = shuf_null_scores.std(axis=0)
+
+        # --- Rank-based null: only valid when rotation null is available ---
+        # Shuffle null is degenerate for rank testing (produces all p=1.0).
+        if run_shuffle and not run_rotation:
+            import warnings
+            warnings.warn(
+                "Rank-based permutation null requires null_type='rotation' or 'both'. "
+                "With null_type='shuffle' the rank null is degenerate (all p=1.0) "
+                "and has been skipped.",
+                UserWarning,
+                stacklevel=3,
+            )
+        if run_rotation:
+            abs_obs = np.abs(alignment_scores)
+            obs_rank = (-abs_obs).argsort().argsort()
+            sorted_null = np.sort(np.abs(rot_null_scores), axis=1)[:, ::-1]
+            rank_pvalues = np.array([
+                (np.sum(sorted_null[:, obs_rank[g]] >= abs_obs[g]) + 1)
+                / (n_permutations + 1)
+                for g in range(n_genes)
+            ])
+            _, rank_pvalues_fdr, _, _ = multipletests(rank_pvalues, method="fdr_bh")
+            result["alignment_pvalues_rank"] = rank_pvalues
+            result["alignment_pvalues_rank_fdr"] = rank_pvalues_fdr
+            result["alignment_rank_null_mean"] = sorted_null.mean(axis=0)
+            result["alignment_rank_null_std"] = sorted_null.std(axis=0)
 
         result["null_type"] = null_type
 
@@ -465,8 +481,8 @@ def flow_jacobian(
     flow_result: dict,
     flow_model: "FlowModel",
     *,
-    t: float = 0.5,
-    evaluation_points: np.ndarray | None = None,
+    t: "float | list[float]" = 0.5,
+    n_steps: int = 100,
     pca_loadings_key: str | None = None,
     aggregate: str = "mean",
     per_cell_features: bool = True,
@@ -476,193 +492,266 @@ def flow_jacobian(
     null_mode: str | None = None,
     permutation_seed: int = 42,
 ) -> dict:
-    """Compute Jacobian of the flow velocity field.
+    """Compute flow map Jacobian ∂φ_t/∂x₀ via coupled ODE integration.
+
+    Integrates the position ODE (dφ/dt = v(φ,t)) and variational ODE
+    (dJ/dt = (∂v/∂x)|_φ @ J) simultaneously from t=0, starting each source
+    cell at its PCA position. At each requested time t, J(t) gives the
+    accumulated stretching/compression of gene-program neighborhoods by the
+    full transport up to that point.
+
+    Uses the midpoint (RK2) fixed-step solver. Permutation tests
+    (``n_permutations > 0``) are run on the last (or only) requested timepoint.
 
     Parameters
     ----------
     adata : AnnData
-    flow_result : FlowWithinResult
+    flow_result : dict
+        Output of :func:`flow_within`. Must contain ``source_mask`` and
+        ``pca_key``.
     flow_model : FlowModel
         The trained FlowModel. **Must** be the same model that produced
-        ``flow_result`` -- passing a mismatched model will produce silently
-        wrong results. Use ``flow_within(..., return_model=True)`` and
-        access via ``flow_result['model']``.
-    t : float
-        Time point at which to evaluate the Jacobian. Default: 0.5.
-    evaluation_points : np.ndarray or None
-        Points at which to evaluate the Jacobian. Default: source cell positions.
+        ``flow_result`` — passing a mismatched model produces silently wrong
+        results. Obtain via ``flow_within(..., return_model=True)`` and access
+        as ``flow_result['model']``.
+    t : float or list of float
+        Time point(s) in (0, 1] at which to return J. When a single float,
+        result keys have the same shape as before (no leading time dimension).
+        When a list, result arrays gain a leading ``n_t`` dimension and the
+        ``timepoints`` key is populated. Default: 0.5.
+    n_steps : int
+        Midpoint integration steps over [0, 1]. Step size = 1/n_steps.
+        Default: 50.
     pca_loadings_key : str or None
-        Key in adata.varm for PCA loadings. Default: 'PCs'.
+        Key in ``adata.varm`` for PCA loadings used to project the Jacobian
+        back to gene space. Default: ``'PCs'``.
     aggregate : str
-        Aggregation method for mean Jacobian: 'mean', 'median', or None (per-cell).
-        Default: 'mean'.
+        How to aggregate per-cell Jacobians into a single matrix for
+        feature expansion: ``'mean'`` or ``'median'``. Default: ``'mean'``.
     per_cell_features : bool
-        If True and PCA loadings are available, compute per-cell per-gene expansion
-        for the top ``n_top_features`` genes. Returns additional keys
-        ``'per_cell_expansion'`` with shape ``[n_points, n_top_features]``,
-        ``'per_cell_expansion_gene_names'``, and
-        ``'per_cell_expansion_gene_indices'``. Default: True.
+        If True and PCA loadings are available, compute per-cell per-gene
+        expansion (quadratic form L_g^T J_c L_g) for the top
+        ``n_top_features`` genes. Returns ``'per_cell_expansion'``
+        ``[n_cells, n_top_features]``, ``'per_cell_expansion_gene_names'``,
+        and ``'per_cell_expansion_gene_indices'``. Default: True.
     n_top_features : int
-        Maximum number of genes to include in the per-cell expansion matrix.
-        Genes are selected by absolute aggregated feature expansion. Default: 2500.
+        Maximum genes for per-cell expansion matrix. Selected by absolute
+        aggregate feature expansion. Default: 2500.
     n_permutations : int
-        Number of permutations for expansion significance testing. When > 0,
-        recomputes the quadratic form L^T J L under a null model to build a
-        null distribution. The Jacobian J is fixed; only loading vectors change,
-        making permutations cheap. Results stored as ``expansion_pvalues`` and
-        ``expansion_pvalues_fdr``. Default: 0.
+        Permutations for expansion significance (see ``null_type``). When > 0,
+        the Jacobian J is fixed; only loading vectors are permuted, making
+        this cheap. Applied to the last requested timepoint. Default: 0.
     null_type : str
-        Which null model(s) to run when ``n_permutations > 0``. One of
-        ``"rotation"`` (random orthogonal rotation of normalised loading rows),
-        ``"shuffle"`` (row-wise shuffle of gene-to-loading assignments), or
-        ``"both"`` (run both). Default: ``"both"``.
-
-        - **Rotation null** tests: is the expansion/contraction structure
-          globally present given the loading covariance? Produces an omnibus
-          p-value (``expansion_rotation_omnibus_pvalue``).
-        - **Shuffle null** tests: is THIS gene's loading specifically expanded
-          by the Jacobian? Produces per-gene p-values (``expansion_pvalues``,
-          ``expansion_pvalues_fdr``).
+        Which null(s) to run: ``'rotation'`` (omnibus, random orthogonal
+        rotation of loadings), ``'shuffle'`` (per-gene, row-wise permutation),
+        or ``'both'``. Default: ``'both'``.
     null_mode : str or None
-        Alias for ``null_type``. When provided, overrides ``null_type``.
-        Accepts the same values: ``"rotation"``, ``"shuffle"``, ``"both"``.
-        Default: ``None`` (fall back to ``null_type``).
+        Alias for ``null_type``; overrides it when provided. Default: None.
     permutation_seed : int
-        Random seed for permutation shuffling. Default: 42.
+        RNG seed for permutations. Default: 42.
+
+    Note
+    ----
+    Gene scores are mediated through PCA loadings. Genes with low variance
+    explained by the top PCA components will have near-zero scores regardless
+    of their biological relevance to the flow.
+
+    Returns
+    -------
+    dict
+        When ``t`` is a float:
+
+        - ``jacobian_det`` : [n_cells] — det(J) at t
+        - ``jac_logdet`` : [n_cells] — log|det(J)| at t
+        - ``jac_det_sign`` : [n_cells] — sign of det(J)
+        - ``feature_expansion`` : [n_genes] — L^T mean_J L for each gene
+        - ``mean_jacobian`` : [dim, dim] — aggregate J over cells
+        - ``phi`` : [n_cells, dim] — transported positions at t
+        - ``t`` : float
+
+        When ``t`` is a list, all array keys gain a leading ``n_t``
+        dimension and ``timepoints`` : list[float] is added.
+
+        Optional keys (when ``per_cell_features=True`` and loadings present):
+
+        - ``per_cell_expansion`` : [n_cells, n_top_features]
+        - ``per_cell_expansion_gene_names`` : list[str]
+        - ``per_cell_expansion_gene_indices`` : np.ndarray
+
+        Optional keys (when ``n_permutations > 0``):
+
+        - ``expansion_pvalues``, ``expansion_pvalues_fdr`` : [n_genes]
+        - ``expansion_rotation_omnibus_pvalue`` : float
     """
-    # null_mode overrides null_type when provided (alias for API consistency)
+    _validate_source_obs_names(adata, flow_result)
+    scalar_t = isinstance(t, (int, float))
+    t_eval = [float(t)] if scalar_t else [float(v) for v in t]
+
     if null_mode is not None:
         null_type = null_mode
-    if evaluation_points is None:
-        evaluation_points = adata.obsm[flow_result["pca_key"]][flow_result["source_mask"]]
 
-    # Compute Jacobian
-    jac = flow_model.jacobian(evaluation_points, t)  # [n_points, dim, dim]
+    x0 = adata.obsm[flow_result["pca_key"]][flow_result["source_mask"]]
 
-    # Jacobian determinant (local volume change)
-    # Use slogdet to avoid underflow in high-dimensional spaces
-    signs, logdets = np.linalg.slogdet(jac)
-    jac_det = signs * np.exp(np.clip(logdets, -500, 500))  # Clipped exp for safety
+    # Integrate augmented ODE to get transported positions + flow map Jacobians
+    fmj = flow_model.flow_map_jacobian(x0, t_eval, n_steps=n_steps)
+    # fmj['phi']: [n_t, n_cells, dim]
+    # fmj['J']:   [n_t, n_cells, dim, dim]
 
-    # Mean Jacobian
-    if aggregate == "mean":
-        mean_jac = jac.mean(axis=0)
-    elif aggregate == "median":
-        mean_jac = np.median(jac, axis=0)
-    else:
-        mean_jac = jac.mean(axis=0)
-
-    # Per-gene expansion: project Jacobian onto PCA loadings
     if pca_loadings_key is None:
         pca_loadings_key = "PCs"
-    if pca_loadings_key in adata.varm:
+    has_loadings = pca_loadings_key in adata.varm
+
+    if has_loadings:
         loadings = adata.varm[pca_loadings_key]
-        n_pcs = mean_jac.shape[0]
+        n_pcs = fmj['J'].shape[-1]
         loadings_trimmed = loadings[:, :n_pcs]
-        # Normalize each gene's loading to unit norm for scale-invariant expansion
         loading_norms = np.linalg.norm(loadings_trimmed, axis=1, keepdims=True)
         loading_norms = np.maximum(loading_norms, 1e-10)
-        loadings_normalized = loadings_trimmed / loading_norms
-        # For each gene, compute how its PCA direction is expanded/contracted
-        # Vectorized: diag(L_norm @ J @ L_norm.T)
-        feature_expansion = np.einsum(
-            'gi,ij,gj->g', loadings_normalized, mean_jac, loadings_normalized
-        )
+        loadings_normalized = loadings_trimmed / loading_norms  # [n_genes, n_pcs]
+        gene_names_all = list(adata.var_names) if hasattr(adata, 'var_names') else []
 
-        # Per-cell feature expansion for top genes
-        if per_cell_features:
-            n_top_feat = min(n_top_features, loadings.shape[0])
-            top_feat_idx = np.argsort(np.abs(feature_expansion))[-n_top_feat:][::-1]
-            top_feat_idx = np.sort(top_feat_idx)
-            L_top = loadings_normalized[top_feat_idx]  # [n_top_feat, n_pcs]
-
-            # Per-cell quadratic form: L_g^T J_c L_g for each cell c, gene g
-            per_cell_exp = np.einsum(
-                'gi,cij,gj->cg', L_top, jac, L_top
-            )  # [n_points, n_top_feat]
-
-            gene_names_all = list(adata.var_names) if hasattr(adata, 'var_names') else []
-            top_feat_names = [gene_names_all[i] for i in top_feat_idx] if gene_names_all else []
+    # Compute feature expansion and per-cell gene selection from the LAST
+    # (or only) timepoint's mean Jacobian. Using a single gene index set
+    # across all timepoints ensures the stacked per_cell_expansion array has
+    # a consistent gene axis.
+    last_J = fmj['J'][-1]
+    if aggregate == "median":
+        last_mean_jac = np.median(last_J, axis=0)
     else:
-        feature_expansion = np.zeros(0)
+        last_mean_jac = last_J.mean(axis=0)
 
-    result = {
-        "jacobian_det": jac_det,
-        "jac_logdet": logdets,
-        "jac_det_sign": signs,
-        "feature_expansion": feature_expansion,
-        "mean_jacobian": mean_jac,
-        "t": t,
-    }
+    shared_top_feat_idx = None
+    shared_top_feat_names = []
+    if has_loadings and per_cell_features:
+        last_feat_exp = np.einsum(
+            'gi,ij,gj->g', loadings_normalized, last_mean_jac, loadings_normalized
+        )
+        n_top_feat = min(n_top_features, loadings.shape[0])
+        shared_top_feat_idx = np.sort(
+            np.argsort(np.abs(last_feat_exp))[-n_top_feat:]
+        )
+        shared_top_feat_names = [gene_names_all[i] for i in shared_top_feat_idx] if gene_names_all else []
 
-    if pca_loadings_key in adata.varm and per_cell_features:
-        result["per_cell_expansion"] = per_cell_exp
-        result["per_cell_expansion_gene_names"] = top_feat_names
-        result["per_cell_expansion_gene_indices"] = top_feat_idx
+    def _process_one_timepoint(jac_t):
+        """Compute derived quantities for J at a single timepoint."""
+        signs, logdets = np.linalg.slogdet(jac_t)
+        jac_det = signs * np.exp(np.clip(logdets, -500, 500))
 
-    # Permutation tests for feature expansion significance
-    if n_permutations > 0 and pca_loadings_key in adata.varm and len(feature_expansion) > 0:
+        if aggregate == "median":
+            mean_jac = np.median(jac_t, axis=0)
+        else:
+            mean_jac = jac_t.mean(axis=0)
+
+        out = {
+            "jacobian_det": jac_det,
+            "jac_logdet": logdets,
+            "jac_det_sign": signs,
+            "mean_jacobian": mean_jac,
+        }
+
+        if has_loadings:
+            feature_expansion = np.einsum(
+                'gi,ij,gj->g', loadings_normalized, mean_jac, loadings_normalized
+            )
+            out["feature_expansion"] = feature_expansion
+
+            if per_cell_features and shared_top_feat_idx is not None:
+                L_top = loadings_normalized[shared_top_feat_idx]
+                per_cell_exp = np.einsum('gi,cij,gj->cg', L_top, jac_t, L_top)
+                out["per_cell_expansion"] = per_cell_exp
+                out["per_cell_expansion_gene_names"] = shared_top_feat_names
+                out["per_cell_expansion_gene_indices"] = shared_top_feat_idx
+        else:
+            out["feature_expansion"] = np.zeros(0)
+
+        return out
+
+    # Process each timepoint
+    per_t = [_process_one_timepoint(fmj['J'][i]) for i in range(len(t_eval))]
+
+    # Permutation tests on the last (or only) timepoint
+    if n_permutations > 0 and has_loadings:
         from peach._core.utils.permutation import fdr_correct, permutation_pvalue
 
-        n_genes = loadings_normalized.shape[0]
-        n_pcs_jac = loadings_normalized.shape[1]
-        rng = np.random.default_rng(permutation_seed)
+        feature_expansion = per_t[-1].get("feature_expansion", np.zeros(0))
+        mean_jac = per_t[-1]["mean_jacobian"]
 
-        run_rotation = null_type in ("rotation", "both")
-        run_shuffle = null_type in ("shuffle", "both")
+        if len(feature_expansion) > 0:
+            n_genes = loadings_normalized.shape[0]
+            n_pcs_jac = loadings_normalized.shape[1]
+            rng = np.random.default_rng(permutation_seed)
 
-        # --- Rotation null: L @ Q (random orthogonal) ---
-        # Omnibus test: is expansion/contraction structure globally present?
-        if run_rotation:
-            rot_null = np.empty((n_permutations, n_genes))
-            for p in range(n_permutations):
-                Z = rng.standard_normal((n_pcs_jac, n_pcs_jac))
-                Q, _ = np.linalg.qr(Z)
-                rotated = loadings_normalized @ Q
-                rot_null[p] = np.einsum('gi,ij,gj->g', rotated, mean_jac, rotated)
+            run_rotation = null_type in ("rotation", "both")
+            run_shuffle = null_type in ("shuffle", "both")
 
-            obs_max_exp = np.max(np.abs(feature_expansion))
-            null_maxes_exp = np.max(np.abs(rot_null), axis=1)
-            omnibus_p_exp = (np.sum(null_maxes_exp >= obs_max_exp) + 1) / (n_permutations + 1)
-            result["expansion_rotation_omnibus_pvalue"] = omnibus_p_exp
+            perm_result = {}
 
-        # --- Shuffle null: permute gene-to-loading rows ---
-        # Per-gene test: is THIS gene's expansion specifically significant?
-        if run_shuffle:
-            shuf_null = np.empty((n_permutations, n_genes))
-            for p in range(n_permutations):
-                perm_idx = rng.permutation(n_genes)
-                shuffled = loadings_normalized[perm_idx]
-                shuf_null[p] = np.einsum('gi,ij,gj->g', shuffled, mean_jac, shuffled)
+            if run_rotation:
+                rot_null = np.empty((n_permutations, n_genes))
+                for p in range(n_permutations):
+                    Z = rng.standard_normal((n_pcs_jac, n_pcs_jac))
+                    Q, _ = np.linalg.qr(Z)
+                    rotated = loadings_normalized @ Q
+                    rot_null[p] = np.einsum('gi,ij,gj->g', rotated, mean_jac, rotated)
+                obs_max = np.max(np.abs(feature_expansion))
+                null_maxes = np.max(np.abs(rot_null), axis=1)
+                perm_result["expansion_rotation_omnibus_pvalue"] = float(
+                    (np.sum(null_maxes >= obs_max) + 1) / (n_permutations + 1)
+                )
 
-            perm_pvals = permutation_pvalue(
-                feature_expansion, shuf_null, alternative="two-sided"
+            if run_shuffle:
+                shuf_null = np.empty((n_permutations, n_genes))
+                perm_indices = np.array([rng.permutation(n_genes) for _ in range(n_permutations)])
+                for p in range(n_permutations):
+                    shuffled = loadings_normalized[perm_indices[p]]
+                    shuf_null[p] = np.einsum('gi,ij,gj->g', shuffled, mean_jac, shuffled)
+
+                perm_pvals = permutation_pvalue(
+                    feature_expansion, shuf_null, alternative="two-sided"
+                )
+                # BH FDR over the full gene family — pre-filtering introduces
+                # selection bias and is not formally justified.
+                _, perm_fdr = fdr_correct(perm_pvals)
+                n_raw_sig = int((perm_pvals < 0.01).sum())
+                perm_result.update({
+                    "expansion_pvalues": perm_pvals,
+                    "expansion_pvalues_raw": perm_pvals,
+                    "expansion_pvalues_fdr": perm_fdr,
+                    "expansion_n_raw_significant": n_raw_sig,
+                })
+
+            perm_result["n_permutations"] = n_permutations
+            perm_result["expansion_null_type"] = null_type
+            per_t[-1].update(perm_result)
+
+            logger.info(
+                f"Jacobian permutation ({null_type}): "
+                f"{perm_result.get('expansion_n_raw_significant', '?')}/{n_genes} "
+                f"genes at raw p<0.01, "
+                f"{(perm_result.get('expansion_pvalues_fdr', np.ones(1)) < 0.05).sum()}"
+                f"/{n_genes} at FDR q<0.05 ({n_permutations} permutations)"
             )
 
-            # Pre-filter FDR: correct within top genes by |expansion| only.
-            # Same rationale as gene alignment: full-gene BH crushes everything.
-            abs_exp = np.abs(feature_expansion)
-            top_k_exp = min(n_genes, max(50, int(n_genes * 0.05)))  # at least 50, or 5%, capped at n_genes
-            top_exp_mask = abs_exp >= np.sort(abs_exp)[-top_k_exp]
-            perm_fdr = np.ones(n_genes)
-            if top_exp_mask.sum() > 0:
-                _, fdr_top_exp = fdr_correct(perm_pvals[top_exp_mask])
-                perm_fdr[top_exp_mask] = fdr_top_exp
-
-            result["expansion_pvalues"] = perm_pvals
-            result["expansion_pvalues_raw"] = perm_pvals
-            result["expansion_pvalues_fdr"] = perm_fdr
-            n_raw_sig = int((perm_pvals < 0.01).sum())
-            result["expansion_n_raw_significant"] = n_raw_sig
-
-        result["n_permutations"] = n_permutations
-        result["expansion_null_type"] = null_type
-        logger.info(
-            f"Jacobian permutation ({null_type}): "
-            f"{result.get('expansion_n_raw_significant', '?')}/{n_genes} genes at raw p<0.01, "
-            f"{(result.get('expansion_pvalues_fdr', np.ones(1)) < 0.05).sum()}/{n_genes} "
-            f"at FDR q<0.05 ({n_permutations} permutations)"
-        )
+    # Assemble result — scalar t: flatten to same structure as before (no time dim)
+    if scalar_t:
+        result = per_t[0]
+        result["phi"] = fmj['phi'][0]
+        result["t"] = t_eval[0]
+    else:
+        # Multi-timepoint: stack arrays along leading time dimension
+        array_keys = ["jacobian_det", "jac_logdet", "jac_det_sign",
+                      "mean_jacobian", "feature_expansion", "per_cell_expansion"]
+        result = {"timepoints": t_eval}
+        for k in array_keys:
+            arrays = [pt[k] for pt in per_t if k in pt]
+            if arrays:
+                result[k] = np.stack(arrays, axis=0)
+        # Non-array keys: take from last timepoint (gene names, indices, perm results)
+        for k, v in per_t[-1].items():
+            if k not in result and k not in array_keys:
+                result[k] = v
+        result["phi"] = fmj['phi']  # [n_t, n_cells, dim]
+        result["t"] = t_eval
 
     return result
 
@@ -806,15 +895,13 @@ def flow_bifurcation(
     dim = evaluation_points.shape[1]
     timepoints = np.linspace(0.05, 0.95, n_timepoints)
 
-    # Transport to get positions at each timepoint
+    # Generate a dense trajectory so each evaluation timepoint has a close
+    # frame match. Using 10× the number of timepoints (min 100) keeps the
+    # argmin error below 1/10 of the inter-timepoint spacing.
+    n_traj_steps = max(n_timepoints * 10, 100)
     trajectory = flow_model.transport(
-        evaluation_points, n_steps=n_timepoints - 1, return_trajectory=True
-    )  # [n_steps+1, n_cells, dim]
-
-    # Map trajectory frames to timepoints: trajectory has n_timepoints frames
-    # at np.linspace(0, 1, n_timepoints), but we want to evaluate Jacobian at
-    # our custom timepoints. We use the trajectory positions that are closest
-    # to each desired timepoint.
+        evaluation_points, n_steps=n_traj_steps, return_trajectory=True
+    )  # [n_traj_steps+1, n_cells, dim]
     traj_times = np.linspace(0, 1, trajectory.shape[0])
 
     divergence = np.zeros((n_timepoints, n_cells))
@@ -822,28 +909,17 @@ def flow_bifurcation(
     eigenvalue_imag = np.zeros((n_timepoints, n_cells, dim))
 
     for ti, t_val in enumerate(timepoints):
-        # Find closest trajectory frame
         frame_idx = np.argmin(np.abs(traj_times - t_val))
         positions = trajectory[frame_idx]  # [n_cells, dim]
 
-        # Compute Jacobian at these positions and this time
         jac = flow_model.jacobian(positions, float(t_val))  # [n_cells, dim, dim]
-
-        # Vectorized trace (no Python loop)
         divergence[ti] = np.trace(jac, axis1=1, axis2=2)
 
-        # Vectorized eigenvalues (numpy batches over first dimension)
         eigvals = np.linalg.eigvals(jac)  # [n_cells, dim]
         eigenvalue_real[ti] = eigvals.real
         eigenvalue_imag[ti] = eigvals.imag
 
-    # Bifurcation score: max |divergence| along trajectory per cell
     bifurcation_score = np.max(np.abs(divergence), axis=0)  # [n_cells]
-
-    # Vectorized saddle point detection
-    has_positive = np.any(eigenvalue_real > 0, axis=2)  # [n_timepoints, n_cells]
-    has_negative = np.any(eigenvalue_real < 0, axis=2)
-    n_saddle_points = np.sum(has_positive & has_negative, axis=0).astype(int)  # [n_cells]
 
     return {
         "divergence": divergence,
@@ -851,8 +927,20 @@ def flow_bifurcation(
         "eigenvalue_real": eigenvalue_real,
         "eigenvalue_imag": eigenvalue_imag,
         "timepoints": timepoints,
-        "n_saddle_points": n_saddle_points,
     }
+
+
+def _validate_source_obs_names(adata: "AnnData", flow_result: dict) -> None:
+    """Raise if adata.obs_names don't match those used to build flow_result."""
+    expected = flow_result.get("source_obs_names")
+    if expected is None:
+        return  # flow_result predates this guard — skip silently
+    actual = adata.obs_names[flow_result["source_mask"]].tolist()
+    if actual != expected:
+        raise ValueError(
+            "adata.obs_names do not match the AnnData used in flow_within. "
+            "Pass the same adata object that was used to generate flow_result."
+        )
 
 
 def _build_mask(adata, filters):
@@ -872,6 +960,11 @@ def _build_mask(adata, filters):
     for col, val in filters.items():
         if col not in adata.obs.columns:
             raise ValueError(f"Column '{col}' not found in adata.obs")
+        if not np.isscalar(val):
+            raise ValueError(
+                f"Filter value for '{col}' must be scalar; got {type(val).__name__}. "
+                "For multi-value filtering, call flow_within separately per condition."
+            )
         mask &= (adata.obs[col] == val).values
 
     if not mask.any():
@@ -897,6 +990,7 @@ def flow_feature_graph(
     n_eval_points: int = 300,
     edge_threshold: float | None = None,
     random_state: int = 42,
+    **kwargs,
 ) -> dict:
     """Static feature coupling graph collapsed over time.
 
@@ -940,11 +1034,19 @@ def flow_feature_graph(
         ``top_hub_genes``, ``n_timepoints``, ``n_top_genes``,
         ``edge_threshold``, ``per_timepoint_jacobians``.
     """
-    rng = np.random.default_rng(random_state)
-
-    # --- PCA loadings and gene names ---
-    if "PCs" not in adata.varm:
-        raise ValueError("adata.varm['PCs'] not found.")
+    import warnings
+    warnings.warn(
+        "flow_feature_graph is deprecated and will be removed in v0.6. "
+        "Use flow_jacobian(per_cell_features=True) for gene expansion analysis. "
+        "The velocity-Jacobian-based feature graph has been superseded by the "
+        "flow map Jacobian approach in flow_jacobian.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    raise NotImplementedError(
+        "flow_feature_graph has been deprecated. "
+        "Use pc.tl.flow_jacobian(per_cell_features=True) instead."
+    )
     loadings = adata.varm["PCs"]  # [n_genes, n_pcs]
     gene_names = np.array(adata.var_names)
 
@@ -1121,6 +1223,18 @@ def flow_temporal_feature_graph(
         ``top_mid_late_genes``, ``top_late_genes``,
         ``n_timepoints``, ``n_top_genes``.
     """
+    import warnings
+    warnings.warn(
+        "flow_temporal_feature_graph is deprecated and will be removed in v0.6. "
+        "Use flow_jacobian(t=[...], per_cell_features=True) for multi-timepoint "
+        "flow map Jacobian analysis.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    raise NotImplementedError(
+        "flow_temporal_feature_graph has been deprecated. "
+        "Use pc.tl.flow_jacobian(t=[0.25, 0.5, 0.75], per_cell_features=True) instead."
+    )
     rng = np.random.default_rng(random_state)
 
     # --- PCA loadings and gene names ---

@@ -37,6 +37,20 @@ def scheffe_design_matrix(W, degree=1):
     X : np.ndarray [n_cells, p]
     interaction_info : list[tuple] — index tuples for columns beyond K.
     """
+    row_sums = W.sum(axis=1)
+    if not np.allclose(row_sums, 1.0, atol=1e-4):
+        warnings.warn(
+            f"W rows don't sum to 1 (max deviation {np.max(np.abs(row_sums - 1.0)):.2e}). "
+            "Scheffe polynomials require simplex weights — pass archetype weights, not raw embeddings.",
+            RuntimeWarning,
+        )
+    if np.any(W < -1e-8):
+        warnings.warn(
+            f"W contains negative values (min {W.min():.2e}). "
+            "Simplex weights must be non-negative.",
+            RuntimeWarning,
+        )
+
     K = W.shape[1]
     if degree > K:
         raise ValueError(f"degree={degree} exceeds K={K}. Max meaningful degree on a {K}-simplex is {K}.")
@@ -113,10 +127,10 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False, retu
 
     # Solve normal equations with stability check
     WtW = W.T @ W
-    cond = np.linalg.cond(WtW)
 
-    # Report effective rank (SVD-based)
+    # Single SVD yields both condition number and effective rank (avoid computing twice)
     _, s_vals, _ = np.linalg.svd(WtW)
+    cond = s_vals[0] / max(s_vals[-1], np.finfo(float).tiny)
     effective_rank = int(np.sum(s_vals > s_vals[0] * 1e-10))
     # Scheffe design (no intercept) has full rank p for well-sampled simplices.
     # The sum-to-1 constraint is affine, not linear, so columns are independent.
@@ -290,60 +304,35 @@ def ols_fit(W, Y, robust_se=True, chunk_size=5000, return_covariance=False, retu
     return result_dict
 
 
-def _hc3_standard_errors(W, residuals, WtW_inv, H_diag):
-    """HC3 heteroscedasticity-consistent standard errors (vectorized).
+def _compute_sandwich(W, residuals, WtW_inv, H_diag):
+    """HC3 sandwich covariance tensor for all features.
 
-    HC3 adjusts residuals by the leverage (hat matrix diagonal) to provide
-    better finite-sample coverage than HC0/HC1. The sandwich estimator is:
-
-        Var(beta) = (W'W)^{-1} [ sum_i w_i w_i' e_i^2 / (1 - h_ii)^2 ] (W'W)^{-1}
-
-    Only the hat matrix diagonal h_ii is computed, never the full n x n matrix.
-    Uses einsum to compute all features simultaneously instead of a Python loop.
+    Computes (W'W)^{-1} [sum_i w_i w_i' e_i^2/(1-h_ii)^2] (W'W)^{-1} for all
+    features simultaneously. H_diag must be pre-clipped to [0, 1-eps] by caller.
 
     Parameters
     ----------
     W : np.ndarray [n, p]
-        Design matrix.
     residuals : np.ndarray [n, n_features]
-        OLS residuals.
     WtW_inv : np.ndarray [p, p]
-        Inverse of W'W, precomputed.
-    H_diag : np.ndarray [n]
-        Diagonal of the hat matrix, already clipped to [0, 1-eps].
+    H_diag : np.ndarray [n], pre-clipped leverage values.
 
     Returns
     -------
-    se : np.ndarray [n_features, p]
-        HC3 standard errors for each coefficient of each feature.
+    sandwich_all : np.ndarray [n_features, p, p]
     """
-    # HC3 adjustment factor: 1 / (1 - h_ii)
-    # H_diag is pre-clipped to [0, 1-1e-10] by caller, so no inf here
-    adjustment = 1.0 / (1 - H_diag)
+    e_adj_sq = (residuals * (1.0 / (1 - H_diag))[:, np.newaxis]) ** 2
+    meat_all = np.einsum('ig,ia,ib->gab', e_adj_sq, W, W)
+    return np.einsum('ab,gbc,cd->gad', WtW_inv, meat_all, WtW_inv)
 
-    # Adjusted residuals squared: [n, n_features]
-    e_adj_sq = (residuals * adjustment[:, np.newaxis]) ** 2
 
-    # Meat of sandwich for all features at once:
-    # meat[g, a, b] = sum_i e_adj_sq[i, g] * W[i, a] * W[i, b]
-    meat_all = np.einsum('ig,ia,ib->gab', e_adj_sq, W, W)  # [n_features, p, p]
-
-    # Sandwich: (W'W)^{-1} @ meat @ (W'W)^{-1}
-    sandwich_all = np.einsum('ab,gbc,cd->gad', WtW_inv, meat_all, WtW_inv)
-
-    # SE = sqrt(diag(sandwich))
-    se = np.sqrt(np.maximum(np.diagonal(sandwich_all, axis1=1, axis2=2), 0))
-
-    return se
+def _hc3_standard_errors(W, residuals, WtW_inv, H_diag):
+    """HC3 standard errors [n_features, p] — diagonal of sandwich covariance."""
+    sandwich_all = _compute_sandwich(W, residuals, WtW_inv, H_diag)
+    return np.sqrt(np.maximum(np.diagonal(sandwich_all, axis1=1, axis2=2), 0))
 
 
 def _hc3_covariance(W, residuals, WtW_inv, H_diag):
-    """Full HC3 sandwich covariance per feature (vectorized).
-
-    Returns list of [p, p] matrices, one per feature.
-    """
-    adjustment = 1.0 / (1 - H_diag)
-    e_adj_sq = (residuals * adjustment[:, np.newaxis]) ** 2
-    meat_all = np.einsum('ig,ia,ib->gab', e_adj_sq, W, W)
-    sandwich_all = np.einsum('ab,gbc,cd->gad', WtW_inv, meat_all, WtW_inv)
+    """Full HC3 sandwich covariance per feature — list of [p, p] matrices."""
+    sandwich_all = _compute_sandwich(W, residuals, WtW_inv, H_diag)
     return [sandwich_all[g] for g in range(sandwich_all.shape[0])]
