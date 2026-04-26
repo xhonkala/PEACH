@@ -99,6 +99,14 @@ coverage.xml
 # E2E test outputs (large HTML/executed notebooks)
 tests/e2e_outputs/
 tests/e2e_outputs_v12/
+tests/e2e_outputs*/
+
+# Generated run artifacts (models, run logs, reports)
+outputs/
+
+# Bulk reference data downloads (regenerate via stress_genes/gene_sets/pull_*.py)
+stress_genes/gene_sets/*.gaf
+stress_genes/gene_sets/*.obo
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
